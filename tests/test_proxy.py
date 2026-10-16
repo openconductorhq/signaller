@@ -69,7 +69,8 @@ HDRS = {"Authorization": "Bearer sk-ant-oat01-X", "anthropic-beta": "claude-code
 
 class ProxyTest(unittest.TestCase):
     def setUp(self):
-        quiet = contextlib.redirect_stderr(io.StringIO())
+        self.err = io.StringIO()
+        quiet = contextlib.redirect_stderr(self.err)
         quiet.__enter__()
         self.addCleanup(quiet.__exit__, None, None, None)
         self.a, self.l = Fake(), Fake()
@@ -84,6 +85,7 @@ class ProxyTest(unittest.TestCase):
         for s in (self.srv, self.a, self.l):
             s.shutdown()
             s.server_close()
+        self.assertNotIn("Traceback", self.err.getvalue())
 
     def post(self, body, headers=HDRS, path="/v1/messages?beta=true"):
         c = HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -149,7 +151,13 @@ class ProxyTest(unittest.TestCase):
         s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
         s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         self.assertTrue(s.recv(4096))
+        t = time.time()
         s.close()
+        # handler must notice the dead client and finish before the 0.9 s stream ends
+        while "stream=True" not in self.err.getvalue() and time.time() - t < 2:
+            time.sleep(0.01)
+        self.assertIn("status=200", self.err.getvalue())
+        self.assertLess(time.time() - t, 0.8)
         self.assertEqual(self.post(body_for("claude-opus-5-5"))[0], 200)
 
     def test_large_body(self):
