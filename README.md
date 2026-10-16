@@ -46,6 +46,7 @@ keys are never logged.
 mkdir -p ~/.config/claude-router
 cp env.example ~/.config/claude-router/env
 chmod 600 ~/.config/claude-router/env      # then set LITELLM_API_KEY
+mkdir -p ~/.config/systemd/user
 ln -s $PWD/claude-router.service ~/.config/systemd/user/
 systemctl --user enable --now claude-router
 ```

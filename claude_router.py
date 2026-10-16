@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import struct
 import sys
 import time
 from dataclasses import dataclass
@@ -96,6 +97,10 @@ def load_config(env: Mapping[str, str]) -> Config:
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
        "trailer", "trailers", "transfer-encoding", "upgrade", "host", "content-length"}
 OAUTH_BETA = "oauth-2025-04-20"
+UPSTREAM_TIMEOUT = 600
+LOOPBACK_HOST_RE = re.compile(r"(127\.0\.0\.1|localhost|\[::1\])(:\d+)?", re.I)
+MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
+                 b'"message":"claude-router: upstream ended mid-stream"}}\n\n')
 
 
 def local_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple[str, str]]:
@@ -133,6 +138,12 @@ def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
         def handle_any(self):
             t0 = time.time()
             body = self.rfile.read(int(self.headers.get("content-length") or 0))
+            # browsers (cross-origin) and DNS rebinding must not reach the injected LiteLLM key
+            if "origin" in self.headers or not LOOPBACK_HOST_RE.fullmatch(self.headers.get("host", "")):
+                self._error(403, "claude-router: forbidden origin/host")
+                print("%s route=- reason=forbidden status=403" % time.strftime("%Y-%m-%d %H:%M:%S"),
+                      file=sys.stderr, flush=True)
+                return
             route, reason = decide(self.command, self.path, body)
             model, stream = "-", False
             try:
@@ -152,8 +163,8 @@ def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
                 headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]
             u = urlsplit(base)
             Conn = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
-            conn = Conn(u.hostname, u.port, timeout=600)
-            status = 0
+            conn = Conn(u.hostname, u.port, timeout=UPSTREAM_TIMEOUT)
+            status, err = 0, ""
             try:
                 try:
                     conn.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
@@ -164,9 +175,10 @@ def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
                         conn.putheader("Content-Length", str(len(body)))
                     conn.endheaders(body)
                     resp = conn.getresponse()
-                except (OSError, http.client.HTTPException):
+                except (OSError, http.client.HTTPException) as e:
                     status = 502
-                    self._error(502, "claude-router: %s unreachable at %s" % (name, base))
+                    what = "timed out" if isinstance(e, TimeoutError) else "unreachable"
+                    self._error(502, "claude-router: %s %s at %s" % (name, what, base))
                     return
                 status = resp.status
                 self.send_response(status)
@@ -175,20 +187,29 @@ def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
                         self.send_header(k, v)
                 self.end_headers()
                 while True:
-                    chunk = resp.read1(65536)
+                    try:
+                        chunk = resp.read1(65536)
+                    except (OSError, http.client.HTTPException):
+                        chunk, err = b"", " err=midstream"
                     if not chunk:
+                        # a short content-length body ends silently; resp.length is the bytes still owed
+                        if resp.length:
+                            err = " err=midstream"
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            except (OSError, http.client.HTTPException):
-                pass  # upstream died mid-stream; closing ends the response
+                if err:  # headers are out, so tell the client the stream is truncated
+                    if resp.getheader("content-type", "").startswith("text/event-stream"):
+                        self.wfile.write(MIDSTREAM_SSE)
+                    else:  # RST, so the client sees a failure rather than a clean EOF
+                        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            except OSError:
+                pass  # client went away
             finally:
                 conn.close()
-                print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s" % (
+                print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s" % (
                     time.strftime("%Y-%m-%d %H:%M:%S"), route, reason, shown, status,
-                    (time.time() - t0) * 1000, stream), file=sys.stderr, flush=True)
+                    (time.time() - t0) * 1000, stream, err), file=sys.stderr, flush=True)
 
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = handle_any
 

@@ -5,9 +5,11 @@ import socket
 import threading
 import time
 import unittest
+from unittest import mock
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import claude_router
 from claude_router import Config, local_headers, make_server
 
 
@@ -18,6 +20,8 @@ class Fake(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), FakeHandler)
         self.seen = []
         self.error = False
+        self.die = False
+        self.hang = False
         threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
     @property
@@ -32,6 +36,8 @@ class FakeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
         self.server.seen.append((self.command, self.path, self.headers, body))
+        if self.server.hang:
+            time.sleep(0.6)
         if self.server.error:
             out = b'{"type":"error","error":{"type":"overloaded_error"}}'
             self.send_response(529)
@@ -48,8 +54,13 @@ class FakeHandler(BaseHTTPRequestHandler):
             return
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
+        if self.server.die:  # promise more than we send, then drop the connection
+            self.send_header("content-length", "1000")
         self.end_headers()
         try:
+            if self.server.die:
+                self.wfile.write(b"data: 0\n\n")
+                return
             for i in range(3):
                 self.wfile.write(b"data: %d\n\n" % i)
                 self.wfile.flush()
@@ -149,7 +160,7 @@ class ProxyTest(unittest.TestCase):
     def test_client_disconnect_mid_stream(self):
         body = body_for("claude-opus-5-5", stream=True)
         s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
-        s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
         self.assertTrue(s.recv(4096))
         t = time.time()
         s.close()
@@ -159,6 +170,41 @@ class ProxyTest(unittest.TestCase):
         self.assertIn("status=200", self.err.getvalue())
         self.assertLess(time.time() - t, 0.8)
         self.assertEqual(self.post(body_for("claude-opus-5-5"))[0], 200)
+
+    def test_midstream_upstream_death_is_an_error(self):
+        self.a.die = True
+        c = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request("POST", "/v1/messages", body_for("claude-opus-5-5", stream=True), HDRS)
+        r = c.getresponse()
+        data = b""
+        while chunk := r.read1(4096):  # read1: the forwarded content-length is deliberately short
+            data += chunk
+        c.close()
+        self.assertEqual(r.status, 200)
+        self.assertTrue(data.startswith(b"data: 0\n\n"))
+        self.assertIn(b"event: error\ndata: ", data)
+        self.assertIn(b"upstream ended mid-stream", data)
+        self.assertIn("err=midstream", self.err.getvalue())
+
+    def test_rejects_browser_origin(self):
+        s, data = self.post(body_for("claude-sonnet-5-5"), {**HDRS, "Origin": "http://evil.example"})
+        self.assertEqual(s, 403)
+        self.assertEqual(json.loads(data)["type"], "error")
+        self.assertEqual(self.l.seen + self.a.seen, [])
+
+    def test_rejects_foreign_host(self):
+        for host in ("evil.example", "evil.example:80", "127.0.0.1.evil.example"):
+            self.assertEqual(self.post(body_for("claude-sonnet-5-5"), {**HDRS, "Host": host})[0], 403, host)
+        self.assertEqual(self.l.seen + self.a.seen, [])
+        for host in ("localhost:8787", "[::1]:8787", "127.0.0.1"):
+            self.assertEqual(self.post(body_for("claude-opus-5-5"), {**HDRS, "Host": host})[0], 200, host)
+
+    def test_upstream_timeout_says_timed_out(self):
+        self.a.hang = True
+        with mock.patch.object(claude_router, "UPSTREAM_TIMEOUT", 0.2):
+            s, data = self.post(body_for("claude-opus-5-5"))
+        self.assertEqual(s, 502)
+        self.assertIn("timed out", json.loads(data)["error"]["message"])
 
     def test_large_body(self):
         body = body_for("claude-opus-5-5", {"pad": "x" * 5_000_000})
