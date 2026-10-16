@@ -15,7 +15,7 @@
 - Standard library only; no `pip install`.
 - Listen address must be loopback; default `127.0.0.1:8787`; refuse to start otherwise.
 - `LITELLM_API_KEY` required; refuse to start if unset.
-- Env vars and defaults: `CLAUDE_ROUTER_LISTEN=127.0.0.1:8787`, `CLAUDE_ROUTER_ANTHROPIC_URL=https://api.anthropic.com`, `LITELLM_URL=http://127.0.0.1:4000`, `CLAUDE_ROUTER_LOCAL_SONNET=claude-sonnet-4-5-20250929`, `CLAUDE_ROUTER_LOCAL_HAIKU=claude-haiku-4-5-20251001`.
+- Env vars and defaults: `CLAUDE_ROUTER_LISTEN=127.0.0.1:8787`, `CLAUDE_ROUTER_ANTHROPIC_URL=https://api.anthropic.com`, `LITELLM_URL=http://127.0.0.1:4000`, `CLAUDE_ROUTER_LOCAL_SONNET=claude-sonnet-4-6`, `CLAUDE_ROUTER_LOCAL_HAIKU=claude-haiku-4-5-20251001`.
 - Anthropic route: no body rewriting; path, query, headers unchanged except hop-by-hop.
 - Local route: never forward client `Authorization` / `x-api-key`; drop the `oauth-2025-04-20` beta.
 - No fallback between routes in either direction.

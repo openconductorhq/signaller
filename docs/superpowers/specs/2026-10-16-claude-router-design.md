@@ -80,11 +80,14 @@ tool call:
 
 ## Current environment
 
-- LiteLLM: Docker container `litellm`, `http://127.0.0.1:4000`, requires a
-  key (`master_key` in `~/litellm/config.yaml`). Serves Anthropic-format
-  `/v1/messages`. Model groups `claude-sonnet-4-5-20250929`,
-  `claude-opus-4-5`, `claude-haiku-4-5-20251001` all map to the single local
-  vLLM model.
+- LiteLLM: Docker container `litellm`, `http://127.0.0.1:4000`, running
+  `~/litellm/config.runtime.yaml` (mounted as `/app/config.yaml`). Requires a
+  key: the container's `LITELLM_MASTER_KEY` env var (`master_key:
+  os.environ/LITELLM_MASTER_KEY`); the `master_key` in `~/litellm/config.yaml`
+  is a stale placeholder. Serves Anthropic-format `/v1/messages`. Model groups
+  `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`, `gemma-sonnet`,
+  `gemma-haiku` and `unsloth/gemma-4-26B-A4B-it-NVFP4` all map to the single
+  local vLLM model (gemma-4-26B). `litellm_settings: drop_params: true` is set.
 - Amir reports the local model already handles Claude Code tool calls well.
 - superpowers `subagent-driven-development` requires an explicit `model` on
   every subagent dispatch, chosen by task difficulty (cheap → mechanical
@@ -170,7 +173,7 @@ Environment variables (flags optional, builder's choice):
 | `CLAUDE_ROUTER_ANTHROPIC_URL` | `https://api.anthropic.com` |
 | `LITELLM_URL` | `http://127.0.0.1:4000` |
 | `LITELLM_API_KEY` | required; refuse to start if unset |
-| `CLAUDE_ROUTER_LOCAL_SONNET` | `claude-sonnet-4-5-20250929` |
+| `CLAUDE_ROUTER_LOCAL_SONNET` | `claude-sonnet-4-6` |
 | `CLAUDE_ROUTER_LOCAL_HAIKU` | `claude-haiku-4-5-20251001` |
 
 No config file.

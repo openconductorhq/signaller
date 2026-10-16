@@ -88,7 +88,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         anthropic_url=env.get("CLAUDE_ROUTER_ANTHROPIC_URL", "https://api.anthropic.com"),
         litellm_url=env.get("LITELLM_URL", "http://127.0.0.1:4000"),
         litellm_key=key,
-        local_sonnet=env.get("CLAUDE_ROUTER_LOCAL_SONNET", "claude-sonnet-4-5-20250929"),
+        local_sonnet=env.get("CLAUDE_ROUTER_LOCAL_SONNET", "claude-sonnet-4-6"),
         local_haiku=env.get("CLAUDE_ROUTER_LOCAL_HAIKU", "claude-haiku-4-5-20251001"),
     )
 

@@ -52,8 +52,9 @@ systemctl --user enable --now claude-router
 
 The router won't start if `LITELLM_API_KEY` is unset or if
 `CLAUDE_ROUTER_LISTEN` isn't a loopback address; it exits with code 2.
-`CLAUDE_ROUTER_LOCAL_SONNET` and `CLAUDE_ROUTER_LOCAL_HAIKU` must name model
-groups that LiteLLM actually serves (`GET /v1/models`).
+`LITELLM_API_KEY` is the LiteLLM container's `LITELLM_MASTER_KEY`.
+`CLAUDE_ROUTER_LOCAL_SONNET` and `CLAUDE_ROUTER_LOCAL_HAIKU` default to the
+live LiteLLM groups; if yours uses different names (`GET /v1/models`), set them.
 
 To turn it on in Claude Code, add this to `~/.claude/settings.json`:
 
@@ -116,7 +117,6 @@ Notes:
 - The key is the container's `LITELLM_MASTER_KEY`. The `master_key` in
   `~/litellm/config.yaml` is a placeholder; the live config is
   `config.runtime.yaml`.
-- The live LiteLLM has no `claude-sonnet-4-5-20250929` group. Its sonnet
-  group is `claude-sonnet-4-6`, so the run used
-  `CLAUDE_ROUTER_LOCAL_SONNET=claude-sonnet-4-6`. Set the same in
-  `~/.config/claude-router/env`, or add the group in LiteLLM.
+- The run used the default model groups (`claude-sonnet-4-6`,
+  `claude-haiku-4-5-20251001`). If your LiteLLM uses different group names,
+  set `CLAUDE_ROUTER_LOCAL_SONNET` / `CLAUDE_ROUTER_LOCAL_HAIKU`.

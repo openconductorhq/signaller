@@ -95,7 +95,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(c.anthropic_url, "https://api.anthropic.com")
         self.assertEqual(c.litellm_url, "http://127.0.0.1:4000")
         self.assertEqual(c.litellm_key, "k")
-        self.assertEqual(c.local_sonnet, "claude-sonnet-4-5-20250929")
+        self.assertEqual(c.local_sonnet, "claude-sonnet-4-6")
         self.assertEqual(c.local_haiku, "claude-haiku-4-5-20251001")
 
     def test_config_requires_key(self):
