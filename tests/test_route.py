@@ -77,6 +77,11 @@ class RouteTests(unittest.TestCase):
         for args in [("GET", "/api/hello", b""), ("POST", "/api/oauth/x", b"{}"), ("POST", "/v1/messages", b"not json")]:
             self.assertEqual(decide(*args), ("anthropic", "passthrough"))
 
+    def test_non_string_model_passthrough(self):
+        for m in (None, 5, ["x"]):
+            body = json.dumps({"model": m, "messages": [user("hi")]}).encode()
+            self.assertEqual(decide("POST", "/v1/messages", body), ("anthropic", "passthrough"))
+
     def test_local_model(self):
         self.assertEqual(local_model("claude-haiku-5-5", "S", "H"), "H")
         self.assertEqual(local_model("claude-opus-5-5", "S", "H"), "S")
