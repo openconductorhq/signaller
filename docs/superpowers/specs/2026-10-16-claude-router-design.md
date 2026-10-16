@@ -29,10 +29,13 @@ launches `claude` with the env var set — plain terminal, openconductor,
 ## Goals
 
 - One Claude Code session; zero per-session ritual once installed.
-- Three routing signals, all supported:
+- Routing signals, all supported:
   1. **Prompt tag** in the human message (`#local` / `#plan`).
-  2. **Model alias** (e.g. `/model local`, or `model:` in an agent definition).
-  3. **Default by role**: main session → Anthropic, subagents → local.
+  2. **Model tier**: opus → Anthropic; sonnet/haiku → local. This also
+     gives "main session → Anthropic" (main runs opus) and lets
+     superpowers' per-subagent model choice decide each subagent's side.
+  (An earlier draft also routed on Claude Code's internal subagent marker;
+  dropped because model tier covers it without an undocumented signal.)
 - Full fidelity on the Anthropic route: streaming, thinking, prompt caching,
   betas, OAuth — byte-for-byte pass-through except hop-by-hop headers.
 - Visible: every routed request logs where it went and why.
@@ -53,8 +56,6 @@ launches `claude` with the env var set — plain terminal, openconductor,
 - **Silent rerouting.** If LiteLLM is down, the request fails with a clear
   error; it must never quietly fall back to Anthropic (burns subscription,
   hides the problem), and Anthropic errors never fall back to local.
-- **Silent misrouting when Claude Code changes.** If the subagent marker
-  disappears, the router must say so loudly (see *Marker health*).
 - Listening on anything but loopback.
 - Logging prompt content or secrets.
 
@@ -85,6 +86,10 @@ tool call:
   `claude-opus-4-5`, `claude-haiku-4-5-20251001` all map to the single local
   vLLM model.
 - Amir reports the local model already handles Claude Code tool calls well.
+- superpowers `subagent-driven-development` requires an explicit `model` on
+  every subagent dispatch, chosen by task difficulty (cheap → mechanical
+  implementation, standard → integration/review, most capable → design and
+  fix-loop escalation). An omitted model inherits the session model (opus).
 
 ## Routing rules
 
@@ -106,21 +111,26 @@ First match wins:
    wrote, so the orchestrator (or a plan) can force a subagent either way by
    putting the tag in the task prompt.
    Tags are left in the text (not stripped).
-2. **Model alias.** If `model` equals a configured local alias → local.
-   Defaults: `local` → LiteLLM sonnet model, `local-haiku` → LiteLLM haiku
-   model. (Builder: verify Claude Code accepts these strings in `/model`,
-   `--model`, and agent `model:` frontmatter; if it rejects a bare word,
-   pick aliases it does accept, e.g. `claude-local`, and document them.)
-3. **Role.** First system block contains `cc_is_subagent=true` → local;
-   otherwise → Anthropic.
+2. **Model tier.** `model` contains `haiku` or `sonnet` → local. Anything
+   else (opus, unknown) → Anthropic.
+
+### Main session on local (accepted limitation)
+
+`#local` or `/model sonnet` in the **main** session works, but later
+Anthropic requests then carry local-generated assistant turns (e.g. thinking
+blocks without valid Anthropic signatures) and Anthropic may reject them,
+breaking that conversation. Accepted: the router does no history cleaning.
+README documents it: use local in the main session only for throwaway
+conversations; tags are mainly for steering subagents. Note that a main
+session started on sonnet would go local entirely — README should say to
+keep the main session on opus.
 
 ## Local route behaviour
 
 - Target: `${LITELLM_URL}/v1/messages` (or `/count_tokens`), same query string.
-- Model rewrite: alias → its mapped model; otherwise any model whose id
-  contains `haiku` → LiteLLM haiku model; everything else → LiteLLM sonnet
-  model. Mapped names are configurable; defaults are the two LiteLLM groups
-  above.
+- Model rewrite: model id containing `haiku` → LiteLLM haiku model;
+  everything else (sonnet, or opus forced by `#local`) → LiteLLM sonnet
+  model. Both names configurable; defaults are the two LiteLLM groups above.
 - Headers: drop `Authorization`, `x-api-key`, hop-by-hop headers; set
   `x-api-key: ${LITELLM_API_KEY}` (or `Authorization: Bearer`, whichever
   LiteLLM accepts — builder verifies). Drop the `oauth-2025-04-20` beta;
@@ -144,19 +154,10 @@ First match wins:
 Both routes must stream SSE through without buffering (flush each chunk
 immediately). Request bodies are read fully (needed for routing) and replayed.
 
-## Marker health
-
-Every `/v1/messages` request whose first system block lacks
-`x-anthropic-billing-header` is counted. On the first such request, and then
-at most once per 10 minutes, log a `WARN` line: "billing header missing —
-subagent detection blind; all non-tagged traffic is going to Anthropic".
-Also expose the counters on `GET /healthz` (served by the router itself,
-not proxied): uptime, requests per route, marker-missing count.
-
 ## Logging
 
 One line per proxied request to stderr:
-`time route=<anthropic|local> reason=<tag:plan|tag:local|alias|subagent|main|passthrough> model=<in>[→<out>] status=<code> ms=<latency> stream=<bool>`.
+`time route=<anthropic|local> reason=<tag:plan|tag:local|tier|passthrough> model=<in>[→<out>] status=<code> ms=<latency> stream=<bool>`.
 Never log bodies, prompts, or credential values.
 
 ## Configuration
@@ -171,7 +172,6 @@ Environment variables (flags optional, builder's choice):
 | `LITELLM_API_KEY` | required; refuse to start if unset |
 | `CLAUDE_ROUTER_LOCAL_SONNET` | `claude-sonnet-4-5-20250929` |
 | `CLAUDE_ROUTER_LOCAL_HAIKU` | `claude-haiku-4-5-20251001` |
-| `CLAUDE_ROUTER_ALIASES` | `local=sonnet,local-haiku=haiku` |
 
 No config file.
 
@@ -194,7 +194,8 @@ No config file.
   `FlushInterval: -1`). Single binary. Chosen because openconductor is Go and
   the stdlib proxy streams correctly.
 - New repo `~/Development/claude-router`.
-- Model rewrite tiering (haiku→haiku, else→sonnet).
+- Model tier as the default signal (opus → Anthropic, sonnet/haiku → local);
+  local rewrite haiku→haiku, else→sonnet.
 - Both-tags → Anthropic.
 - 502 on LiteLLM down, no fallback.
 
@@ -203,20 +204,20 @@ No config file.
 - Table-driven unit tests for the routing decision: tag in latest human
   message, tag only in an older message (ignored), tag inside a
   system-reminder block (ignored), tool_result-only trailing message, both
-  tags, alias, subagent marker, main session, missing billing header,
-  unparsable body, non-messages path.
+  tags, `#plan` on a haiku request, `#local` on an opus request, opus /
+  sonnet / haiku / unknown model, unparsable body, non-messages path.
 - One integration test with two `httptest` upstreams: verifies streamed
   chunks arrive before the upstream finishes, credentials are swapped on the
   local route and untouched on the Anthropic route, model rewrite applied.
 - Manual acceptance (in README): with router + LiteLLM running,
   1. `claude -p "hi"` → log shows `route=anthropic reason=main`.
   2. `claude -p "#local hi"` → `route=local reason=tag:local`.
-  3. `claude -p "use a general-purpose subagent to say hi"` → main on
-     anthropic, subagent on local.
+  3. `claude -p "use a general-purpose subagent with model haiku to say hi"`
+     → main on anthropic (tier), subagent on local (tier).
   4. Run a real superpowers plan via `subagent-driven-development` and
      confirm implementers hit local while the orchestrator stays on Anthropic.
 
 ## Left to the builder
 
 Package layout, flag parsing, log format details beyond the fields above,
-exact healthz JSON shape, Makefile contents.
+Makefile contents.
