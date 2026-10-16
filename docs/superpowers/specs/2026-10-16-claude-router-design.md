@@ -177,7 +177,7 @@ No config file.
 
 ## Install / run
 
-- `go install` (or `make install`) into `~/.local/bin/claude-router`.
+- Run in place from the repo: `python3 -I /path/to/claude_router.py`.
 - systemd **user** unit `claude-router.service`, `Restart=on-failure`,
   key loaded from an `EnvironmentFile` (`~/.config/claude-router/env`,
   mode 0600). Unit file lives in the repo.
@@ -190,9 +190,10 @@ No config file.
 
 ## Build decisions (Claude's calls, overridable)
 
-- Go, standard library only (`net/http`, `httputil.ReverseProxy` with
-  `FlushInterval: -1`). Single binary. Chosen because openconductor is Go and
-  the stdlib proxy streams correctly.
+- Python 3.12, standard library only (`http.server.ThreadingHTTPServer` +
+  `http.client`), single module. Changed from Go at planning time: Go is not
+  installed on the host and Python is; the spike already proved the approach
+  in Python.
 - New repo `~/Development/claude-router`.
 - Model tier as the default signal (opus → Anthropic, sonnet/haiku → local);
   local rewrite haiku→haiku, else→sonnet.
@@ -219,5 +220,4 @@ No config file.
 
 ## Left to the builder
 
-Package layout, flag parsing, log format details beyond the fields above,
-Makefile contents.
+Module layout, log format details beyond the fields above.
