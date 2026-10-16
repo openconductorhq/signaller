@@ -1,12 +1,15 @@
 """claude-router: route Claude Code requests to Anthropic or a local LiteLLM."""
 import http.client
 import http.server
+import ipaddress
 import json
+import os
 import re
+import socket
 import sys
 import time
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
 ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
@@ -63,6 +66,31 @@ class Config:
     litellm_key: str
     local_sonnet: str
     local_haiku: str
+
+
+def load_config(env: Mapping[str, str]) -> Config:
+    key = env.get("LITELLM_API_KEY")
+    if not key:
+        raise ValueError("LITELLM_API_KEY is required")
+    listen = env.get("CLAUDE_ROUTER_LISTEN", "127.0.0.1:8787")
+    host, _, port = listen.rpartition(":")
+    host = host.strip("[]")
+    try:
+        loopback = host == "localhost" or ipaddress.ip_address(host).is_loopback
+        port = int(port)
+    except ValueError:
+        loopback = False
+    if not loopback:
+        raise ValueError("CLAUDE_ROUTER_LISTEN must be a loopback host:port, got %r" % listen)
+    return Config(
+        listen_host=host,
+        listen_port=port,
+        anthropic_url=env.get("CLAUDE_ROUTER_ANTHROPIC_URL", "https://api.anthropic.com"),
+        litellm_url=env.get("LITELLM_URL", "http://127.0.0.1:4000"),
+        litellm_key=key,
+        local_sonnet=env.get("CLAUDE_ROUTER_LOCAL_SONNET", "claude-sonnet-4-5-20250929"),
+        local_haiku=env.get("CLAUDE_ROUTER_LOCAL_HAIKU", "claude-haiku-4-5-20251001"),
+    )
 
 
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
@@ -164,6 +192,28 @@ def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
 
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = handle_any
 
-    srv = http.server.ThreadingHTTPServer((cfg.listen_host, cfg.listen_port), Handler)
+    cls = http.server.ThreadingHTTPServer
+    if ":" in cfg.listen_host:
+        cls = type("V6Server", (cls,), {"address_family": socket.AF_INET6})
+    srv = cls((cfg.listen_host, cfg.listen_port), Handler)
     srv.daemon_threads = True
     return srv
+
+
+def main() -> None:
+    try:
+        cfg = load_config(os.environ)
+    except ValueError as e:
+        print("claude-router: %s" % e, file=sys.stderr)
+        sys.exit(2)
+    srv = make_server(cfg)
+    print("listening on %s:%d; anthropic=%s litellm=%s" % (
+        cfg.listen_host, cfg.listen_port, cfg.anthropic_url, cfg.litellm_url), file=sys.stderr, flush=True)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

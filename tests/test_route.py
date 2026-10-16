@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from claude_router import decide, local_model
+from claude_router import decide, load_config, local_model
 
 
 def body(messages, model="claude-opus-5-5"):
@@ -86,6 +86,30 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(local_model("claude-haiku-5-5", "S", "H"), "H")
         self.assertEqual(local_model("claude-opus-5-5", "S", "H"), "S")
         self.assertEqual(local_model("claude-sonnet-5-5", "S", "H"), "S")
+
+
+class ConfigTests(unittest.TestCase):
+    def test_config_defaults(self):
+        c = load_config({"LITELLM_API_KEY": "k"})
+        self.assertEqual((c.listen_host, c.listen_port), ("127.0.0.1", 8787))
+        self.assertEqual(c.anthropic_url, "https://api.anthropic.com")
+        self.assertEqual(c.litellm_url, "http://127.0.0.1:4000")
+        self.assertEqual(c.litellm_key, "k")
+        self.assertEqual(c.local_sonnet, "claude-sonnet-4-5-20250929")
+        self.assertEqual(c.local_haiku, "claude-haiku-4-5-20251001")
+
+    def test_config_requires_key(self):
+        with self.assertRaises(ValueError):
+            load_config({})
+
+    def test_config_rejects_non_loopback(self):
+        for listen in ("0.0.0.0:8787", "192.168.1.5:8787", "example.com:8787"):
+            with self.assertRaises(ValueError):
+                load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": listen})
+        c = load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": "localhost:9000"})
+        self.assertEqual((c.listen_host, c.listen_port), ("localhost", 9000))
+        c = load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": "[::1]:9000"})
+        self.assertEqual((c.listen_host, c.listen_port), ("::1", 9000))
 
 
 if __name__ == "__main__":
