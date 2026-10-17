@@ -19,7 +19,7 @@ function el(tag, attrs, ...kids) {
 const trk = (t, lower) => el("span", { class: t === "local" ? "to-l" : "to-a" }, t === "local" ? (lower ? "local" : "Local") : "Anthropic");
 
 async function api(method, path, body) {
-  const opt = { method, headers: {} };
+  const opt = { method, headers: {}, signal: AbortSignal.timeout(5000) };  // a stalled fetch must not stop polling
   if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
   const r = await fetch("/ui/api/" + path, opt);
   let j = null;
@@ -58,7 +58,7 @@ async function tick() {
     $("offline").hidden = true;
     applyState(st);
     addDeps(deps);
-    if (ticks++ % 5 === 0) await loadTurns();
+    if (ticks++ % 5 === 0) await loadTurns().catch((e) => showErr($("dblErr"), "Couldn't load doubled turns: " + e.message));
   } catch (e) {
     $("offline").hidden = false;
   } finally {
@@ -310,7 +310,7 @@ function highlight() {
 
 function openEditor(i) {
   const r = i == null ? null : cfg.rules[i];
-  ed = { i, orig: r ? r.name : null };
+  ed = { orig: r ? r.name : null };
   $("edTitle").textContent = r ? "Edit rule" : "New rule";
   $("edName").value = r ? r.name : "";
   $("edText").value = r ? r.text : "";
@@ -341,10 +341,10 @@ async function preview() {
   if (!ed) return;
   const text = $("edText").value, msg = $("edMsg"), seq = ++edSeq;
   if (!text.trim()) { msg.className = "edmsg"; msg.replaceChildren("Write one ", el("code", {}, "when … go …"), " per line."); $("edHits").replaceChildren(); return; }
-  // new rules go to the top of the Rulebook; an edited rule keeps its place
-  const name = ed.orig || $("edName").value.trim() || "new rule";
+  const name = ed.orig || $("edName").value.trim() || "new rule", pos = edPos();
+  if (pos < 0) { msg.className = "edmsg no"; msg.replaceChildren(GONE); $("edHits").replaceChildren(); return; }
   try {
-    const p = await api("POST", "preview", { rule: { name, text }, position: ed.i == null ? 0 : ed.i });
+    const p = await api("POST", "preview", { rule: { name, text }, position: pos });
     if (seq !== edSeq) return;
     msg.className = "edmsg ok";
     msg.replaceChildren(`✓ Valid. In your last ${p.count} requests this would have matched ${p.matched}, and changed the track for ${p.changed} of them.`);
@@ -370,19 +370,26 @@ async function preview() {
   }
 }
 
+// Resolved by name each time: the Rulebook may be reordered or edited while the editor is open.
+// New rules go to the top; an edited rule keeps its place; -1 = the rule being edited is gone.
+const edPos = () => (ed.orig == null ? 0 : cfg.rules.findIndex((r) => r.name === ed.orig));
+const GONE = "The rule you were editing was deleted or renamed meanwhile. Cancel and start again.";
 $("edSave").addEventListener("click", async () => {
   if (!ed) return;
   const name = $("edName").value.trim(), text = $("edText").value.replace(/\s+$/, "");
   if (!name) { showErr($("edErr"), "Give the rule a name."); $("edName").focus(); return; }
-  const old = ed.i == null ? null : cfg.rules[ed.i];
+  const pos = edPos();
+  if (pos < 0) { showErr($("edErr"), GONE); return; }
+  const old = ed.orig == null ? null : cfg.rules[pos];
   const rule = { name, kind: "dsl", enabled: old ? old.enabled : true, text, builtin: old ? old.builtin : null };
   const rs = [...cfg.rules];
-  if (old) rs[ed.i] = rule; else rs.unshift(rule);
+  if (old) rs[pos] = rule; else rs.unshift(rule);
   if (await save(withRules(rs), $("edErr"))) { ed.orig = name; closeEditor(); }
 });
 
 /* ---------- departures ---------- */
 let lastId = 0, minId = null, firstLoad = true;
+const LIVE_MAX = 300;
 function shortReason(reason, row) {
   if (!reason) return "";
   if (reason === "lever") return "lever";
@@ -408,23 +415,24 @@ function why(r) {
 }
 function depRow(r) {
   const err = isErr(r.status), c = err ? "x" : r.track === "local" ? "l" : "a";
-  const row = el("div", { class: "dep", role: "button", tabindex: 0, "aria-expanded": "false", "data-k": "dep:" + r.id },
+  const head = el("div", { class: "dephead", role: "button", tabindex: 0, "aria-expanded": "false", "data-k": "dep:" + r.id },
     el("time", { datetime: new Date(r.ts * 1000).toISOString() }, hms(r.ts)),
     el("span", { class: "sw " + c, role: "img", "aria-label": err ? "error" : NAME[r.track] }),
     el("span", { class: "what" }, r.preview || "(no text)"),
     el("span", { class: "why" + (err ? " x" : "") }, why(r), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄")));
-  const toggle = () => toggleDep(row, r);
-  row.addEventListener("click", (e) => { if (!e.target.closest(".explain")) toggle(); });
-  row.addEventListener("keydown", (e) => { if (e.target === row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggle(); } });
+  const row = el("div", { class: "dep", "data-id": r.id }, head), toggle = () => toggleDep(row, head, r);
+  head.addEventListener("click", toggle);
+  head.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
   return row;
 }
-async function toggleDep(row, r) {
-  if (row.getAttribute("aria-expanded") === "true") {
-    row.setAttribute("aria-expanded", "false");
+async function toggleDep(row, head, r) {
+  const open = head.getAttribute("aria-expanded") !== "true";
+  head.setAttribute("aria-expanded", String(open));
+  row.classList.toggle("open", open);
+  if (!open) {
     row.querySelector(".explain")?.remove();
     return;
   }
-  row.setAttribute("aria-expanded", "true");
   const box = el("div", { class: "explain" }, "Loading…");
   row.append(box);
   try {
@@ -464,6 +472,13 @@ function addDeps(rows) {
   }
   box.prepend(frag);
   lastId = Math.max(lastId, rows[0].id);
+  // ponytail: live rows capped at LIVE_MAX so a long-open tab stays light; once "Load older" was used we keep
+  // everything the user asked for (trimming then would leave a gap between live and older rows).
+  if (!box.querySelector(".older") && box.children.length > LIVE_MAX) {
+    while (box.children.length > LIVE_MAX) box.lastElementChild.remove();
+    minId = Number(box.lastElementChild.dataset.id);
+    $("older").hidden = false;
+  }
   if (minId == null) { minId = rows[rows.length - 1].id; $("older").hidden = rows.length < 200; }
   $("depEmpty").hidden = true;
   if (!wasFirst) animate([...rows].reverse());
@@ -471,7 +486,7 @@ function addDeps(rows) {
 $("older").addEventListener("click", async () => {
   try {
     const rows = await api("GET", "departures?before=" + minId);
-    $("deps").append(...rows.map(depRow));
+    $("deps").append(...rows.map((r) => { const n = depRow(r); n.classList.add("older"); return n; }));
     if (rows.length) minId = rows[rows.length - 1].id;
     $("older").hidden = rows.length < 200;
   } catch (e) {
