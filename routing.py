@@ -140,10 +140,14 @@ DEFAULT_CONFIG = RoutingConfig(
 )
 
 
+def _num(v, lo, hi, msg):
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:  # nan fails the range too
+        raise ValueError(msg)
+    return v
+
+
 def _unit(v, what):
-    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 1:
-        raise ValueError(f"{what} must be 0–1")
-    return float(v) if isinstance(v, float) else v
+    return _num(v, 0, 1, f"{what} must be 0–1")
 
 
 def _track(v, what):
@@ -176,7 +180,8 @@ def config_from_json(obj: dict) -> RoutingConfig:
         d = obj["doubling"]
         dbl = Doubling(_unit(d["rate"], "doubling rate"), str(d["tag"]), bool(d["when_local"]), bool(d["when_anthropic"]))
         return RoutingConfig(obj["lever"], otherwise, rules,
-                             ClassifierSettings(str(c["model"]), thr, float(c["timeout_s"]), labels), dbl)
+                             ClassifierSettings(str(c["model"]), thr,
+                                                float(_num(c["timeout_s"], 0.1, 30, "classifier time limit must be 0.1–30 s")), labels), dbl)
     except (KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"bad config: {e!r}") from None
 

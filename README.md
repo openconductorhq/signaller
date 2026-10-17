@@ -132,7 +132,7 @@ requests (kept in memory only, so after a restart it covers only newer ones).
 
 ### Switching tracks mid-conversation
 
-Same limitation as above, easier to hit now: once a conversation has had
+Same limitation as [Main session on local](#main-session-on-local-accepted-limitation) below, easier to hit now: once a conversation has had
 local-generated turns (lever on Local, `#local`, or a rule or the classifier
 sending the main session local), sending it back to Anthropic may be rejected.
 The router does no history cleaning. If it fails, start a new session. A doubled

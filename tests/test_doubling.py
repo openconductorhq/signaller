@@ -311,6 +311,9 @@ class DoublingTest(unittest.TestCase):
         with mock.patch.object(self.app.doubler, "turn_for", side_effect=RuntimeError("boom")):
             self.assertEqual(self.post(msg("x")), (200, SSE))
         self.assertIn("doubling failed: RuntimeError", self.err.getvalue())
+        t = time.time()  # the log line comes just after the client has the response
+        while "shadow=-" not in self.err.getvalue() and time.time() - t < 2:
+            time.sleep(0.01)
         self.assertIn("shadow=-", self.err.getvalue())
 
     def test_thread_start_failure_releases_cap(self):

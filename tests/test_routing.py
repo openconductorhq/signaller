@@ -250,6 +250,9 @@ class ConfigJsonTests(unittest.TestCase):
             (j(classifier={**cl, "labels": [{"name": "a", "description": "d", "track": "x"}]}), "label track must be anthropic or local"),
             (edit(0, text="when tag is plan go"), "rule 'Tags in your message': line 1, col 21: expected 'anthropic' or 'local'"),
         ]
+        for bad in ("inf", 1e300, float("nan"), float("inf"), -1, 0.05, 31, True):
+            cases.append((j(classifier={**cl, "timeout_s": bad}), "classifier time limit must be 0.1\u201330 s"))
+        cases.append((j(classifier={**cl, "threshold": float("nan")}), "classifier threshold must be 0\u20131"))
         for obj, msg in cases:
             with self.assertRaises(ValueError) as cm:
                 config_from_json(obj)

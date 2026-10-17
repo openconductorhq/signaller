@@ -7,6 +7,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import struct
 import sys
 import threading
@@ -20,7 +21,7 @@ from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from routing import Features, RoutingConfig, is_routed, route as decide_route
-from store import Store, load_console_config, save_console_config
+from store import NullStore, Store, load_console_config, save_console_config
 
 def local_model(model: str, sonnet: str, haiku: str) -> str:
     return haiku if "haiku" in model else sonnet
@@ -111,7 +112,12 @@ class App:
         self.cfg, self.config_dir = cfg, config_dir
         self.routing, self.banner = load_console_config(os.path.join(config_dir, "console.json"))
         self.classifier = Classifier(cfg.litellm_url, cfg.litellm_key)
-        self.store = Store(os.path.join(config_dir, "stats.db"))
+        try:
+            self.store = Store(os.path.join(config_dir, "stats.db"))
+        except (OSError, sqlite3.Error) as e:  # broken stats must never cost Claude Code its router
+            print("stats off: %s" % e, file=sys.stderr, flush=True)
+            self.store = NullStore()
+            self.banner = " ".join(filter(None, [self.banner, "Stats are off: %s." % e]))
         self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
         self.started = time.time()
         self.doubler = Doubler(self.store, open_upstream)
@@ -124,7 +130,7 @@ class App:
 
 
 def default_config_dir() -> str:
-    return os.environ.get("CLAUDE_ROUTER_CONFIG_DIR") or os.path.expanduser("~/.config/claude-router")
+    return os.path.expanduser(os.environ.get("CLAUDE_ROUTER_CONFIG_DIR") or "~/.config/claude-router")
 
 
 def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTTPServer:
@@ -149,17 +155,25 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             p = urlsplit(self.path).path
             if p == "/ui" or p.startswith("/ui/"):
                 return console.handle_ui(self, app)
+            if p == "/favicon.ico":  # browsers ask for it on their own; never let it reach Anthropic
+                return self._error(404, "not found")
             t0 = time.time()
             body = self.rfile.read(int(self.headers.get("content-length") or 0))
             # browsers (cross-origin) and DNS rebinding must not reach the injected LiteLLM key
             if "origin" in self.headers or not LOOPBACK_HOST_RE.fullmatch(self.headers.get("host", "")):
                 self._error(403, "claude-router: forbidden origin/host")
-                print("%s route=- reason=forbidden status=403" % time.strftime("%Y-%m-%d %H:%M:%S"),
+                print("%s route=- reason=forbidden status=403 shadow=-" % time.strftime("%Y-%m-%d %H:%M:%S"),
                       file=sys.stderr, flush=True)
                 return
             routing = app.routing  # read once; a concurrent set_routing doesn't affect this request
-            f = Features.from_body(body) if is_routed(self.command, self.path) else None
-            d = decide_route(routing, f, app.classifier) if f else None
+            try:  # a bad saved config must answer, not drop the connection; never guess a track
+                f = Features.from_body(body) if is_routed(self.command, self.path) else None
+                d = decide_route(routing, f, app.classifier) if f else None
+            except Exception as e:
+                self._error(500, "claude-router: routing failed")
+                print("%s route=- reason=error status=500 err=%s shadow=-" % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__), file=sys.stderr, flush=True)
+                return
             route, reason = (d.track, d.reason) if d else ("anthropic", "passthrough")
             model, stream = "-", False
             try:
@@ -264,7 +278,12 @@ def main() -> None:
     except ValueError as e:
         print("claude-router: %s" % e, file=sys.stderr)
         sys.exit(2)
-    srv = make_server(cfg, App(cfg, default_config_dir()))
+    try:
+        app = App(cfg, default_config_dir())
+    except OSError as e:
+        print("claude-router: config dir unusable: %s" % e, file=sys.stderr)
+        sys.exit(2)
+    srv = make_server(cfg, app)
     print("listening on %s:%d; anthropic=%s litellm=%s" % (
         cfg.listen_host, cfg.listen_port, cfg.anthropic_url, cfg.litellm_url), file=sys.stderr, flush=True)
     try:

@@ -6,6 +6,7 @@ FIELDS = {"text": "text", "tag": "tags", "tier": "word", "model": "text",
           "tokens": "number", "subagent": "bool", "label": "word"}
 KEYWORDS = {"when", "go", "and", "or", "not", "is", "contains", "matches"}
 _TOK = re.compile(r'\s*(?:(?P<op>>=|<=|>|<)|(?P<par>[()])|(?P<word>#?[A-Za-z0-9_.-]+)|(?P<str>")|(?P<re>/))')
+MAX_TERMS = 200  # comparisons + nots per line; keeps evaluate's recursion far from Python's limit
 _NUM = re.compile(r"(\d+(?:\.\d+)?)(k?)$", re.I)
 
 
@@ -62,7 +63,7 @@ def _lex(s, ln):
 
 class _P:
     def __init__(self, toks, ln):
-        self.t, self.i, self.ln = toks, 0, ln
+        self.t, self.i, self.ln, self.n = toks, 0, ln, 0
 
     def peek(self):
         return self.t[self.i] if self.i < len(self.t) else None
@@ -102,7 +103,13 @@ class _P:
             a = ("and", a, self.not_())
         return a
 
+    def term(self):
+        self.n += 1
+        if self.n > MAX_TERMS:
+            self.err("rule is too long")
+
     def not_(self):
+        self.term()
         if self.kw("not"):
             self.i += 1
             return ("not", self.not_())

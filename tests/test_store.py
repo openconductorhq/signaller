@@ -99,3 +99,27 @@ def test_bad_rows_dont_poison_batch(tmp_path):
     s.close()
     assert [r["id"] for r in s.departures()] == [3, 1]
     assert s.dropped == 2
+
+
+def test_late_row_with_lower_id_found_by_overlapping_since(tmp_path):
+    # ids are taken at request start, rows written at the end: a long request lands after a later one
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    a, b = s.next_id(), s.next_id()
+    s.record_request(req(b, now))
+    s.close()
+    assert [r["id"] for r in s.departures(since_id=0)] == [b]
+    s = Store(str(tmp_path / "s.db"))
+    s.record_request(req(a, now - 30))
+    s.close()
+    assert [r["id"] for r in s.departures(since_id=max(0, b - 50))] == [b, a]
+
+
+def test_null_store_is_inert():
+    n = store.NullStore()
+    assert n.next_id() + 1 == n.next_id()
+    n.record_request(req(1, 0)); n.record_pair({}); n.record_turn({})
+    assert n.dropped == 3
+    assert n.departures() == [] and n.request(1) is None and n.turns() == [] and n.turn("x") is None
+    assert n.pair_for_request(1) is None and n.set_verdict("x", "local") is False
+    assert n.stats(time.time())["last_hour_total"] == 0
+    n.forget_pairs(); n.close()

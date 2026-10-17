@@ -222,3 +222,28 @@ class Store:
                 c.execute("DELETE FROM turns")
         finally:
             c.close()
+
+
+class NullStore:
+    """Stats off (stats.db unusable): same interface, writes dropped, reads empty."""
+    def __init__(self):
+        self.dropped, self._ids, self._dlock = 0, itertools.count(1), threading.Lock()
+    def next_id(self): return next(self._ids)
+    def _drop(self):
+        with self._dlock:
+            self.dropped += 1
+    def record_request(self, row): self._drop()
+    def record_pair(self, row): self._drop()
+    def record_turn(self, row): self._drop()
+    def close(self): pass
+    def departures(self, *a, **k): return []
+    def request(self, id): return None
+    def pair_for_request(self, request_id): return None
+    def turns(self, *a, **k): return []
+    def turn(self, turn_id): return None
+    def set_verdict(self, turn_id, verdict): return False
+    def forget_pairs(self): pass
+
+    def stats(self, now):
+        return {"anthropic_pct": 0, "local_pct": 0, "last_hour_total": 0, "per_minute": 0, "errors_last_hour": 0,
+                "doubled_turns_today": 0, "judged_today": 0, "tally": {"local": 0, "anthropic": 0, "same": 0}}

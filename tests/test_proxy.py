@@ -40,6 +40,9 @@ class FakeHandler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def do_GET(self):
+        self.do_POST()
+
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
         self.server.seen.append((self.command, self.path, self.headers, body))
@@ -293,6 +296,64 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(len(out), 2)
         for o in out:
             self.assertEqual(o.count(b"data:"), 3)
+
+
+    def test_routing_failure_is_a_500_not_a_dropped_connection(self):
+        with mock.patch.object(claude_router, "decide_route", side_effect=RuntimeError("boom")):
+            s, data = self.post(body_for("claude-sonnet-5-5"))
+        self.assertEqual(s, 500)
+        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: routing failed")
+        self.assertEqual(self.l.seen + self.a.seen, [])
+        self.logged()
+        self.assertRegex(self.err.getvalue(), r"route=- reason=error status=500 .*shadow=-")
+        self.assertNotIn("Traceback", self.err.getvalue())
+
+    def test_forbidden_log_line_has_shadow(self):
+        self.post(body_for("claude-sonnet-5-5"), {**HDRS, "Origin": "http://evil.example"})
+        self.logged()
+        self.assertIn("reason=forbidden status=403 shadow=-", self.err.getvalue())
+
+    def test_favicon_never_reaches_upstream(self):
+        c = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request("GET", "/favicon.ico")
+        r = c.getresponse()
+        r.read()
+        c.close()
+        self.assertEqual(r.status, 404)
+        self.assertEqual(self.l.seen + self.a.seen, [])
+
+    def test_broken_stats_db_keeps_routing(self):
+        for make in (lambda p: os.mkdir(p), lambda p: open(p, "wb").write(b"not a database" * 100)):
+            self.srv.shutdown()
+            self.srv.server_close()
+            self.app.store.close()
+            self.dir = tempfile.mkdtemp()
+            make(os.path.join(self.dir, "stats.db"))
+            cfg = Config("127.0.0.1", 0, self.a.url, self.l.url, "LK", "S", "H")
+            self.app = App(cfg, self.dir)
+            self.assertTrue(self.app.banner.startswith("Stats are off: "), self.app.banner)
+            self.srv = make_server(cfg, self.app)
+            threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+            self.port = self.srv.server_address[1]
+            self.assertEqual(self.post(body_for("claude-opus-5-5"))[0], 200)
+            self.assertEqual(self.app.store.departures(), [])
+
+
+class MainTest(unittest.TestCase):
+    def test_config_dir_tilde_expanded(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_ROUTER_CONFIG_DIR": "~/x-router"}):
+            self.assertEqual(claude_router.default_config_dir(), os.path.expanduser("~/x-router"))
+
+    def test_unusable_config_dir_exits_2(self):
+        f = tempfile.NamedTemporaryFile()
+        err = io.StringIO()
+        env = {"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_CONFIG_DIR": os.path.join(f.name, "sub")}
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
+            claude_router.main()
+        self.assertEqual(cm.exception.code, 2)
+        self.assertEqual(err.getvalue().count("\n"), 1)
+        self.assertIn("claude-router: ", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
 
 
 class LocalHeadersTest(unittest.TestCase):

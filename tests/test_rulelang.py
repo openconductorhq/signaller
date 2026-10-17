@@ -62,6 +62,16 @@ class RuleLangTests(unittest.TestCase):
                 self.assertIn(frag, e.message)
                 self.assertEqual(str(e), f"line {line}, col {col}: {e.message}")
 
+    def test_long_rule_rejected_not_recursion(self):
+        ok = "when " + " or ".join(["tier is opus"] * 200) + " go local"
+        self.assertEqual(ev(ok, tier="opus"), [(True, "local")])
+        for src in ("when " + " or ".join(["tier is opus"] * 1200) + " go local",
+                    "when " + " and ".join(["tier is opus"] * 201) + " go local",
+                    "when " + "not " * 201 + "tier is opus go local"):
+            with self.assertRaises(RuleError) as cm:
+                parse(src)
+            self.assertEqual(cm.exception.message, "rule is too long")
+
     def test_error_line_number(self):
         with self.assertRaises(RuleError) as cm:
             parse("when tag is a go local\n\nwhen nope is a go local")

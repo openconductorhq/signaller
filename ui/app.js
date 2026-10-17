@@ -54,7 +54,7 @@ async function tick() {
   if (busy || document.hidden) return;
   busy = true;
   try {
-    const [st, deps] = await Promise.all([api("GET", "state"), api("GET", "departures" + (lastId ? "?since=" + lastId : ""))]);
+    const [st, deps] = await Promise.all([api("GET", "state"), api("GET", "departures" + (lastId ? "?since=" + Math.max(0, lastId - OVERLAP) : ""))]);
     $("offline").hidden = true;
     applyState(st);
     addDeps(deps);
@@ -192,8 +192,8 @@ function classifierBits(r, i) {
     out.push(el("div", { class: "cls" },
       el("div", { class: "row" },
         el("label", {}, "Model ", el("input", { value: c.model, "data-k": "cmodel", spellcheck: "false", onchange: (e) => setCls({ model: e.target.value.trim() }) })),
-        el("label", {}, "Time limit ", el("input", { type: "number", class: "narrow", min: 0.1, step: 0.1, value: c.timeout_s, "data-k": "ctime",
-          onchange: (e) => { const v = Number(e.target.value); if (v > 0) setCls({ timeout_s: v }); else renderConfig(true); } }), " s")),
+        el("label", {}, "Time limit ", el("input", { type: "number", class: "narrow", min: 0.1, max: 30, step: 0.1, value: c.timeout_s, "data-k": "ctime",
+          onchange: (e) => { const v = Number(e.target.value); if (v >= 0.1 && v <= 30) setCls({ timeout_s: v }); else renderConfig(true); } }), " s")),
       c.labels.map((l, j) => el("div", { class: "row" },
         el("input", { class: "lname", value: l.name, "aria-label": "Label name", "data-k": "ln:" + j, onchange: (e) => setLabel(j, { name: e.target.value.trim() }) }),
         el("input", { class: "ldesc", value: l.description, "aria-label": "What this label means", placeholder: "what it means", "data-k": "ld:" + j, onchange: (e) => setLabel(j, { description: e.target.value }) }),
@@ -390,6 +390,9 @@ $("edSave").addEventListener("click", async () => {
 /* ---------- departures ---------- */
 let lastId = 0, minId = null, firstLoad = true;
 const LIVE_MAX = 300;
+// ids are taken when a request starts but rows are written when it ends, so a long request can land after
+// later ones: re-ask for the last OVERLAP ids and slot late rows in by id.
+const OVERLAP = 50;
 function shortReason(reason, row) {
   if (!reason) return "";
   if (reason === "lever") return "lever";
@@ -463,15 +466,19 @@ function explain(d) {
 function addDeps(rows) {
   const wasFirst = firstLoad;
   firstLoad = false;
-  if (!rows.length) { $("depEmpty").hidden = !!$("deps").children.length; return; }
-  const box = $("deps"), frag = document.createDocumentFragment();
-  for (const r of rows) {
+  const box = $("deps");
+  // a late row below minId while "Load older" is offered belongs to that older page, not the live list
+  rows = rows.filter((r) => !box.querySelector(`.dep[data-id="${r.id}"]`) && !(r.id < minId && !$("older").hidden));
+  if (!rows.length) { $("depEmpty").hidden = !!box.children.length; return; }
+  for (const r of rows) {  // newest first; each goes above the first shown row with a lower id
     const n = depRow(r);
     if (!wasFirst) n.classList.add("new");
-    frag.append(n);
+    const below = [...box.children].find((c) => Number(c.dataset.id) < r.id);
+    box.insertBefore(n, below || null);
   }
-  box.prepend(frag);
   lastId = Math.max(lastId, rows[0].id);
+  if (minId == null) { minId = rows[rows.length - 1].id; $("older").hidden = rows.length < 200; }
+  else minId = Math.min(minId, rows[rows.length - 1].id);
   // ponytail: live rows capped at LIVE_MAX so a long-open tab stays light; once "Load older" was used we keep
   // everything the user asked for (trimming then would leave a gap between live and older rows).
   if (!box.querySelector(".older") && box.children.length > LIVE_MAX) {
@@ -479,7 +486,6 @@ function addDeps(rows) {
     minId = Number(box.lastElementChild.dataset.id);
     $("older").hidden = false;
   }
-  if (minId == null) { minId = rows[rows.length - 1].id; $("older").hidden = rows.length < 200; }
   $("depEmpty").hidden = true;
   if (!wasFirst) animate([...rows].reverse());
 }
