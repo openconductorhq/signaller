@@ -4,6 +4,7 @@ import random
 import threading
 import time
 import uuid
+import zlib
 
 TEXT_CAP, INPUT_CAP = 50_000, 2000
 TURN_TTL = 30 * 60
@@ -12,12 +13,25 @@ TURN_TTL = 30 * 60
 class AnswerCapture:
     """Collects text, tool calls and output tokens from a response, fed in arbitrary chunks. Never raises."""
 
-    def __init__(self, content_type: str):
+    def __init__(self, content_type: str, content_encoding: str = ""):
         self.sse = (content_type or "").startswith("text/event-stream")
         self.buf, self.text, self.tools, self.by_index, self.output_tokens = b"", [], [], {}, None
-        self.size = 0
+        self.size, self.error, self.zlib = 0, None, None
+        enc = (content_encoding or "").strip().lower()
+        if enc in ("gzip", "x-gzip", "deflate"):
+            self.zlib = zlib.decompressobj(wbits=47)  # 47: auto-detect gzip or zlib header
+        elif enc not in ("", "identity"):
+            self.error = "encoded %s" % enc
 
     def feed(self, chunk: bytes) -> None:
+        if self.error:
+            return
+        if self.zlib:
+            try:
+                chunk = self.zlib.decompress(chunk)
+            except zlib.error:
+                self.error = "bad compressed data"
+                return
         if not self.sse:
             self.buf += chunk
             return
@@ -64,7 +78,7 @@ class AnswerCapture:
             except Exception:
                 pass
         tokens = self.output_tokens if isinstance(self.output_tokens, int) else None
-        return {"text": "".join(self.text), "output_tokens": tokens,
+        return {"error": self.error, "text": "".join(self.text), "output_tokens": tokens,
                 "tools": [{"name": t["name"], "input": "".join(t["input"])[:INPUT_CAP]} for t in self.tools]}
 
 
@@ -146,16 +160,27 @@ class Doubler:
         with self.lock:
             self.inflight[track] += 1
         headers = list(headers)  # credentials stay in memory only, in this thread
-        threading.Thread(target=self._run, args=(h, track, method, path, headers, body, cfg), daemon=True).start()
+        try:
+            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, cfg), daemon=True).start()
+        except Exception as e:  # e.g. can't start new thread: give the slot back, the served request goes on
+            self._release(track)
+            h.shadow({"skipped": "error", "status": None, "ttfb_ms": None, "ms": None, "error": type(e).__name__,
+                      "text": "", "tools": [], "output_tokens": None})
+            return "-"
         return track
+
+    def _release(self, track):
+        with self.lock:
+            self.inflight[track] -= 1
+        self.caps[track].release()
 
     def _run(self, h, track, method, path, headers, body, cfg):
         from claude_router import HOP, local_headers, local_model  # late: claude_router imports this module
-        t0, out, conn = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None
-        cap = AnswerCapture("application/json")
+        t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
         try:
             req = json.loads(body)
             req["stream"] = False
+            headers = [(k, v) for k, v in headers if k.lower() != "accept-encoding"]  # identity, so it can be read
             if track == "local":
                 req["model"] = local_model(str(req.get("model", "")), cfg.local_sonnet, cfg.local_haiku)
                 headers = local_headers(headers, cfg.litellm_key)
@@ -163,17 +188,17 @@ class Doubler:
                 headers = [(k, v) for k, v in headers if k.lower() not in HOP]
             conn, resp = self.open_upstream(cfg, track, method, path, headers, json.dumps(req).encode())
             out["ttfb_ms"], out["status"] = int((time.time() - t0) * 1000), resp.status
+            cap = AnswerCapture(resp.getheader("content-type", ""), resp.getheader("content-encoding", ""))
             cap.feed(resp.read())
         except Exception as e:
             out["error"] = "%s: %s" % (type(e).__name__, str(e)[:200])
         finally:
             if conn:
                 conn.close()
-            with self.lock:
-                self.inflight[track] -= 1
-            self.caps[track].release()
+            self._release(track)
         out["ms"] = int((time.time() - t0) * 1000)
-        h.shadow({**out, **cap.result()})
+        res = cap.result() if cap else {"text": "", "tools": [], "output_tokens": None}
+        h.shadow({**res, **out, "error": out["error"] or res.get("error")})
 
     def active(self) -> dict:
         with self.lock:

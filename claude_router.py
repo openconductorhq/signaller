@@ -163,12 +163,16 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             shown = out_model = model
             rec = f is not None and self.path.split("?", 1)[0] == "/v1/messages"
             rid = app.store.next_id() if rec else None
-            turn_id = app.doubler.turn_for(f, route, routing.doubling) if rec and app.doubler else None
-            pair, cap, shadow = None, None, "-"
-            if turn_id:  # shadow starts before the served upstream; it never touches the served path again
-                pair = app.doubler.pending_served(turn_id, rid, None, route)
-                shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
-                                                  self.headers.items(), body, cfg)
+            pair, cap, shadow, turn_id = None, None, "-", None
+            try:  # a doubling fault must never change the served request
+                turn_id = app.doubler.turn_for(f, route, routing.doubling) if rec and app.doubler else None
+                if turn_id:  # shadow starts before the served upstream; it never touches the served path again
+                    pair = app.doubler.pending_served(turn_id, rid, None, route)
+                    shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
+                                                      self.headers.items(), body, cfg)
+            except Exception as e:
+                print("doubling failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+                pair, shadow, turn_id = None, "-", None
             if route == "local":
                 name = "LiteLLM"
                 out_model = req["model"] = local_model(model, cfg.local_sonnet, cfg.local_haiku)
@@ -196,7 +200,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         self.send_header(k, v)
                 self.end_headers()
                 if pair:
-                    cap = AnswerCapture(resp.getheader("content-type", ""))
+                    cap = AnswerCapture(resp.getheader("content-type", ""), resp.getheader("content-encoding", ""))
                 while True:
                     try:
                         chunk = resp.read1(65536)
@@ -224,7 +228,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 ms = int((time.time() - t0) * 1000)
                 if pair:
                     res = cap.result() if cap else {"text": "", "tools": [], "output_tokens": None}
-                    pair.finish({"status": status, "ttfb_ms": ttfb, "ms": ms, "error": err.strip() or None, **res})
+                    pair.finish({**res, "status": status, "ttfb_ms": ttfb, "ms": ms,
+                                 "error": err.strip() or res.get("error")})
                 if rec:
                     app.store.record_request({
                         "id": rid, "ts": t0, "track": route, "reason": d.reason, "explanation": json.dumps(d.explanation),

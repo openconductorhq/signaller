@@ -1,4 +1,5 @@
 import contextlib
+import gzip
 import io
 import json
 import random
@@ -9,6 +10,7 @@ import unittest
 from dataclasses import replace
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 from claude_router import App, Config, make_server
 from doubling import AnswerCapture, Doubler
@@ -44,7 +46,7 @@ class Up(ThreadingHTTPServer):
 
     def __init__(self):
         super().__init__(("127.0.0.1", 0), UpHandler)
-        self.seen, self.delay = [], 0
+        self.seen, self.delay, self.encoding = [], 0, None
         threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
     @property
@@ -65,6 +67,9 @@ class UpHandler(BaseHTTPRequestHandler):
         out = SSE if stream else JSON
         self.send_response(200)
         self.send_header("content-type", "text/event-stream" if stream else "application/json")
+        if self.server.encoding:  # regardless of accept-encoding, like a misbehaving upstream
+            out = gzip.compress(out) if self.server.encoding == "gzip" else b"\x00junk"
+            self.send_header("content-encoding", self.server.encoding)
         self.send_header("content-length", str(len(out)))
         self.end_headers()
         self.wfile.write(out)
@@ -92,7 +97,7 @@ class CaptureTest(unittest.TestCase):
         c = AnswerCapture("application/json")
         c.feed(JSON[:10])
         c.feed(JSON[10:])
-        self.assertEqual(c.result(), {"text": "Hi", "tools": [{"name": "Bash", "input": '{"command": "ls"}'}],
+        self.assertEqual(c.result(), {"error": None, "text": "Hi", "tools": [{"name": "Bash", "input": '{"command": "ls"}'}],
                                       "output_tokens": 5})
 
     def test_capture_garbage_never_raises(self):
@@ -103,6 +108,21 @@ class CaptureTest(unittest.TestCase):
                 c.feed(junk)
             r = c.result()
             self.assertIsInstance(r["text"], str)
+
+    def test_capture_gzip_split_and_unknown_encoding(self):
+        for body, ct in ((SSE, "text/event-stream"), (JSON, "application/json")):
+            z, c = gzip.compress(body), AnswerCapture(ct, "gzip")
+            for i in range(0, len(z), 7):
+                c.feed(z[i:i + 7])
+            r = c.result()
+            self.assertIsNone(r["error"])
+            self.assertEqual(r["text"], "Hello world" if ct.startswith("text") else "Hi")
+        c = AnswerCapture("application/json", "br")
+        c.feed(b"\x0b\x01")
+        self.assertEqual(c.result()["error"], "encoded br")
+        c = AnswerCapture("application/json", "gzip")
+        c.feed(b"not gzip at all")
+        self.assertTrue(c.result()["error"])
 
     def test_capture_caps(self):
         c = AnswerCapture("application/json")
@@ -147,9 +167,9 @@ class DoublingTest(unittest.TestCase):
         self.app.store.close()
         self.assertNotIn("Traceback", self.err.getvalue())
 
-    def post(self, body, path="/v1/messages?beta=true"):
+    def post(self, body, path="/v1/messages?beta=true", headers=HDRS):
         c = HTTPConnection("127.0.0.1", self.port, timeout=5)
-        c.request("POST", path, body, HDRS)
+        c.request("POST", path, body, headers)
         r = c.getresponse()
         data = r.read()
         c.close()
@@ -264,6 +284,46 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(h.get_all("Authorization"), ["Bearer LK"])
         self.assertNotIn("oauth-2025-04-20", h.get("anthropic-beta", ""))
         self.assertEqual(shadows_l[0][2]["model"], "S")
+
+    def test_gzipped_shadow_and_served_captured(self):
+        self.a.encoding = self.l.encoding = "gzip"
+        status, data = self.post(msg("zipped"), headers={**HDRS, "Accept-Encoding": "gzip"})
+        self.assertEqual((status, data), (200, gzip.compress(SSE)))  # served bytes untouched
+        r = self.pairs(1)[0]
+        self.assertEqual((r["served"]["text"], r["served"]["output_tokens"], r["served"]["error"]), ("Hello world", 12, None))
+        self.assertEqual((r["shadow"]["text"], r["shadow"]["error"]), ("Hi", None))
+        served_h, shadow_h = self.a.seen[0][1], self.l.seen[0][1]
+        self.assertEqual(served_h["Accept-Encoding"], "gzip")
+        self.assertIsNone(shadow_h.get("Accept-Encoding"))
+
+    def test_shadow_to_anthropic_has_no_accept_encoding(self):
+        self.post(msg("served local #local"), headers={**HDRS, "Accept-Encoding": "gzip, br"})
+        self.pairs(1)
+        shadow = [s for s in self.a.seen if s[2]["stream"] is False][0]
+        self.assertIsNone(shadow[1].get("Accept-Encoding"))
+
+    def test_unknown_encoding_is_an_error_not_blank(self):
+        self.l.encoding = "br"
+        self.post(msg("brotli"))
+        self.assertEqual(self.pairs(1)[0]["shadow"]["error"], "encoded br")
+
+    def test_doubler_fault_still_serves(self):
+        with mock.patch.object(self.app.doubler, "turn_for", side_effect=RuntimeError("boom")):
+            self.assertEqual(self.post(msg("x")), (200, SSE))
+        self.assertIn("doubling failed: RuntimeError", self.err.getvalue())
+        self.assertIn("shadow=-", self.err.getvalue())
+
+    def test_thread_start_failure_releases_cap(self):
+        class NoThread(threading.Thread):
+            def start(self):
+                raise RuntimeError("can't start new thread")
+        with mock.patch("doubling.threading", mock.Mock(wraps=threading, Thread=NoThread, Lock=threading.Lock)):
+            self.assertEqual(self.post(msg("no threads")), (200, SSE))
+        r = self.pairs(1)[0]
+        self.assertEqual(r["shadow"]["skipped"], "error")
+        self.assertEqual(self.app.doubler.active(), {"local": 0, "anthropic": 0})
+        self.post(msg("no threads"))  # the slot came back: next step really goes out
+        self.assertEqual(self.pairs(2)[1]["shadow"]["text"], "Hi")
 
     def test_count_tokens_never_doubled(self):
         self.post(msg("count me", stream=False), path="/v1/messages/count_tokens")
