@@ -9,50 +9,13 @@ import socket
 import struct
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
-ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
-TAG_RE = re.compile(r"(?<!\w)#(plan|local)(?!\w)", re.I)
+from routing import DEFAULT_CONFIG, Features, is_routed, latest_human_text, route as decide_route  # noqa: F401
 
-
-def latest_human_text(messages: list) -> str:
-    """Text of the most recent user message that has non-system-reminder text."""
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str):
-            content = [{"type": "text", "text": content}]
-        texts = [
-            b["text"] for b in content
-            if b.get("type") == "text" and not b["text"].strip().startswith("<system-reminder>")
-        ]
-        if texts:
-            return "\n".join(texts)
-    return ""
-
-
-def decide(method: str, path: str, body: bytes) -> tuple[str, str]:
-    """Return (route, reason): route is "anthropic" or "local"."""
-    if method != "POST" or path.split("?", 1)[0] not in ROUTED_PATHS:
-        return "anthropic", "passthrough"
-    try:
-        req = json.loads(body)
-        model = req["model"]
-        if not isinstance(model, str):
-            return "anthropic", "passthrough"
-        tags = {t.lower() for t in TAG_RE.findall(latest_human_text(req["messages"]))}
-        tier = "local" if "haiku" in model or "sonnet" in model else "anthropic"
-    except (ValueError, KeyError, TypeError, AttributeError):
-        return "anthropic", "passthrough"
-    if "plan" in tags:
-        return "anthropic", "tag:plan"
-    if "local" in tags:
-        return "local", "tag:local"
-    return tier, "tier"
-
+CLASSIFIER_OFF = replace(DEFAULT_CONFIG, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in DEFAULT_CONFIG.rules))
 
 def local_model(model: str, sonnet: str, haiku: str) -> str:
     return haiku if "haiku" in model else sonnet
@@ -144,7 +107,10 @@ def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
                 print("%s route=- reason=forbidden status=403" % time.strftime("%Y-%m-%d %H:%M:%S"),
                       file=sys.stderr, flush=True)
                 return
-            route, reason = decide(self.command, self.path, body)
+            f = Features.from_body(body) if is_routed(self.command, self.path) else None
+            # Task 5 wires the live config + classifier; until then the classifier rule is off
+            d = decide_route(CLASSIFIER_OFF, f, None) if f else None
+            route, reason = (d.track, d.reason) if d else ("anthropic", "passthrough")
             model, stream = "-", False
             try:
                 req = json.loads(body)
