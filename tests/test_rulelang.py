@@ -1,0 +1,72 @@
+import unittest
+
+from rulelang import parse, evaluate, fields_used, RuleError
+
+
+def ev(src, **f):
+    defaults = dict(text="", tag=set(), tier="other", model="", tokens=0, subagent=False, label="none")
+    defaults.update(f)
+    return [(evaluate(l.cond, defaults.__getitem__), l.track) for l in parse(src)]
+
+
+ERRORS = [
+    ("when tag is plan anthropic", 1, 18, "expected 'go'"),
+    ("when colour is red go local", 1, 6, "unknown field 'colour'"),
+    ("when tokens contains 5 go local", 1, 13, "'contains' needs a text field"),
+    ("when text > 5 go local", 1, 11, "'>' needs a number field"),
+    ("when text matches /(/ go local", 1, 19, "bad regex"),
+    ("when tag is plan go elsewhere", 1, 21, "expected 'anthropic' or 'local'"),
+    ("when (tag is plan go local", 1, 19, "expected ')'"),
+    ("", 1, 1, "expected 'when'"),
+]
+
+
+class RuleLangTests(unittest.TestCase):
+    def test_table(self):
+        self.assertEqual(ev("when tag is plan go anthropic", tag={"plan"}), [(True, "anthropic")])
+        self.assertEqual(ev("when tag is #PLAN go anthropic", tag={"plan"}), [(True, "anthropic")])
+        self.assertEqual(ev('when text contains "Schema Mig" go local', text="add schema migration"), [(True, "local")])
+        self.assertEqual(ev("when text matches /^(hi|thanks)\\b/i go local", text="Thanks!"), [(True, "local")])
+        self.assertEqual(ev("when tokens > 100k go anthropic", tokens=100_001), [(True, "anthropic")])
+        self.assertEqual(ev("when tokens >= 100k go anthropic", tokens=100_000), [(True, "anthropic")])
+        self.assertEqual(ev("when not subagent and tier is opus go anthropic", tier="opus"), [(True, "anthropic")])
+        self.assertEqual(ev("when subagent is no go local"), [(True, "local")])
+        self.assertEqual(ev('when text is "a \\"q\\" \\\\" go local', text='A "Q" \\'), [(True, "local")])
+
+    def test_precedence(self):
+        self.assertEqual(ev("when tier is haiku or tier is sonnet and tag is x go local", tier="haiku"), [(True, "local")])
+        self.assertEqual(ev("when (tier is haiku or tier is sonnet) and tag is x go local", tier="haiku"), [(False, "local")])
+
+    def test_lines_and_case(self):
+        r = ev("WHEN tag is plan GO anthropic\n\nwhen tag is local go local")
+        self.assertEqual([t for _, t in r], ["anthropic", "local"])
+
+    def test_short_circuit_and_fields(self):
+        seen = []
+
+        def get(f):
+            seen.append(f)
+            return {"tier": "opus", "label": "coding"}[f]
+
+        evaluate(parse("when tier is sonnet and label is coding go local")[0].cond, get)
+        self.assertEqual(seen, ["tier"])
+        self.assertEqual(fields_used(parse("when label is coding or tokens > 5 go local")), {"label", "tokens"})
+
+    def test_errors(self):
+        for src, line, col, frag in ERRORS:
+            with self.subTest(src=src):
+                with self.assertRaises(RuleError) as cm:
+                    parse(src)
+                e = cm.exception
+                self.assertEqual((e.line, e.col), (line, col))
+                self.assertIn(frag, e.message)
+                self.assertEqual(str(e), f"line {line}, col {col}: {e.message}")
+
+    def test_error_line_number(self):
+        with self.assertRaises(RuleError) as cm:
+            parse("when tag is a go local\n\nwhen nope is a go local")
+        self.assertEqual((cm.exception.line, cm.exception.col), (3, 6))
+
+
+if __name__ == "__main__":
+    unittest.main()
