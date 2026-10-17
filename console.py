@@ -1,0 +1,170 @@
+"""Console: static page and JSON API under /ui, with loopback Host/Origin checks."""
+import json
+import os
+import re
+import time
+from dataclasses import replace
+from urllib.parse import parse_qs, unquote, urlsplit
+
+from routing import ClassResult, Rule, config_from_json, config_to_json, route
+from rulelang import RuleError, parse
+
+UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
+TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
+         ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8"}
+SEC = {"Content-Security-Policy": "default-src 'self'", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"}
+NOT_RE = ClassResult(None, None, "not re-classified")
+
+
+class Err(Exception):
+    def __init__(self, status, msg, **extra):
+        self.status, self.body = status, {"error": msg, **extra}
+
+
+def send(h, status, body, ctype, cache=False):
+    h.send_response(status)
+    h.send_header("Content-Type", ctype)
+    h.send_header("Content-Length", str(len(body)))
+    for k, v in SEC.items():
+        h.send_header(k, v)
+    if not cache:
+        h.send_header("Cache-Control", "no-store")
+    h.end_headers()
+    if h.command != "HEAD":
+        h.wfile.write(body)
+
+
+def send_json(h, status, obj):
+    send(h, status, json.dumps(obj).encode(), "application/json")
+
+
+def preview(app, body):
+    t0 = time.time()
+    try:
+        r, pos = body["rule"], int(body["position"])
+        text = str(r["text"])
+        parse(text)  # Rule() would hide line/col behind a ValueError
+        rule = Rule(str(r["name"]), "dsl", True, text)
+    except RuleError as e:
+        raise Err(400, e.message, line=e.line, col=e.col)
+    except RecursionError:
+        raise Err(400, "rule is nested too deeply")
+    except (KeyError, TypeError, ValueError) as e:
+        raise Err(400, "bad preview request: %s" % e)
+    cur = app.routing
+    rules = [x for x in cur.rules if x.name != rule.name]
+    rules.insert(max(0, min(pos, len(rules))), rule)
+    cand = replace(cur, rules=tuple(rules))
+    rows, changed = [], 0
+    for f, d, rid in list(app.recent):
+        stub = lambda _f, _cs, d=d: d.classified or NOT_RE
+        try:
+            would = route(cand, f, stub)
+        except RecursionError:
+            raise Err(400, "rule is nested too deeply")
+        if would.reason == "rule:" + rule.name or would.reason.startswith("rule:%s:" % rule.name):
+            changed += would.track != d.track
+            rows.append({"id": rid, "ts": None, "went": d.track, "why": d.reason, "would": would.track, "preview": f.text[:120]})
+    ids = [x["id"] for x in rows]
+    ts = {r["id"]: r["ts"] for r in app.store.departures(limit=200) if r["id"] in ids}
+    for x in rows:
+        x["ts"] = ts.get(x["id"])
+    ms = (time.time() - t0) * 1000
+    return {"matched": len(rows), "changed": changed, "rows": rows, "slow": ms > 50,
+            "since_restart": True, "count": len(app.recent)}
+
+
+def state(app):
+    hint = next((f.model for f, d, rid in reversed(app.recent) if f.tier == "opus"), "Anthropic")
+    c = app.cfg
+    return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()), "banner": app.banner,
+            "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
+            "dropped": app.store.dropped,
+            "upstreams": {"anthropic_model_hint": hint, "local": "%s via LiteLLM" % c.local_sonnet},
+            "recent_count": len(app.recent)}
+
+
+def api(h, app, method, path, query, body):
+    st = app.store
+    if path == "/ui/api/state" and method == "GET":
+        return state(app)
+    if path == "/ui/api/departures" and method == "GET":
+        q = {k: int(v[0]) for k, v in query.items() if k in ("since", "before")}
+        return st.departures(q.get("since"), q.get("before"), 200)
+    m = re.fullmatch(r"/ui/api/requests/(\d+)", path)
+    if m and method == "GET":
+        r = st.request(int(m[1]))
+        if not r:
+            raise Err(404, "no such request")
+        try:
+            r["explanation"] = json.loads(r["explanation"])
+        except (TypeError, ValueError):
+            pass
+        if r["turn_id"]:
+            r["shadow"] = st.pair_for_request(r["id"])
+        return r
+    if path == "/ui/api/config" and method == "PUT":
+        try:
+            new = config_from_json(body)
+        except (ValueError, RecursionError) as e:
+            raise Err(400, str(e) if isinstance(e, ValueError) else "rule is nested too deeply")
+        app.set_routing(new)
+        return config_to_json(new)
+    if path == "/ui/api/preview" and method == "POST":
+        return preview(app, body)
+    if path == "/ui/api/turns" and method == "GET":
+        return st.turns(unjudged_first=True)
+    if path == "/ui/api/pairs" and method == "DELETE":
+        st.forget_pairs()
+        return {"ok": True}
+    m = re.fullmatch(r"/ui/api/turns/([^/]+)(/verdict)?", path)
+    if m and not m[2] and method == "GET":
+        t = st.turn(unquote(m[1]))
+        if not t:
+            raise Err(404, "no such turn")
+        return t
+    if m and m[2] and method == "PUT":
+        v = body.get("verdict") if isinstance(body, dict) else None
+        if not st.set_verdict(unquote(m[1]), v):
+            raise Err(404 if v in ("local", "anthropic", "same") else 400, "bad verdict or unknown turn")
+        return {"ok": True}
+    raise Err(404, "not found")
+
+
+def static(h, path):
+    name = unquote(path[len("/ui"):]).lstrip("/") or "index.html"
+    full = os.path.realpath(os.path.join(UI_DIR, name))
+    ctype = TYPES.get(os.path.splitext(full)[1])
+    if not full.startswith(UI_DIR + os.sep) or not ctype or not os.path.isfile(full):
+        return send(h, 404, b"not found", "text/plain; charset=utf-8")
+    with open(full, "rb") as f:
+        send(h, 200, f.read(), ctype, cache=True)
+
+
+def handle_ui(h, app):
+    from claude_router import LOOPBACK_HOST_RE  # late: claude_router imports this module
+    n = int(h.headers.get("content-length") or 0)
+    raw = h.rfile.read(n) if n else b""
+    port = h.server.server_address[1]
+    ok = {"http://127.0.0.1:%d" % port, "http://localhost:%d" % port, "http://[::1]:%d" % port}
+    origin = h.headers.get("origin")
+    if not LOOPBACK_HOST_RE.fullmatch(h.headers.get("host", "")) or \
+            (origin is not None and origin not in ok) or (h.command in ("PUT", "POST", "DELETE") and origin is None):
+        return send_json(h, 403, {"error": "claude-router: forbidden origin/host"})
+    u = urlsplit(h.path)
+    try:
+        if not u.path.startswith("/ui/api/"):
+            if h.command not in ("GET", "HEAD"):
+                raise Err(404, "not found")
+            return static(h, u.path)
+        try:
+            body = json.loads(raw) if raw else {}
+        except ValueError:
+            raise Err(400, "body is not valid JSON")
+        try:
+            out = api(h, app, h.command, u.path, parse_qs(u.query), body)
+        except (ValueError, TypeError) as e:
+            raise Err(400, "bad request: %s" % e)
+        send_json(h, 200, out)
+    except Err as e:
+        send_json(h, e.status, e.body)

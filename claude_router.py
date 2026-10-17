@@ -9,11 +9,13 @@ import re
 import socket
 import struct
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
+import console
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from routing import Features, RoutingConfig, is_routed, route as decide_route
@@ -113,10 +115,12 @@ class App:
         self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
         self.started = time.time()
         self.doubler = Doubler(self.store, open_upstream)
+        self._rlock = threading.Lock()
 
     def set_routing(self, new: RoutingConfig) -> None:
-        save_console_config(os.path.join(self.config_dir, "console.json"), new)
-        self.routing = new  # single reference assignment; requests read it once
+        with self._rlock:  # file and memory must agree under concurrent PUTs
+            save_console_config(os.path.join(self.config_dir, "console.json"), new)
+            self.routing = new  # single reference assignment; requests read it once
 
 
 def default_config_dir() -> str:
@@ -142,6 +146,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             self.wfile.write(out)
 
         def handle_any(self):
+            if self.path == "/ui" or self.path.startswith("/ui/"):
+                return console.handle_ui(self, app)
             t0 = time.time()
             body = self.rfile.read(int(self.headers.get("content-length") or 0))
             # browsers (cross-origin) and DNS rebinding must not reach the injected LiteLLM key

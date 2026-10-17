@@ -166,6 +166,10 @@ class Store:
         r = self._all("SELECT * FROM requests WHERE id=?", (id,))
         return r[0] if r else None
 
+    def pair_for_request(self, request_id):
+        r = self._all("SELECT * FROM pairs WHERE request_id=? ORDER BY id DESC LIMIT 1", (request_id,))
+        return r[0] if r else None
+
     def stats(self, now):
         hour = self._all("SELECT track, status FROM requests WHERE ts >= ?", (now - 3600,))
         n = len(hour)
