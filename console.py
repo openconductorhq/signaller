@@ -9,7 +9,10 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from routing import ClassResult, Rule, config_from_json, config_to_json, route
 from rulelang import RuleError, parse
 
-UI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
+UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui")
+LOOPBACK_HOST_RE = re.compile(r"(127\.0\.0\.1|localhost|\[::1\])(:\d+)?", re.I)
+MAX_BODY = 1 << 20
+BAD = (ValueError, TypeError, OverflowError, RecursionError)
 TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8"}
 SEC = {"Content-Security-Policy": "default-src 'self'", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"}
@@ -49,12 +52,12 @@ def preview(app, body):
         raise Err(400, e.message, line=e.line, col=e.col)
     except RecursionError:
         raise Err(400, "rule is nested too deeply")
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, OverflowError) as e:
         raise Err(400, "bad preview request: %s" % e)
     cur = app.routing
     rules = [x for x in cur.rules if x.name != rule.name]
     rules.insert(max(0, min(pos, len(rules))), rule)
-    cand = replace(cur, rules=tuple(rules))
+    cand = replace(cur, lever="rules", rules=tuple(rules))
     rows, changed = [], 0
     for f, d, rid in list(app.recent):
         stub = lambda _f, _cs, d=d: d.classified or NOT_RE
@@ -75,7 +78,7 @@ def preview(app, body):
 
 
 def state(app):
-    hint = next((f.model for f, d, rid in reversed(app.recent) if f.tier == "opus"), "Anthropic")
+    hint = next((f.model for f, d, rid in reversed(list(app.recent)) if f.tier == "opus"), "Anthropic")
     c = app.cfg
     return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
@@ -133,6 +136,8 @@ def api(h, app, method, path, query, body):
 
 def static(h, path):
     name = unquote(path[len("/ui"):]).lstrip("/") or "index.html"
+    if "\0" in name:
+        raise Err(400, "bad path")
     full = os.path.realpath(os.path.join(UI_DIR, name))
     ctype = TYPES.get(os.path.splitext(full)[1])
     if not full.startswith(UI_DIR + os.sep) or not ctype or not os.path.isfile(full):
@@ -142,29 +147,34 @@ def static(h, path):
 
 
 def handle_ui(h, app):
-    from claude_router import LOOPBACK_HOST_RE  # late: claude_router imports this module
-    n = int(h.headers.get("content-length") or 0)
-    raw = h.rfile.read(n) if n else b""
+    try:
+        _handle(h, app)
+    except Err as e:
+        send_json(h, e.status, e.body)
+    except BAD as e:
+        send_json(h, 400, {"error": "bad request: %s" % type(e).__name__})
+    except Exception:  # never drop the connection
+        send_json(h, 500, {"error": "internal error"})
+
+
+def _handle(h, app):
     port = h.server.server_address[1]
     ok = {"http://127.0.0.1:%d" % port, "http://localhost:%d" % port, "http://[::1]:%d" % port}
     origin = h.headers.get("origin")
     if not LOOPBACK_HOST_RE.fullmatch(h.headers.get("host", "")) or \
             (origin is not None and origin not in ok) or (h.command in ("PUT", "POST", "DELETE") and origin is None):
-        return send_json(h, 403, {"error": "claude-router: forbidden origin/host"})
+        raise Err(403, "claude-router: forbidden origin/host")  # body left unread
+    n = int(h.headers.get("content-length") or 0)
+    if not 0 <= n <= MAX_BODY:
+        raise Err(400, "bad content-length")
+    raw = h.rfile.read(n) if n else b""
     u = urlsplit(h.path)
+    if not u.path.startswith("/ui/api/"):
+        if h.command not in ("GET", "HEAD"):
+            raise Err(404, "not found")
+        return static(h, u.path)
     try:
-        if not u.path.startswith("/ui/api/"):
-            if h.command not in ("GET", "HEAD"):
-                raise Err(404, "not found")
-            return static(h, u.path)
-        try:
-            body = json.loads(raw) if raw else {}
-        except ValueError:
-            raise Err(400, "body is not valid JSON")
-        try:
-            out = api(h, app, h.command, u.path, parse_qs(u.query), body)
-        except (ValueError, TypeError) as e:
-            raise Err(400, "bad request: %s" % e)
-        send_json(h, 200, out)
-    except Err as e:
-        send_json(h, e.status, e.body)
+        body = json.loads(raw) if raw else {}
+    except ValueError:
+        raise Err(400, "body is not valid JSON")
+    send_json(h, 200, api(h, app, h.command, u.path, parse_qs(u.query), body))

@@ -16,6 +16,7 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
 import console
+from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from routing import Features, RoutingConfig, is_routed, route as decide_route
@@ -65,7 +66,6 @@ HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", 
        "trailer", "trailers", "transfer-encoding", "upgrade", "host", "content-length"}
 OAUTH_BETA = "oauth-2025-04-20"
 UPSTREAM_TIMEOUT = 600
-LOOPBACK_HOST_RE = re.compile(r"(127\.0\.0\.1|localhost|\[::1\])(:\d+)?", re.I)
 MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
                  b'"message":"claude-router: upstream ended mid-stream"}}\n\n')
 
@@ -146,7 +146,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             self.wfile.write(out)
 
         def handle_any(self):
-            if self.path == "/ui" or self.path.startswith("/ui/"):
+            p = urlsplit(self.path).path
+            if p == "/ui" or p.startswith("/ui/"):
                 return console.handle_ui(self, app)
             t0 = time.time()
             body = self.rfile.read(int(self.headers.get("content-length") or 0))

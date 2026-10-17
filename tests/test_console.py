@@ -112,6 +112,52 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.js("DELETE", "/ui/api/pairs")[0], 200)
         self.assertEqual(self.js("GET", "/ui/api/turns")[1], [])
 
+    def raw(self, request):
+        import socket
+        c = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        c.sendall(request)
+        data = b""
+        while True:
+            b = c.recv(65536)
+            if not b:
+                break
+            data += b
+        c.close()
+        return data
+
+    def test_bad_input_is_400_not_a_dropped_connection(self):
+        own = "http://127.0.0.1:%d" % self.port
+        cases = [
+            ("GET", "/ui/%00", None), ("GET", "/ui/api/departures?since=" + "9" * 31, None),
+            ("GET", "/ui/api/departures?since=abc", None), ("GET", "/ui/api/requests/" + "9" * 30, None),
+            ("POST", "/ui/api/preview", b'{"rule":{"name":"x","text":"when tier is opus go local"},"position":1e999}'),
+            ("PUT", "/ui/api/config", b"[" * 100000),
+        ]
+        for m, path, body in cases:
+            req = ("%s %s HTTP/1.0\r\nHost: 127.0.0.1:%d\r\nOrigin: %s\r\nContent-Length: %d\r\n\r\n"
+                   % (m, path, self.port, own, len(body or b""))).encode() + (body or b"")
+            self.assertIn(b" 400 ", self.raw(req).split(b"\r\n")[0], (m, path))
+        for cl in ("abc", "-5", str(2 << 20)):
+            req = ("PUT /ui/api/config HTTP/1.0\r\nHost: 127.0.0.1:%d\r\nOrigin: %s\r\nContent-Length: %s\r\n\r\n"
+                   % (self.port, own, cl)).encode()
+            self.assertIn(b" 400 ", self.raw(req).split(b"\r\n")[0], cl)
+
+    def test_query_string_on_ui_is_console(self):
+        r, _ = self.req("GET", "/ui?x=1", origin=None)
+        self.assertEqual(r.status, 200)
+
+    def test_preview_ignores_lever(self):
+        self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "add schema migration"}]}))
+        self.logged(1)
+        t = time.time()
+        while not self.app.recent and time.time() - t < 2:
+            time.sleep(0.01)
+        cfg = self.js("GET", "/ui/api/state")[1]["config"]
+        self.js("PUT", "/ui/api/config", {**cfg, "lever": "local"})
+        rule = {"name": "mig", "text": 'when text contains "migration" go anthropic'}
+        j = self.js("POST", "/ui/api/preview", {"rule": rule, "position": 0})[1]
+        self.assertEqual((j["matched"], j["changed"]), (1, 1))
+
 
 if __name__ == "__main__":
     unittest.main()
