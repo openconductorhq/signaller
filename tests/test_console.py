@@ -158,6 +158,21 @@ class ConsoleTest(Fixture):
         j = self.js("POST", "/ui/api/preview", {"rule": rule, "position": 0})[1]
         self.assertEqual((j["matched"], j["changed"]), (1, 1))
 
+    def test_page_assets_local_only(self):
+        ui = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui")
+        for root, _, files in os.walk(ui):
+            for n in files:
+                if n != "OFL.txt":
+                    with open(os.path.join(root, n), "rb") as f:
+                        data = f.read()
+                    self.assertNotIn(b"http://", data, n)
+                    self.assertNotIn(b"https://", data, n)
+        for path, ctype in (("/ui/app.js", "text/javascript"), ("/ui/app.css", "text/css"),
+                            ("/ui/fonts/barlow-condensed-latin-600-normal.woff2", "font/woff2")):
+            r, _ = self.req("GET", path, origin=None)
+            self.assertEqual(r.status, 200, path)
+            self.assertTrue(r.getheader("Content-Type").startswith(ctype), path)
+
 
 if __name__ == "__main__":
     unittest.main()
