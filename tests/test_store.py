@@ -1,0 +1,90 @@
+import os
+import threading
+import time
+
+import store
+from routing import DEFAULT_CONFIG
+from store import Store, load_console_config, save_console_config
+
+
+def req(i, ts, track="anthropic", status=200, **kw):
+    return dict(id=i, ts=ts, track=track, status=status, preview="p%d" % i, **kw)
+
+
+def test_config_roundtrip_and_mode(tmp_path):
+    p = str(tmp_path / "sub" / "console.json")
+    save_console_config(p, DEFAULT_CONFIG)
+    assert os.stat(p).st_mode & 0o777 == 0o600
+    assert load_console_config(p) == (DEFAULT_CONFIG, None)
+
+
+def test_missing_config_defaults(tmp_path):
+    assert load_console_config(str(tmp_path / "x.json")) == (DEFAULT_CONFIG, None)
+
+
+def test_corrupt_config_falls_back(tmp_path):
+    p = tmp_path / "console.json"
+    p.write_text("{nope")
+    cfg, banner = load_console_config(str(p))
+    assert cfg == DEFAULT_CONFIG and "console.json.bad" in banner
+    assert (tmp_path / "console.json.bad").exists() and not p.exists()
+
+
+def test_departures_and_stats(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    for i, (t, st) in enumerate([("anthropic", 200)] * 3 + [("local", 502)], 1):
+        s.record_request(req(s.next_id(), now - 10 * i, t, st))
+    s.record_request(req(s.next_id(), now - 7200))
+    s.close()
+    st = s.stats(now)
+    assert (st["anthropic_pct"], st["local_pct"], st["last_hour_total"], st["errors_last_hour"]) == (75, 25, 4, 1)
+    assert [r["id"] for r in s.departures()] == [5, 4, 3, 2, 1]
+    assert [r["id"] for r in s.departures(since_id=3)] == [5, 4]
+    assert [r["id"] for r in s.departures(before_id=3)] == [2, 1]
+    assert s.request(4)["track"] == "local" and s.request(99) is None
+    assert Store(str(tmp_path / "s.db")).next_id() == 6
+
+
+def test_turns_pairs_verdict(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    s.record_turn(dict(id="a", ts=now - 5, preview="a"))
+    s.record_turn(dict(id="b", ts=now, preview="b"))
+    s.record_turn(dict(id="b", ts=now, preview="dup"))
+    for step in (2, 1):
+        s.record_pair(dict(turn_id="a", request_id=1, step=step, served_track="anthropic", shadow_track="local",
+                           served="{}", shadow="{}"))
+    s.close()
+    assert [x["step"] for x in s.turn("a")["steps"]] == [1, 2]
+    assert s.turn("b")["preview"] == "b" and s.turn("zz") is None
+    assert s.set_verdict("b", "local") and not s.set_verdict("b", "bogus") and not s.set_verdict("zz", "same")
+    assert [t["id"] for t in s.turns()] == ["a", "b"]
+    assert s.stats(now)["tally"] == {"local": 1, "anthropic": 0, "same": 0}
+    assert s.stats(now)["judged_today"] == 1
+    s.forget_pairs()
+    assert s.turns() == [] and s.turn("a") is None
+
+
+def test_blocked_writer_never_blocks(tmp_path, monkeypatch):
+    ev = threading.Event()
+    monkeypatch.setattr(Store, "_run", lambda self: ev.wait(5))
+    s = Store(str(tmp_path / "s.db"), queue_max=10)
+    t = time.perf_counter()
+    for i in range(100):
+        s.record_request(req(i, 0))
+    assert time.perf_counter() - t < 0.05
+    assert abs(s.dropped - 90) <= 1
+    ev.set()
+
+
+def test_db_mode_0600(tmp_path):
+    Store(str(tmp_path / "s.db")).close()
+    assert os.stat(tmp_path / "s.db").st_mode & 0o777 == 0o600
+
+
+def test_prune_30_days(tmp_path):
+    p = str(tmp_path / "s.db")
+    s, now = Store(p), time.time()
+    s.record_request(req(1, now - 31 * 86400))
+    s.record_request(req(2, now))
+    s.close()
+    assert [r["id"] for r in Store(p).departures()] == [2]
