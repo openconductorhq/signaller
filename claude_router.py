@@ -1,4 +1,5 @@
 """claude-router: route Claude Code requests to Anthropic or a local LiteLLM."""
+import collections
 import http.client
 import http.server
 import ipaddress
@@ -9,13 +10,13 @@ import socket
 import struct
 import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
-from routing import DEFAULT_CONFIG, Features, is_routed, latest_human_text, route as decide_route  # noqa: F401
-
-CLASSIFIER_OFF = replace(DEFAULT_CONFIG, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in DEFAULT_CONFIG.rules))
+from classifier import Classifier
+from routing import Features, RoutingConfig, is_routed, route as decide_route
+from store import Store, load_console_config, save_console_config
 
 def local_model(model: str, sonnet: str, haiku: str) -> str:
     return haiku if "haiku" in model else sonnet
@@ -82,7 +83,48 @@ def local_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple[st
     return out
 
 
-def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
+def open_upstream(cfg: Config, track: str, method: str, path: str, headers, body: bytes):
+    """Send the request as given to the track's base URL; returns (conn, resp). Raises OSError/HTTPException."""
+    u = urlsplit(cfg.litellm_url if track == "local" else cfg.anthropic_url)
+    Conn = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+    conn = Conn(u.hostname, u.port, timeout=UPSTREAM_TIMEOUT)
+    try:
+        conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        conn.putheader("Host", u.netloc)
+        for k, v in headers:
+            conn.putheader(k, v)
+        if body or method in ("POST", "PUT", "PATCH"):
+            conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body)
+        return conn, conn.getresponse()
+    except BaseException:
+        conn.close()
+        raise
+
+
+class App:
+    def __init__(self, cfg: Config, config_dir: str):
+        os.makedirs(config_dir, mode=0o700, exist_ok=True)
+        self.cfg, self.config_dir = cfg, config_dir
+        self.routing, self.banner = load_console_config(os.path.join(config_dir, "console.json"))
+        self.classifier = Classifier(cfg.litellm_url, cfg.litellm_key)
+        self.store = Store(os.path.join(config_dir, "stats.db"))
+        self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
+        self.started = time.time()
+        self.doubler = None  # Task 6
+
+    def set_routing(self, new: RoutingConfig) -> None:
+        save_console_config(os.path.join(self.config_dir, "console.json"), new)
+        self.routing = new  # single reference assignment; requests read it once
+
+
+def default_config_dir() -> str:
+    return os.environ.get("CLAUDE_ROUTER_CONFIG_DIR") or os.path.expanduser("~/.config/claude-router")
+
+
+def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTTPServer:
+    app = app or App(cfg, default_config_dir())
+
     class Handler(http.server.BaseHTTPRequestHandler):
         # ponytail: HTTP/1.0 close-delimited responses, no keep-alive; switch to chunked if connection churn ever matters
         protocol_version = "HTTP/1.0"
@@ -107,9 +149,9 @@ def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
                 print("%s route=- reason=forbidden status=403" % time.strftime("%Y-%m-%d %H:%M:%S"),
                       file=sys.stderr, flush=True)
                 return
+            routing = app.routing  # read once; a concurrent set_routing doesn't affect this request
             f = Features.from_body(body) if is_routed(self.command, self.path) else None
-            # Task 5 wires the live config + classifier; until then the classifier rule is off
-            d = decide_route(CLASSIFIER_OFF, f, None) if f else None
+            d = decide_route(routing, f, app.classifier) if f else None
             route, reason = (d.track, d.reason) if d else ("anthropic", "passthrough")
             model, stream = "-", False
             try:
@@ -117,34 +159,28 @@ def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
                 model, stream = str(req.get("model", "-")), bool(req.get("stream"))
             except (ValueError, AttributeError):
                 pass
-            shown = model
+            shown = out_model = model
             if route == "local":
-                base, name = cfg.litellm_url, "LiteLLM"
-                new = req["model"] = local_model(model, cfg.local_sonnet, cfg.local_haiku)
+                name = "LiteLLM"
+                out_model = req["model"] = local_model(model, cfg.local_sonnet, cfg.local_haiku)
                 body = json.dumps(req).encode()
-                shown = "%s→%s" % (model, new)
+                shown = "%s→%s" % (model, out_model)
                 headers = local_headers(self.headers.items(), cfg.litellm_key)
             else:
-                base, name = cfg.anthropic_url, "Anthropic"
+                name = "Anthropic"
                 headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]
-            u = urlsplit(base)
-            Conn = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
-            conn = Conn(u.hostname, u.port, timeout=UPSTREAM_TIMEOUT)
-            status, err = 0, ""
+            rec = f is not None and self.path.split("?", 1)[0] == "/v1/messages"
+            rid = app.store.next_id() if rec else None
+            status, err, ttfb, conn = 0, "", None, None
             try:
                 try:
-                    conn.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
-                    conn.putheader("Host", u.netloc)
-                    for k, v in headers:
-                        conn.putheader(k, v)
-                    if body or self.command in ("POST", "PUT", "PATCH"):
-                        conn.putheader("Content-Length", str(len(body)))
-                    conn.endheaders(body)
-                    resp = conn.getresponse()
+                    conn, resp = open_upstream(cfg, route, self.command, self.path, headers, body)
+                    ttfb = int((time.time() - t0) * 1000)
                 except (OSError, http.client.HTTPException) as e:
                     status = 502
                     what = "timed out" if isinstance(e, TimeoutError) else "unreachable"
-                    self._error(502, "claude-router: %s %s at %s" % (name, what, base))
+                    self._error(502, "claude-router: %s %s at %s" % (
+                        name, what, cfg.litellm_url if route == "local" else cfg.anthropic_url))
                     return
                 status = resp.status
                 self.send_response(status)
@@ -172,10 +208,19 @@ def make_server(cfg: Config) -> http.server.ThreadingHTTPServer:
             except OSError:
                 pass  # client went away
             finally:
-                conn.close()
-                print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s" % (
-                    time.strftime("%Y-%m-%d %H:%M:%S"), route, reason, shown, status,
-                    (time.time() - t0) * 1000, stream, err), file=sys.stderr, flush=True)
+                if conn:
+                    conn.close()
+                ms = int((time.time() - t0) * 1000)
+                if rec:
+                    app.store.record_request({
+                        "id": rid, "ts": t0, "track": route, "reason": d.reason, "explanation": json.dumps(d.explanation),
+                        "model_in": model, "model_out": out_model, "status": status, "ttfb_ms": ttfb if ttfb is not None else ms,
+                        "ms": ms, "stream": int(stream), "preview": f.text[:120], "turn_id": None})
+                    app.recent.append((f, d, rid))
+                shown_reason = '"%s"' % reason if re.search(r"\s", reason) else reason
+                print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s shadow=-" % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"), route, shown_reason, shown, status, ms, stream, err),
+                    file=sys.stderr, flush=True)
 
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = handle_any
 
@@ -193,7 +238,7 @@ def main() -> None:
     except ValueError as e:
         print("claude-router: %s" % e, file=sys.stderr)
         sys.exit(2)
-    srv = make_server(cfg)
+    srv = make_server(cfg, App(cfg, default_config_dir()))
     print("listening on %s:%d; anthropic=%s litellm=%s" % (
         cfg.listen_host, cfg.listen_port, cfg.anthropic_url, cfg.litellm_url), file=sys.stderr, flush=True)
     try:

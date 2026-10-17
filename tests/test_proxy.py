@@ -1,16 +1,23 @@
 import contextlib
 import io
 import json
+import os
 import socket
+import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from unittest import mock
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import claude_router
-from claude_router import Config, local_headers, make_server
+from claude_router import App, Config, local_headers, make_server
+from classifier import Classifier
+from routing import DEFAULT_CONFIG
+
+CLASSIFIER_OFF = replace(DEFAULT_CONFIG, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in DEFAULT_CONFIG.rules))
 
 
 class Fake(ThreadingHTTPServer):
@@ -87,8 +94,14 @@ class ProxyTest(unittest.TestCase):
         self.a, self.l = Fake(), Fake()
         self.start(self.l.url)
 
-    def start(self, litellm_url):
-        self.srv = make_server(Config("127.0.0.1", 0, self.a.url, litellm_url, "LK", "S", "H"))
+    def start(self, litellm_url, classifier_url=None):
+        self.dir = tempfile.mkdtemp()
+        cfg = Config("127.0.0.1", 0, self.a.url, litellm_url, "LK", "S", "H")
+        self.app = App(cfg, self.dir)
+        self.app.routing = CLASSIFIER_OFF
+        if classifier_url:
+            self.app.classifier = Classifier(classifier_url, "LK")
+        self.srv = make_server(cfg, self.app)
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.port = self.srv.server_address[1]
 
@@ -96,7 +109,13 @@ class ProxyTest(unittest.TestCase):
         for s in (self.srv, self.a, self.l):
             s.shutdown()
             s.server_close()
+        self.app.store.close()
         self.assertNotIn("Traceback", self.err.getvalue())
+
+    def logged(self, n=1):  # the handler logs and records just after the client has the response
+        t = time.time()
+        while self.err.getvalue().count("route=") < n and time.time() - t < 2:
+            time.sleep(0.01)
 
     def post(self, body, headers=HDRS, path="/v1/messages?beta=true"):
         c = HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -127,6 +146,52 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(j["model"], "S")
         self.assertEqual(j["max_tokens"], 7)
         self.assertEqual(self.a.seen, [])
+
+    def test_config_change_applies_next_request(self):
+        self.post(body_for("claude-sonnet-5-5"))
+        self.assertEqual((len(self.l.seen), len(self.a.seen)), (1, 0))
+        self.app.set_routing(replace(self.app.routing, lever="anthropic"))
+        self.post(body_for("claude-sonnet-5-5"))
+        self.assertEqual((len(self.l.seen), len(self.a.seen)), (1, 1))
+        with open(os.path.join(self.dir, "console.json")) as f:
+            self.assertEqual(json.load(f)["lever"], "anthropic")
+
+    def test_request_recorded(self):
+        long = "x" * 300
+        self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": long}]}))
+        self.post(body_for("claude-sonnet-5-5"), path="/v1/messages/count_tokens")
+        self.post(b"{}", path="/api/hello")
+        self.logged(3)
+        self.app.store.close()
+        rows = self.app.store.departures()
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual((r["track"], r["reason"], r["status"], r["preview"]),
+                         ("local", "rule:Model the request asked for:2", 200, long[:120]))
+        self.assertIsInstance(r["ttfb_ms"], int)
+        self.assertIsInstance(r["ms"], int)
+        self.assertEqual(len(self.app.recent), 1)
+
+    def test_classifier_timeout_routes_on(self):
+        slow = Fake()
+        slow.hang = True
+        self.addCleanup(lambda: (slow.shutdown(), slow.server_close()))
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.start(self.l.url, slow.url)
+        self.app.routing = replace(DEFAULT_CONFIG, classifier=replace(DEFAULT_CONFIG.classifier, timeout_s=0.2))
+        t = time.time()
+        self.assertEqual(self.post(body_for("claude-sonnet-5-5"))[0], 200)
+        self.assertLess(time.time() - t, 0.5)
+        self.assertEqual(len(self.l.seen), 1)
+        self.logged()
+        self.assertIn("timed out after 0.2 s", json.dumps(self.app.recent[0][1].explanation))
+
+    def test_log_reason_quoted(self):
+        self.post(body_for("claude-sonnet-5-5"))
+        self.logged()
+        self.assertIn('reason="rule:Model the request asked for:2"', self.err.getvalue())
+        self.assertIn(" shadow=-", self.err.getvalue())
 
     def test_streams_incrementally(self):
         c = HTTPConnection("127.0.0.1", self.port, timeout=5)
