@@ -51,6 +51,9 @@ ln -s $PWD/claude-router.service ~/.config/systemd/user/
 systemctl --user enable --now claude-router
 ```
 
+The unit runs Python with `-E -s` (ignores `PYTHON*` env vars and the user site
+directory), so only the standard library is ever loaded.
+
 The router won't start if `LITELLM_API_KEY` is unset or if
 `CLAUDE_ROUTER_LISTEN` isn't a loopback address; it exits with code 2.
 `LITELLM_API_KEY` is the LiteLLM container's `LITELLM_MASTER_KEY`.
@@ -67,6 +70,97 @@ To turn it on in Claude Code, add this to `~/.claude/settings.json`:
 - **Router down:** every Claude Code session fails to connect. Use the bypass
   above, or restart the router.
 - **Logs:** `journalctl --user -u claude-router -f`
+
+## Console
+
+Open `http://127.0.0.1:8787/ui` (loopback only). It shows live traffic, edits
+the routing rules, and compares local and Anthropic answers side by side.
+
+- **Lever:** Anthropic, Rules or Local. Anthropic and Local send everything to
+  that track (reason `lever`). Rules uses the Rulebook.
+- **Rulebook:** rules are checked in order, first one that decides wins. Nothing
+  decided goes to the "Otherwise" track (default Anthropic). Changes apply to
+  the next request and are saved to `console.json`.
+- **Classifier:** a rule that asks a small LiteLLM model what the newest human
+  message is about (labels, each with a track), once per turn and cached. It
+  never runs on opus. If it times out or isn't confident, the rule passes and
+  the explanation says why. Reason shows as `about:<label>`.
+- **Doubling:** sends a copy of a request to the other track and stores both
+  answers. Claude Code only ever sees the answer from the track the rules chose.
+  Settings are rate (default 0%, so nothing is doubled until you raise it), an
+  optional tag (e.g. `both`: only turns with `#both`), and directions (when
+  local answers, when Anthropic answers). It picks whole turns: every
+  `POST /v1/messages` of a chosen turn is doubled. Copies cost Max quota (to
+  Anthropic) and GPU time (to local). At most one local and two Anthropic copies
+  run at once; a step that finds its direction full is marked "skipped, busy".
+  Judge pairs in Side by side; "Forget all pairs" deletes them.
+
+### Rule language
+
+A rule is one or more lines: `when <condition> go anthropic|local`. The first
+matching line decides; no match passes to the next rule.
+
+| Field | Value |
+|-------|-------|
+| `text` | the latest human message (first 20 000 chars) |
+| `tag` | every `#word` in `text` (`tag is plan` means "has this tag") |
+| `tier` | `opus`, `sonnet`, `haiku` or `other`, from the model id |
+| `model` | the full model id |
+| `tokens` | rough size: request bytes / 4 (`100k` means 100 000) |
+| `subagent` | yes/no, from `cc_is_subagent=true` in the first system block (undocumented marker, may break) |
+| `label` | the classifier's label for this turn, or `none` |
+
+| Operator | Meaning |
+|----------|---------|
+| `is` | equals, case-insensitive |
+| `contains` | case-insensitive substring |
+| `matches /re/flags` | Python regex, flags `i` `m` `s` |
+| `>` `<` `>=` `<=` | numbers |
+| `and` `or` `not`, `( )` | `not` binds tightest, then `and`, then `or` |
+
+```
+when tag is plan go anthropic
+when tier is sonnet or tier is haiku go local
+when text contains "migration" and tier is sonnet go anthropic
+when tokens > 120k go anthropic
+when not subagent and text matches /^(hi|thanks)\b/i go local
+```
+
+Using `label` makes the classifier run for that request (if it's switched on;
+otherwise `label` is `none`). The editor previews a rule against your last 200
+requests (kept in memory only, so after a restart it covers only newer ones).
+
+### Switching tracks mid-conversation
+
+Same limitation as above, easier to hit now: once a conversation has had
+local-generated turns (lever on Local, `#local`, or a rule or the classifier
+sending the main session local), sending it back to Anthropic may be rejected.
+The router does no history cleaning. If it fails, start a new session. A doubled
+copy that Anthropic rejects only shows up as an error on its pair.
+
+### Files
+
+In `~/.config/claude-router/` (override with `CLAUDE_ROUTER_CONFIG_DIR`), mode 0600:
+
+- `console.json`: the routing config. If it's unreadable at startup, the router
+  uses defaults, keeps the bad file as `console.json.bad` and shows a banner.
+- `stats.db`: SQLite stats. It stores the first 120 characters of each message
+  and the doubled answers (text and tool calls), locally. Never headers, keys
+  or full bodies. Requests are pruned after 30 days; pairs and verdicts stay
+  until "Forget all pairs".
+
+### Console acceptance
+
+1. Lever to Local, `claude -p "hi"` goes local (see the Departures feed); lever
+   back to Rules.
+2. Add the rule `when text contains "zebra" go local`. The preview shows
+   matches. `claude -p "zebra"` goes local.
+3. With the classifier on against the real LiteLLM, a haiku subagent prompt
+   "fix the failing test" shows `about: coding` (or a timeout note) in its
+   explanation.
+4. Doubling rate 100%, tag `both`: `claude -p "#both use a haiku subagent to say hi"`
+   puts a turn in Side by side, and a verdict saves.
+5. With reduced motion set in the OS, there are no moving dots.
 
 ## Main session on local (accepted limitation)
 
