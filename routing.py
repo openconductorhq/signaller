@@ -60,7 +60,7 @@ class Features:
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
             return None
         tags = frozenset(t.lower() for t in TAG_RE.findall(text))
-        return cls(text, tags, model, len(body) // 4, sub, hashlib.sha256(text.encode()).hexdigest())
+        return cls(text, tags, model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest())
 
     def get(self, name: str, label: Callable[[], str]):
         return label() if name == "label" else getattr(self, {"tag": "tags"}.get(name, name))

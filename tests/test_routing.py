@@ -120,6 +120,13 @@ OPUS_CASES = [
     ([user(text("#LOCAL"))], "local"),
     ([user(text("#localhost"))], "anthropic"),
     ([user("hi")], "anthropic"),
+    ([user(text("#local")), assistant(text("ok")), user(text("next"))], "anthropic"),
+    ([user(text("#local go")),
+      assistant([{"type": "tool_use", "id": "t1", "name": "x", "input": {}}]),
+      user([{"type": "tool_result", "tool_use_id": "t1", "content": "done"}])], "local"),
+    ([user([{"type": "text", "text": "<system-reminder>#local</system-reminder>"},
+            {"type": "text", "text": "hello"}])], "anthropic"),
+    ([user("fix #local")], "local"),
 ]
 
 
@@ -195,6 +202,10 @@ class EngineTests(unittest.TestCase):
         for msgs, want in OPUS_CASES:
             self.assertEqual(self.go(DEFAULT_CONFIG, msgs).track, want, msgs)
             self.assertEqual(self.go(OFF, msgs).track, want, msgs)
+
+    def test_lone_surrogate_does_not_crash(self):
+        raw = b'{"model":"m","messages":[{"role":"user","content":"\\ud800 hi"}]}'
+        self.assertIsNotNone(Features.from_body(raw))
 
     def test_subagent_and_tokens_fields(self):
         sys_ = [{"type": "text", "text": "x cc_is_subagent=true y"}, {"type": "text", "text": "z"}]
