@@ -88,3 +88,14 @@ def test_prune_30_days(tmp_path):
     s.record_request(req(2, now))
     s.close()
     assert [r["id"] for r in Store(p).departures()] == [2]
+
+
+def test_bad_rows_dont_poison_batch(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    s.record_request(req(1, now))
+    s.record_request(req(2, now, model_in={"bad": 1}))
+    s.record_request("not a dict")
+    s.record_request(req(3, now))
+    s.close()
+    assert [r["id"] for r in s.departures()] == [3, 1]
+    assert s.dropped == 2

@@ -73,10 +73,11 @@ def save_console_config(path, cfg):
 
 class Store:
     def __init__(self, path, queue_max=10_000):
-        self.path, self.dropped = path, 0
+        self.path, self.dropped, self._dlock = path, 0, threading.Lock()
         os.makedirs(os.path.dirname(os.path.abspath(path)), mode=0o700, exist_ok=True)
         os.close(os.open(path, os.O_CREAT | os.O_RDWR, 0o600))
         with self._conn() as c:
+            c.execute("PRAGMA journal_mode=WAL")
             c.executescript(SCHEMA)
             c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - RETAIN,))
             top = c.execute("SELECT MAX(id) FROM requests").fetchone()[0] or 0
@@ -97,7 +98,7 @@ class Store:
         try:
             self._q.put_nowait(item)
         except queue.Full:
-            self.dropped += 1
+            self._drop()
 
     def record_request(self, row): self._put(("requests", row))
     def record_pair(self, row): self._put(("pairs", row))
@@ -120,18 +121,30 @@ class Store:
                 except queue.Empty:
                     break
             done = None in items
+            items = [it for it in items if it]
             try:
-                with c:
-                    for it in items:
-                        if it:
-                            c.execute(INSERT[it[0]], {k: it[1].get(k) for k in COLS[it[0]].split()})
-                    if time.time() - last_prune > 3600:
-                        c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - RETAIN,))
-                        last_prune = time.time()
-            except sqlite3.Error as e:  # ponytail: a bad batch is dropped, not retried
-                print("store write failed: %s" % e, file=sys.stderr)
-                self.dropped += len(items)
+                self._write(c, items, last_prune)
+            except Exception:  # ponytail: retry one by one so a single bad row costs only itself
+                for it in items:
+                    try:
+                        self._write(c, [it], last_prune)
+                    except Exception as e:
+                        print("store write failed: %s" % type(e).__name__, file=sys.stderr)
+                        self._drop()
+            if time.time() - last_prune > 3600:
+                last_prune = time.time()
         c.close()
+
+    def _write(self, c, items, last_prune):
+        with c:
+            for t, row in items:
+                c.execute(INSERT[t], {k: row.get(k) for k in COLS[t].split()})
+            if time.time() - last_prune > 3600:
+                c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - RETAIN,))
+
+    def _drop(self):
+        with self._dlock:
+            self.dropped += 1
 
     def _all(self, sql, args=()):
         c = self._conn()
