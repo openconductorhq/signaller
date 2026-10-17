@@ -15,6 +15,7 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
 from classifier import Classifier
+from doubling import AnswerCapture, Doubler
 from routing import Features, RoutingConfig, is_routed, route as decide_route
 from store import Store, load_console_config, save_console_config
 
@@ -111,7 +112,7 @@ class App:
         self.store = Store(os.path.join(config_dir, "stats.db"))
         self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
         self.started = time.time()
-        self.doubler = None  # Task 6
+        self.doubler = Doubler(self.store, open_upstream)
 
     def set_routing(self, new: RoutingConfig) -> None:
         save_console_config(os.path.join(self.config_dir, "console.json"), new)
@@ -160,6 +161,14 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             except (ValueError, AttributeError):
                 pass
             shown = out_model = model
+            rec = f is not None and self.path.split("?", 1)[0] == "/v1/messages"
+            rid = app.store.next_id() if rec else None
+            turn_id = app.doubler.turn_for(f, route, routing.doubling) if rec and app.doubler else None
+            pair, cap, shadow = None, None, "-"
+            if turn_id:  # shadow starts before the served upstream; it never touches the served path again
+                pair = app.doubler.pending_served(turn_id, rid, None, route)
+                shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
+                                                  self.headers.items(), body, cfg)
             if route == "local":
                 name = "LiteLLM"
                 out_model = req["model"] = local_model(model, cfg.local_sonnet, cfg.local_haiku)
@@ -169,8 +178,6 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             else:
                 name = "Anthropic"
                 headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]
-            rec = f is not None and self.path.split("?", 1)[0] == "/v1/messages"
-            rid = app.store.next_id() if rec else None
             status, err, ttfb, conn = 0, "", None, None
             try:
                 try:
@@ -188,6 +195,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     if k.lower() not in HOP or k.lower() == "content-length":
                         self.send_header(k, v)
                 self.end_headers()
+                if pair:
+                    cap = AnswerCapture(resp.getheader("content-type", ""))
                 while True:
                     try:
                         chunk = resp.read1(65536)
@@ -200,6 +209,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
+                    if cap:  # only after the bytes are out
+                        cap.feed(chunk)
                 if err:  # headers are out, so tell the client the stream is truncated
                     if resp.getheader("content-type", "").startswith("text/event-stream"):
                         self.wfile.write(MIDSTREAM_SSE)
@@ -211,15 +222,18 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 if conn:
                     conn.close()
                 ms = int((time.time() - t0) * 1000)
+                if pair:
+                    res = cap.result() if cap else {"text": "", "tools": [], "output_tokens": None}
+                    pair.finish({"status": status, "ttfb_ms": ttfb, "ms": ms, "error": err.strip() or None, **res})
                 if rec:
                     app.store.record_request({
                         "id": rid, "ts": t0, "track": route, "reason": d.reason, "explanation": json.dumps(d.explanation),
                         "model_in": model, "model_out": out_model, "status": status, "ttfb_ms": ttfb if ttfb is not None else ms,
-                        "ms": ms, "stream": int(stream), "preview": f.text[:120], "turn_id": None})
+                        "ms": ms, "stream": int(stream), "preview": f.text[:120], "turn_id": turn_id})
                     app.recent.append((f, d, rid))
                 shown_reason = '"%s"' % reason if re.search(r"\s", reason) else reason
-                print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s shadow=-" % (
-                    time.strftime("%Y-%m-%d %H:%M:%S"), route, shown_reason, shown, status, ms, stream, err),
+                print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s shadow=%s" % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"), route, shown_reason, shown, status, ms, stream, err, shadow),
                     file=sys.stderr, flush=True)
 
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = handle_any
