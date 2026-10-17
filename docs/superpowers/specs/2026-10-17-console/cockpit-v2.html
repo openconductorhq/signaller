@@ -1,0 +1,145 @@
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  .sb{--paper:#EEF1EC;--ink:#1C2B36;--muted:#5E6B73;--rail:#B9C2BD;--anth:#D8901E;--loc:#1F8A5B;--shadow:#6B5BD6;--stop:#C8412F;
+      background:var(--paper);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;border-radius:14px;padding:22px 26px;max-width:1100px;margin:12px auto}
+  .sb h1,.sb .num,.sb .lever b{font-family:"Barlow Condensed",sans-serif}
+  .top{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+  .top h1{font-size:30px;margin:0;letter-spacing:.5px;font-weight:700}
+  .top .who{color:var(--muted);font-size:13px}
+  .frame{margin-left:auto;display:flex;gap:6px;background:#DCE2DD;padding:6px;border-radius:10px}
+  .lever{border:0;border-radius:7px;padding:8px 14px;background:transparent;color:var(--ink);font:inherit;cursor:pointer;text-align:left}
+  .lever b{display:block;font-size:18px;line-height:1}
+  .lever small{font-size:11px;color:var(--muted)}
+  .lever.on{background:var(--ink);color:#fff}.lever.on small{color:#C9D3D8}
+  .lever.a b::before{content:"";display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--anth);margin-right:6px}
+  .lever.l b::before{content:"";display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--loc);margin-right:6px}
+
+  .yard{margin:18px 0 8px;position:relative}
+  .yard svg{width:100%;height:auto;display:block}
+  .trk{fill:none;stroke-width:6;stroke-linecap:round}
+  .dot{r:5}
+  @keyframes upA{from{offset-distance:0%}to{offset-distance:100%}}
+  .mv{offset-rotate:0deg;animation:upA 2.6s linear infinite}
+  @media (prefers-reduced-motion:reduce){.mv{animation:none;offset-distance:60%}}
+  .branch{font-size:13px;fill:var(--ink)}
+  .big{font-family:"Barlow Condensed";font-size:40px;font-weight:600}
+
+  .cols{display:grid;grid-template-columns:1.05fr 1fr;gap:26px;margin-top:14px}
+  @media (max-width:820px){.cols{grid-template-columns:1fr}}
+  .sb h2{font-size:17px;margin:0 0 4px;font-weight:600}
+  .hint{font-size:12.5px;color:var(--muted);margin:0 0 10px}
+  ol.rules{list-style:none;padding:0;margin:0;counter-reset:r}
+  ol.rules li{counter-increment:r;display:grid;grid-template-columns:28px 1fr auto;gap:10px;align-items:start;padding:10px 0;border-top:1px solid #D3DAD5}
+  ol.rules li::before{content:counter(r);font-family:"Barlow Condensed";font-size:22px;color:var(--muted);line-height:1}
+  .rname{font-weight:600;font-size:14px}
+  .rdesc{font-size:12.5px;color:var(--muted);margin-top:2px}
+  .to-a{color:var(--anth);font-weight:600}.to-l{color:var(--loc);font-weight:600}
+  .tg{width:34px;height:20px;border-radius:10px;background:var(--loc);position:relative;flex:none}
+  .tg::after{content:"";position:absolute;top:3px;right:3px;width:14px;height:14px;border-radius:50%;background:#fff}
+  .tg.off{background:#C2CAC5}.tg.off::after{right:auto;left:3px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
+  .chip{font-size:12px;border-radius:6px;padding:3px 8px;background:#fff;border:1px solid #D3DAD5}
+  .slider{margin-top:8px;font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px}
+  .slider i{flex:1;height:4px;background:linear-gradient(90deg,var(--ink) 0 70%,#C2CAC5 70%);border-radius:2px;position:relative}
+  .slider i::after{content:"";position:absolute;left:70%;top:-5px;width:14px;height:14px;border-radius:50%;background:var(--ink);transform:translateX(-50%)}
+
+  .board{font-size:13px}
+  .dep{display:grid;grid-template-columns:52px 10px 1fr auto;gap:10px;align-items:center;padding:7px 0;border-top:1px solid #D3DAD5;cursor:pointer}
+  .dep time{font-variant-numeric:tabular-nums;color:var(--muted);font-size:12px}
+  .dep .sw{width:10px;height:10px;border-radius:50%}
+  .dep .what{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .dep .why{font-size:12px;color:var(--muted)}
+  .dep.open{background:#fff;border-radius:8px;padding:9px 10px;grid-template-columns:52px 10px 1fr auto;margin:4px -10px}
+  .explain{grid-column:3 / 5;font-size:12.5px;color:var(--muted);line-height:1.6}
+  .explain s{color:#9AA5AB}
+
+  .pair{margin-top:26px;border-top:2px solid var(--ink);padding-top:14px}
+  .pairhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+  .pairhead .mode{margin-left:auto;font-size:12.5px;color:var(--muted)}
+  .twin{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:10px}
+  @media (max-width:820px){.twin{grid-template-columns:1fr}}
+  .ans{background:#fff;border-radius:10px;padding:12px 14px;border-top:4px solid}
+  .ans.a{border-color:var(--anth)}.ans.l{border-color:var(--loc)}
+  .meta{font-size:12px;color:var(--muted);display:flex;gap:12px}
+  .ans p{font-size:13px;line-height:1.55;margin:8px 0 0}
+  .served{font-size:11px;background:var(--ink);color:#fff;border-radius:4px;padding:1px 6px;margin-left:auto}
+  .verdict{display:flex;gap:8px;margin-top:10px;align-items:center;font-size:13px}
+  .verdict button{font:inherit;border:1px solid #C2CAC5;background:#fff;border-radius:7px;padding:5px 12px;cursor:pointer}
+  .verdict .tally{margin-left:auto;color:var(--muted);font-size:12px}
+</style>
+
+<h2 style="margin-bottom:2px">Cockpit, second pass</h2>
+<p class="subtitle">The idea: the router is a railway junction. Requests are trains, Anthropic and local are the two tracks, your override is the signal-box lever. Everything else on the page explains why a train took a track.</p>
+
+<div class="sb">
+  <div class="top">
+    <h1>claude-router</h1>
+    <span class="who">127.0.0.1:8787 · up 3h 12m</span>
+    <div class="frame" role="radiogroup" aria-label="Override">
+      <button class="lever a"><b>Anthropic</b><small>everything, ignore rules</small></button>
+      <button class="lever on"><b>Rules</b><small>follow the rulebook</small></button>
+      <button class="lever l"><b>Local</b><small>everything, ignore rules</small></button>
+    </div>
+  </div>
+
+  <div class="yard">
+    <svg viewBox="0 0 1000 210" aria-label="Live traffic: 38% Anthropic, 62% local in the last hour">
+      <path id="t0" class="trk" stroke="var(--rail)" d="M30 105 H430"/>
+      <path id="tA" class="trk" stroke="var(--anth)" d="M430 105 C520 105 540 40 640 40 H960"/>
+      <path id="tL" class="trk" stroke="var(--loc)" d="M430 105 C520 105 540 170 640 170 H960"/>
+      <text x="30" y="85" class="branch">Claude Code</text>
+      <text x="30" y="135" class="branch" fill="#5E6B73">4 sessions · 11 req/min</text>
+      <circle cx="430" cy="105" r="11" fill="#fff" stroke="var(--ink)" stroke-width="3"/>
+      <text x="402" y="140" class="branch" fill="#5E6B73">rulebook</text>
+      <text x="700" y="26" class="branch">Anthropic · claude-opus-5-5</text>
+      <text x="700" y="198" class="branch">Local · gemma-4-26B via LiteLLM</text>
+      <text x="880" y="30" class="big" fill="var(--anth)" text-anchor="end">38%</text>
+      <text x="880" y="160" class="big" fill="var(--loc)" text-anchor="end">62%</text>
+      <circle class="mv" r="6" fill="var(--anth)" style="offset-path:path('M30 105 H430 C520 105 540 40 640 40 H960');animation-delay:0s"/>
+      <circle class="mv" r="6" fill="var(--loc)" style="offset-path:path('M30 105 H430 C520 105 540 170 640 170 H960');animation-delay:.9s"/>
+      <circle class="mv" r="6" fill="var(--loc)" style="offset-path:path('M30 105 H430 C520 105 540 170 640 170 H960');animation-delay:1.7s"/>
+      <circle class="mv" r="6" fill="var(--shadow)" style="offset-path:path('M30 105 H430 C520 105 540 40 640 40 H960');animation-delay:1.7s;opacity:.55"/>
+    </svg>
+  </div>
+
+  <div class="cols">
+    <section>
+      <h2>Rulebook</h2>
+      <p class="hint">Checked top to bottom; the first rule that decides wins. Drag to reorder. Changes apply to the next request.</p>
+      <ol class="rules">
+        <li><div><div class="rname">Tags in your message</div><div class="rdesc"><b>#plan</b> → <span class="to-a">Anthropic</span>, <b>#local</b> → <span class="to-l">local</span></div></div><span class="tg"></span></li>
+        <li><div><div class="rname">What the prompt is about</div>
+          <div class="rdesc">A small local model reads your newest message once per turn and labels it.</div>
+          <div class="chips"><span class="chip">planning → <span class="to-a">Anthropic</span></span><span class="chip">design &amp; review → <span class="to-a">Anthropic</span></span><span class="chip">coding → <span class="to-l">local</span></span><span class="chip">chit-chat → <span class="to-l">local</span></span></div>
+          <div class="slider">Only decide when at least 70% sure <i></i></div></div><span class="tg"></span></li>
+        <li><div><div class="rname">Model the request asked for</div><div class="rdesc">opus → <span class="to-a">Anthropic</span>, sonnet &amp; haiku → <span class="to-l">local</span></div></div><span class="tg"></span></li>
+      </ol>
+    </section>
+
+    <section class="board">
+      <h2>Departures</h2>
+      <p class="hint">Every request, newest first. Open one to see which rule decided.</p>
+      <div class="dep"><time>12:41:15</time><span class="sw" style="background:var(--anth)"></span><span class="what">#plan rethink the retry logic</span><span class="why">tag</span></div>
+      <div class="dep open"><time>12:41:12</time><span class="sw" style="background:var(--loc)"></span><span class="what">Task 3: add load_config with loopback check</span><span class="why">about: coding</span>
+        <div class="explain">1 Tags — <s>none found</s><br>2 What it's about — <b>coding, 88% sure</b> → local<br>3 Model — not reached<br>Doubled to Anthropic for comparison · local answered in 38 s, Anthropic in 2.9 s</div></div>
+      <div class="dep"><time>12:41:09</time><span class="sw" style="background:var(--loc)"></span><span class="what">Explore: find where config is loaded</span><span class="why">model: haiku</span></div>
+      <div class="dep"><time>12:41:07</time><span class="sw" style="background:var(--anth)"></span><span class="what">write the implementation plan for the console</span><span class="why">about: planning</span></div>
+      <div class="dep"><time>12:40:58</time><span class="sw" style="background:var(--stop)"></span><span class="what">fix failing test in test_proxy</span><span class="why">LiteLLM down · 502</span></div>
+    </section>
+  </div>
+
+  <section class="pair">
+    <div class="pairhead">
+      <h2>Side by side</h2>
+      <span class="hint" style="margin:0">41 doubled requests today. You've judged 12.</span>
+      <span class="mode">Doubling: <b>every 5th request</b> · only when local answers</span>
+    </div>
+    <div class="twin">
+      <div class="ans l"><div class="meta"><b style="color:var(--loc)">Local</b><span>38 s</span><span>388 tokens</span><span class="served">sent to Claude Code</span></div>
+        <p>Added <code>load_config(env)</code> that parses <code>CLAUDE_ROUTER_LISTEN</code> with <code>ipaddress</code> and raises on non-loopback. Tests cover 0.0.0.0 and a LAN IP…</p></div>
+      <div class="ans a"><div class="meta"><b style="color:var(--anth)">Anthropic</b><span>2.9 s</span><span>412 tokens</span></div>
+        <p>Added <code>load_config(env)</code>; treats <code>localhost</code> as loopback and also validates the port range, so <code>:99999</code> fails with a clear message instead of a traceback…</p></div>
+    </div>
+    <div class="verdict">Which was better? <button>Local</button><button>Anthropic</button><button>About the same</button><span class="tally">So far: local 4 · Anthropic 6 · same 2</span></div>
+  </section>
+</div>
