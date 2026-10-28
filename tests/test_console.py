@@ -2,6 +2,7 @@ import json
 import os
 import time
 import unittest
+from dataclasses import replace
 from http.client import HTTPConnection
 
 from tests import test_proxy
@@ -54,7 +55,7 @@ class ConsoleTest(Fixture):
         s, j = self.js("GET", "/ui/api/state")
         self.assertEqual(s, 200)
         self.assertEqual(j["config"]["lever"], "rules")
-        self.assertEqual(j["upstreams"]["local"], "S via LiteLLM")
+        self.assertEqual(j["upstreams"]["local"], {"url": self.l.url[7:], "configured": True})
 
     def test_v1_with_own_origin_still_forbidden(self):
         s, _ = self.post(body_for("claude-opus-5-5"), {**HDRS, "Origin": "http://127.0.0.1:%d" % self.port})
@@ -172,6 +173,43 @@ class ConsoleTest(Fixture):
             r, _ = self.req("GET", path, origin=None)
             self.assertEqual(r.status, 200, path)
             self.assertTrue(r.getheader("Content-Type").startswith(ctype), path)
+
+    def test_models_endpoint(self):
+        self.v.models = b'{"data":[{"id":"b"},{"id":"a"}]}'
+        r, d = self.req("GET", "/ui/api/models?track=valar")
+        self.assertEqual((r.status, json.loads(d)), (200, {"models": ["a", "b"]}))
+        self.assertEqual(self.v.seen[0][:2], ("GET", "/v1/models"))
+        self.assertEqual(self.v.seen[0][2]["Authorization"], "Bearer VK")
+        self.assertNotIn(b"VK", d)
+
+    def test_models_errors(self):
+        self.assertEqual(self.js("GET", "/ui/api/models?track=anthropic")[0], 400)
+        self.assertEqual(self.js("GET", "/ui/api/models?track=bogus")[0], 400)
+        self.assertEqual(self.js("GET", "/ui/api/models")[0], 400)
+        self.assertEqual(self.req("GET", "/ui/api/models?track=valar", host="evil.example")[0].status, 403)
+        self.assertEqual(self.req("GET", "/ui/api/models?track=valar", origin="http://evil.com")[0].status, 403)
+        self.assertEqual(self.v.seen, [])
+        self.app.cfg = replace(self.app.cfg, valar_key="")
+        s, j = self.js("GET", "/ui/api/models?track=valar")
+        self.assertEqual((s, j["error"]), (502, "Valar not configured"))
+        self.assertEqual(self.v.seen, [])
+        self.app.cfg = replace(self.app.cfg, valar_key="VK", valar_url="http://127.0.0.1:1")
+        s, j = self.js("GET", "/ui/api/models?track=valar")
+        self.assertEqual(s, 502)
+        self.assertNotIn("VK", json.dumps(j))
+
+    def test_state_upstreams_no_key(self):
+        s, j = self.js("GET", "/ui/api/state")
+        self.assertTrue(j["upstreams"]["valar"]["configured"])
+        self.assertEqual(j["upstreams"]["valar"]["url"], self.v.url[7:])
+        self.assertNotIn("VK", json.dumps(j))
+        self.assertNotIn("LK", json.dumps(j))
+        self.app.cfg = replace(self.app.cfg, valar_key="")
+        self.assertFalse(self.js("GET", "/ui/api/state")[1]["upstreams"]["valar"]["configured"])
+
+    def test_verdict_api_valar(self):
+        self.app.store.record_turn({"id": "t2", "ts": time.time(), "preview": "p", "verdict": None})
+        self.assertEqual(self.js("PUT", "/ui/api/turns/t2/verdict", {"verdict": "valar"})[0], 200)
 
 
 if __name__ == "__main__":

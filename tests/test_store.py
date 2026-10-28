@@ -58,7 +58,7 @@ def test_turns_pairs_verdict(tmp_path):
     assert s.turn("b")["preview"] == "b" and s.turn("zz") is None
     assert s.set_verdict("b", "local") and not s.set_verdict("b", "bogus") and not s.set_verdict("zz", "same")
     assert [t["id"] for t in s.turns()] == ["a", "b"]
-    assert s.stats(now)["tally"] == {"local": 1, "anthropic": 0, "same": 0}
+    assert s.stats(now)["tally"] == {"local": 1, "anthropic": 0, "valar": 0, "same": 0}
     assert s.stats(now)["judged_today"] == 1
     s.forget_pairs()
     assert s.turns() == [] and s.turn("a") is None
@@ -123,3 +123,21 @@ def test_null_store_is_inert():
     assert n.pair_for_request(1) is None and n.set_verdict("x", "local") is False
     assert n.stats(time.time())["last_hour_total"] == 0
     n.forget_pairs(); n.close()
+
+
+def test_stats_three_tracks(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    for t in ("anthropic", "valar", "local"):
+        s.record_request(req(s.next_id(), now - 5, t))
+    s.close()
+    st = s.stats(now)
+    assert (st["anthropic_pct"], st["valar_pct"], st["local_pct"]) == (33, 33, 33)
+    assert st["anthropic_pct"] + st["valar_pct"] + st["local_pct"] <= 100
+
+
+def test_verdict_valar(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    s.record_turn(dict(id="t", ts=now, preview="p"))
+    s.close()
+    assert s.set_verdict("t", "valar") and not s.set_verdict("t", "openai")
+    assert s.stats(now)["tally"] == {"anthropic": 0, "valar": 1, "local": 0, "same": 0}

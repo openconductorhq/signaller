@@ -31,6 +31,7 @@ class Fake(ThreadingHTTPServer):
         self.error = False
         self.die = False
         self.hang = False
+        self.models = b"{}"
         threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
     @property
@@ -43,6 +44,12 @@ class FakeHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if self.path.endswith("/v1/models"):
+            self.server.seen.append((self.command, self.path, self.headers, b""))
+            self.send_response(200)
+            self.send_header("content-length", str(len(self.server.models)))
+            self.end_headers()
+            return self.wfile.write(self.server.models)
         self.do_POST()
 
     def do_POST(self):

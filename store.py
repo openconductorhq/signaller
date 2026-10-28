@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 
-from routing import DEFAULT_CONFIG, config_from_json, config_to_json
+from routing import DEFAULT_CONFIG, TRACKS, config_from_json, config_to_json
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,
@@ -179,11 +179,11 @@ class Store:
         c = self._conn()
         try:
             q = lambda sql, *a: c.execute(sql, a).fetchone()[0]
-            tally = {"local": 0, "anthropic": 0, "same": 0}
+            tally = {"anthropic": 0, "valar": 0, "local": 0, "same": 0}
             for v, k in c.execute("SELECT verdict, COUNT(*) FROM turns WHERE verdict IS NOT NULL GROUP BY verdict"):
                 tally[v] = k
             return {
-                "anthropic_pct": pct("anthropic"), "local_pct": pct("local"), "last_hour_total": n,
+                "anthropic_pct": pct("anthropic"), "valar_pct": pct("valar"), "local_pct": pct("local"), "last_hour_total": n,
                 "per_minute": q("SELECT COUNT(*) FROM requests WHERE ts >= ?", now - 300) / 5,
                 "errors_last_hour": sum(r["status"] is not None and (r["status"] >= 500 or r["status"] == 0) for r in hour),
                 "doubled_turns_today": q("SELECT COUNT(*) FROM turns WHERE ts >= ?", midnight),
@@ -205,7 +205,7 @@ class Store:
         return r[0]
 
     def set_verdict(self, turn_id, verdict):
-        if verdict not in ("local", "anthropic", "same"):
+        if verdict not in TRACKS + ("same",):
             return False
         c = self._conn()
         try:
@@ -245,5 +245,5 @@ class NullStore:
     def forget_pairs(self): pass
 
     def stats(self, now):
-        return {"anthropic_pct": 0, "local_pct": 0, "last_hour_total": 0, "per_minute": 0, "errors_last_hour": 0,
-                "doubled_turns_today": 0, "judged_today": 0, "tally": {"local": 0, "anthropic": 0, "same": 0}}
+        return {"anthropic_pct": 0, "valar_pct": 0, "local_pct": 0, "last_hour_total": 0, "per_minute": 0, "errors_last_hour": 0,
+                "doubled_turns_today": 0, "judged_today": 0, "tally": {"anthropic": 0, "valar": 0, "local": 0, "same": 0}}
