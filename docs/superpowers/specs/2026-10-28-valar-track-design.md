@@ -108,17 +108,20 @@ Verdicts become a track name or `same`. The tally counts per track.
 
 ### Classifier upstream (Amir's choice: selectable, default Valar)
 
-`classifier` gains `"upstream": "valar" | "local"` (default `valar`) and its
-default model becomes `zai-org/GLM-5.3-Flash`. The classifier calls
+`classifier` gains `"upstream": "valar" | "local"` (default `valar`). Fresh
+defaults: model `deepseek-ai/DeepSeek-V4.1-Flash`, time limit 2.5 s. On
+Valar the classifier sends `"reasoning_effort": "none"`. Measured
+2026-10-28: with reasoning on, GLM-5.3-Flash took 5.8–8 s and several models
+spent all 200 tokens reasoning and returned no content; with it off,
+DeepSeek-V4.1-Flash answered correctly in 0.8–1.5 s (6 runs). The classifier calls
 `<upstream>/v1/chat/completions` with that upstream's key. The cache key
 includes the upstream. An unconfigured upstream makes the classifier stay
 silent with the note "classifier: Valar not configured" (the anti-goal
 stands: classifier trouble never picks a track). Prompt text goes to Valar
 for classification; it would go there anyway on the Valar track.
 
-If Valar's reasoning models put their answer somewhere the classifier's
-parser doesn't read, the builder fixes the parser (live acceptance checks
-it), not the model choice.
+The existing parser reads `choices[0].message.content`; Valar puts the JSON
+there (reasoning goes in a separate field), so the parser is unchanged.
 
 ### Config file version
 
