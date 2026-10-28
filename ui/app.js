@@ -630,7 +630,7 @@ function renderTurn() {
     if (!turnData) {
       const on = cfg && cfg.doubling.rate > 0;
       box.replaceChildren(el("p", { class: "hint empty" }, on ? "No doubled turns yet. The next chosen turn shows up here."
-        : "Doubling is off. Turn the rate up to send a copy of some turns to the other track and compare the answers here."));
+        : "Doubling is off. Turn the rate up to send a copy of some turns to a second track and compare the answers here. Pick the tracks above."));
       return;
     }
     const d = turnData, steps = d.steps || [], ti = turns.findIndex((t) => t.id === d.id), st = steps[stepIdx];

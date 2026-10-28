@@ -215,7 +215,7 @@ class ConsoleTest(Fixture):
         page = self.req("GET", "/ui/", origin=None)[1].decode()
         self.assertIn('data-v="valar"', page)
         self.assertIn('id="tracks"', page)
-        self.assertIn("/ui/api/models", self.req("GET", "/ui/app.js", origin=None)[1].decode())
+        self.assertIn('api("GET", "models?track="', self.req("GET", "/ui/app.js", origin=None)[1].decode())
 
 
 if __name__ == "__main__":
