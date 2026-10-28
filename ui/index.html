@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-router</title>
+<link rel="stylesheet" href="/ui/app.css">
+<script src="/ui/app.js" defer></script>
+</head>
+<body>
+<div id="offline" class="offline" role="alert" hidden>Can't reach the router. Retrying…</div>
+<div id="banner" class="banner" role="status" hidden></div>
+
+<main class="sb">
+  <header class="top">
+    <h1>claude-router</h1>
+    <span class="who"><span id="who">connecting…</span> <span id="errs" class="errs" hidden></span></span>
+    <div class="frame" id="lever" role="radiogroup" aria-label="Lever: where requests go">
+      <button type="button" class="lever a" role="radio" data-v="anthropic" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
+      <button type="button" class="lever r" role="radio" data-v="rules" aria-checked="false"><b>Rules</b><small>follow the rulebook</small></button>
+      <button type="button" class="lever l" role="radio" data-v="local" aria-checked="false"><b>Local</b><small>everything, ignore rules</small></button>
+    </div>
+  </header>
+  <p id="leverErr" class="err" role="alert" hidden></p>
+  <p id="localWarn" class="warnline" role="status" hidden>Conversations that run on local may fail when you switch back. Start a new session afterwards if they do. <button type="button" class="linkish" id="localWarnX">OK</button></p>
+
+  <div class="yard">
+    <svg id="yard" viewBox="0 0 1000 210" role="img" aria-label="Live traffic">
+      <path class="trk rail" d="M30 105 H430"/>
+      <path class="trk anth" d="M430 105 C520 105 540 40 640 40 H960"/>
+      <path class="trk loc" d="M430 105 C520 105 540 170 640 170 H960"/>
+      <path id="pathA" class="ghost" d="M30 105 H430 C520 105 540 40 640 40 H960"/>
+      <path id="pathL" class="ghost" d="M30 105 H430 C520 105 540 170 640 170 H960"/>
+      <text x="30" y="85" class="branch">Claude Code</text>
+      <text x="30" y="135" class="branch mut" id="rpm">– req/min</text>
+      <g id="dots"></g>
+      <circle cx="430" cy="105" r="11" class="junction"/>
+      <text x="402" y="140" class="branch mut" id="jlabel">rulebook</text>
+      <text x="660" y="26" class="branch" id="nameA">Anthropic<tspan class="model" id="modelA"></tspan></text>
+      <text x="660" y="198" class="branch" id="nameL">Local<tspan class="model" id="modelL"></tspan></text>
+      <text x="960" y="28" class="big anthf" text-anchor="end" id="pctA">–</text>
+      <text x="960" y="160" class="big locf" text-anchor="end" id="pctL">–</text>
+      <text x="960" y="110" class="branch mut share" text-anchor="end">share of the last hour</text>
+    </svg>
+  </div>
+
+  <div class="cols">
+    <section id="rulebook" aria-labelledby="rbH">
+      <h2 id="rbH">Rulebook</h2>
+      <p class="hint">Checked top to bottom; the first rule that decides wins. Drag to reorder (or Alt+↑/↓). Changes apply to the next request.</p>
+      <p id="leverNote" class="levernote" hidden></p>
+      <p id="rbErr" class="err" role="alert" hidden></p>
+      <div id="rbBody">
+        <ol class="rules" id="rules"></ol>
+        <div class="otherwise"><span class="onum">∗</span><span class="rname">Otherwise</span> → <span class="seg" role="group" aria-label="Otherwise track" id="otherwise"><button type="button" data-v="anthropic">Anthropic</button><button type="button" data-v="local">Local</button></span></div>
+        <button type="button" class="btn" id="addRule">+ Add rule</button>
+      </div>
+      <div id="editor" class="editor" hidden>
+        <h3 id="edTitle">New rule</h3>
+        <label class="fld">Name <input id="edName" autocomplete="off" spellcheck="false"></label>
+        <label class="fld" for="edText">Rule</label>
+        <div class="edwrap">
+          <pre class="edhl" id="edHl" aria-hidden="true"></pre>
+          <textarea id="edText" class="edta" rows="3" spellcheck="false" autocomplete="off" aria-describedby="edMsg" placeholder='when text contains "migration" go anthropic'></textarea>
+        </div>
+        <div id="edMsg" class="edmsg" aria-live="polite"></div>
+        <div id="edHits"></div>
+        <p id="edErr" class="err" role="alert" hidden></p>
+        <div class="edbtns"><button type="button" class="btn primary" id="edSave">Save</button><button type="button" class="btn" id="edCancel">Cancel</button></div>
+        <details class="ref">
+          <summary>What a rule can look at</summary>
+          <div class="refcols">
+            <div><code>text</code> your newest message</div>
+            <div><code>tag</code> any #word in your message</div>
+            <div><code>tier</code> opus, sonnet, haiku or other</div>
+            <div><code>model</code> the full model id</div>
+            <div><code>label</code> what the classifier said</div>
+            <div><code>tokens</code> rough request size (<code>100k</code> works)</div>
+            <div><code>subagent</code> yes or no</div>
+            <div><b>Joining</b> <code>and</code> <code>or</code> <code>not</code> <code>( )</code></div>
+            <div><b>Comparing</b> <code>is</code> <code>contains</code> <code>matches /re/i</code> <code>&gt;</code> <code>&lt;</code></div>
+            <div><b>Ending</b> <code>go anthropic</code> / <code>go local</code></div>
+          </div>
+          <p class="hint">One <code>when … go …</code> per line; the first line that matches decides.</p>
+        </details>
+      </div>
+    </section>
+
+    <section class="board" aria-labelledby="depH">
+      <h2 id="depH">Departures</h2>
+      <p class="hint">Every request, newest first. Open one to see which rule decided.</p>
+      <div id="deps" class="deps"></div>
+      <p id="depEmpty" class="hint empty">No requests yet. Point Claude Code at the router and they'll show up here.</p>
+      <button type="button" class="btn" id="older" hidden>Load older</button>
+    </section>
+  </div>
+
+  <section class="pair" id="pair" aria-labelledby="pairH">
+    <div class="pairhead">
+      <h2 id="pairH">Side by side</h2>
+      <span class="hint" id="dblCount"></span>
+    </div>
+    <div class="strip" id="strip">
+      <label class="sfld">Double <input type="range" id="dRate" min="0" max="100" step="1" aria-label="Doubling rate, percent of turns"> <input type="number" id="dRateN" min="0" max="100" step="1" class="num3" aria-label="Doubling rate percent">% of turns</label>
+      <label class="sfld">only with tag <span class="hash">#</span><input id="dTag" class="tagin" placeholder="any" spellcheck="false" autocomplete="off"></label>
+      <label class="sfld"><input type="checkbox" id="dLocal"> when local answers</label>
+      <label class="sfld"><input type="checkbox" id="dAnth"> when Anthropic answers</label>
+    </div>
+    <p id="dblErr" class="err" role="alert" hidden></p>
+    <div id="turn"></div>
+  </section>
+</main>
+</body>
+</html>

@@ -1,0 +1,10 @@
+[Unit]
+Description=claude-router: route Claude Code requests to Anthropic or local LiteLLM
+
+[Service]
+ExecStart=/usr/bin/python3 -E -s %h/Development/claude-router/claude_router.py
+EnvironmentFile=%h/.config/claude-router/env
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

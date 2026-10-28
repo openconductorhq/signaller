@@ -1,0 +1,43 @@
+<h2>Writing your own rule</h2>
+<p class="subtitle">A manual rule sits in the Rulebook like the built-in ones: drag it to any position, switch it on or off. While you type, the router checks the rule against your last 200 requests.</p>
+
+<style>
+  .ed{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:14px;line-height:1.7;background:#1C2B36;color:#EEF1EC;border-radius:6px;padding:12px 14px}
+  .kw{color:#9fb4c4}.fld{color:#fff;font-weight:600}.str{color:#e8c37a}.an{color:#D8901E;font-weight:700}.lo{color:#3fbf85;font-weight:700}
+  .ok{font-size:12px;color:#1F8A5B;margin:6px 0 14px}
+  .hits{font-size:12px;border:1px solid #8884;border-radius:6px}
+  .hits div{padding:5px 10px;border-top:1px solid #8882;display:flex;gap:10px}
+  .hits div:first-child{border-top:0;font-weight:600}
+  .chg{color:#C8412F;font-weight:600}
+  .ref{font-size:12px;columns:2;margin-top:14px}
+  .ref code{font-size:12px}
+  .err{font-size:12px;color:#C8412F;margin-top:6px}
+</style>
+
+<div class="ed">
+<span class="kw">when</span> <span class="fld">text</span> <span class="kw">matches</span> <span class="str">/migration|schema|rollback/i</span><br>
+&nbsp;&nbsp;<span class="kw">and</span> <span class="fld">tier</span> <span class="kw">is</span> sonnet<br>
+<span class="kw">go</span> <span class="an">anthropic</span>
+</div>
+<div class="ok">✓ Valid. In your last 200 requests this would have matched 7, and changed the track for 5 of them.</div>
+
+<div class="hits">
+  <div><span style="width:70px">Time</span><span style="width:110px">Went</span><span style="width:110px">Would go</span><span>First words</span></div>
+  <div><span style="width:70px">12:41:12</span><span style="width:110px">local · tier</span><span style="width:110px" class="chg">anthropic</span><span>"Task 4: add the schema migration for…"</span></div>
+  <div><span style="width:70px">12:38:50</span><span style="width:110px">local · tier</span><span style="width:110px" class="chg">anthropic</span><span>"Write a rollback for the users table…"</span></div>
+  <div><span style="width:70px">12:20:03</span><span style="width:110px">anthropic · tag</span><span style="width:110px">anthropic</span><span>"#plan rethink the migration order…"</span></div>
+</div>
+
+<div class="ref">
+  <b>Things a rule can look at</b><br>
+  <code>text</code> your newest message<br>
+  <code>tier</code> opus, sonnet or haiku<br>
+  <code>model</code> the full model id<br>
+  <code>label</code> what the classifier said<br>
+  <code>tokens</code> rough request size<br>
+  <code>subagent</code> yes or no<br>
+  <code>tag</code> any #word in your message<br>
+  <b>Joining</b> <code>and</code> <code>or</code> <code>not</code> ( )<br>
+  <b>Comparing</b> <code>is</code> <code>contains</code> <code>matches</code> <code>&gt;</code> <code>&lt;</code><br>
+  <b>Ending</b> <code>go anthropic</code> / <code>go local</code>
+</div>
