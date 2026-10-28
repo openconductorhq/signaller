@@ -1,8 +1,10 @@
 "use strict";
 // claude-router cockpit: polls the JSON API once a second and edits the routing config as a whole.
 const $ = (id) => document.getElementById(id);
-const NAME = { anthropic: "Anthropic", local: "Local" };
-const other = (t) => (t === "local" ? "anthropic" : "local");
+const TRACKS = ["anthropic", "valar", "local"];
+const NAME = { anthropic: "Anthropic", valar: "Valar", local: "Local" };
+const C = { anthropic: "a", valar: "v", local: "l" };  // colour class letter per track
+const UP = { valar: "Valar", local: "LiteLLM" }, KEY = { valar: "VALAR_API_KEY", local: "LITELLM_API_KEY" };
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
 function el(tag, attrs, ...kids) {
@@ -16,10 +18,10 @@ function el(tag, attrs, ...kids) {
   for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : String(c));
   return e;
 }
-const trk = (t, lower) => el("span", { class: t === "local" ? "to-l" : "to-a" }, t === "local" ? (lower ? "local" : "Local") : "Anthropic");
+const trk = (t, lower) => el("span", { class: "to-" + C[t] }, lower && t === "local" ? "local" : NAME[t]);
 
-async function api(method, path, body) {
-  const opt = { method, headers: {}, signal: AbortSignal.timeout(5000) };  // a stalled fetch must not stop polling
+async function api(method, path, body, ms = 5000) {
+  const opt = { method, headers: {}, signal: AbortSignal.timeout(ms) };  // a stalled fetch must not stop polling
   if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
   const r = await fetch("/ui/api/" + path, opt);
   let j = null;
@@ -76,20 +78,20 @@ function applyState(st) {
   $("errs").textContent = `${s.errors_last_hour} error${s.errors_last_hour === 1 ? "" : "s"} in the last hour`;
   const none = !s.last_hour_total;
   $("pctA").textContent = none ? "–" : s.anthropic_pct + "%";
+  $("pctV").textContent = none ? "–" : s.valar_pct + "%";
   $("pctL").textContent = none ? "–" : s.local_pct + "%";
   $("yard").setAttribute("aria-label", none ? "Live traffic: no requests in the last hour"
-    : `Live traffic: ${s.anthropic_pct}% Anthropic, ${s.local_pct}% local in the last hour`);
+    : `Live traffic: ${s.anthropic_pct}% Anthropic, ${s.valar_pct}% Valar, ${s.local_pct}% local in the last hour`);
   const pm = s.per_minute;
   $("rpm").textContent = `${pm < 10 && pm % 1 ? pm.toFixed(1) : Math.round(pm)} req/min`;
   const hint = st.upstreams.anthropic_model_hint;
   $("modelA").textContent = hint && hint !== "Anthropic" ? " · " + hint : "";
-  $("modelL").textContent = " · " + st.upstreams.local;
   $("dblCount").textContent = `${s.doubled_turns_today} doubled turn${s.doubled_turns_today === 1 ? "" : "s"} today · you've judged ${s.judged_today}`;
   const t = $("tally");
   if (t) t.textContent = tallyText();
   // don't clobber a field the user is typing in, or an optimistic edit in flight
   const f = document.activeElement;
-  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f));
+  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }
 }
 
@@ -119,7 +121,7 @@ function renderConfig(force) {
   const key = JSON.stringify(cfg);
   if (!cfg || (key === rendered && !force)) return;
   rendered = key;
-  keepFocus(() => { renderLever(); renderRules(); renderOtherwise(); renderStrip(); });
+  keepFocus(() => { renderLever(); renderTracks(); renderRules(); renderOtherwise(); renderStrip(); });
 }
 
 /* lever */
@@ -137,11 +139,12 @@ function renderLever() {
   $("leverNote").textContent = off ? `The lever is sending everything to ${NAME[cfg.lever]}` : "";
   $("yard").parentNode.className = "yard lev-" + cfg.lever;
   $("jlabel").textContent = off ? "lever" : "rulebook";
-  if (cfg.lever !== "local") $("localWarn").hidden = true;
+  if (!offTrack(cfg.lever)) $("localWarn").hidden = true;
 }
+const offTrack = (v) => v === "valar" || v === "local";
 async function setLever(v) {
   if (!cfg || v === cfg.lever) return;
-  if (await save({ ...cfg, lever: v }, $("leverErr")) && v === "local") $("localWarn").hidden = false;
+  if (await save({ ...cfg, lever: v }, $("leverErr")) && offTrack(v)) $("localWarn").hidden = false;
 }
 leverBtns.forEach((b, i) => {
   b.dataset.k = "lever:" + b.dataset.v;
@@ -150,29 +153,65 @@ leverBtns.forEach((b, i) => {
     const d = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
     if (!d) return;
     e.preventDefault();
-    const n = leverBtns[(i + d + 3) % 3];
+    const n = leverBtns[(i + d + leverBtns.length) % leverBtns.length];
     n.focus();
     setLever(n.dataset.v);
   });
 });
 $("localWarnX").addEventListener("click", () => { $("localWarn").hidden = true; });
 
+/* tracks: yard labels + the models panel */
+function renderTracks() {
+  const hint = S && S.upstreams.anthropic_model_hint;
+  $("modelA").textContent = hint && hint !== "Anthropic" ? " · " + hint : "";
+  for (const t of ["valar", "local"]) {
+    const up = S ? S.upstreams[t] : { url: "", configured: true }, L = C[t].toUpperCase();
+    $("model" + L).textContent = up.configured ? " · " + cfg.models[t].sonnet : ` · not configured: no ${KEY[t]}`;
+    $("trk" + L).classList.toggle("off", !up.configured);
+    $("pct" + L).classList.toggle("off", !up.configured);
+    const row = document.querySelector(`.trow[data-t="${t}"]`), key = row.querySelector(".tkey");
+    row.querySelector(".turl").textContent = up.url;
+    key.textContent = up.configured ? "key set" : "no key";
+    key.className = "tkey " + (up.configured ? "ok" : "no");
+    for (const inp of row.querySelectorAll("input[data-m]")) inp.value = cfg.models[t][inp.dataset.m];
+  }
+}
+for (const row of document.querySelectorAll(".trow")) {
+  const t = row.dataset.t;
+  for (const inp of row.querySelectorAll("input[data-m]")) {
+    inp.dataset.k = `m:${t}:${inp.dataset.m}`;
+    inp.setAttribute("aria-label", `${NAME[t]} model for ${inp.dataset.m === "haiku" ? "haiku" : "sonnet and bigger"}`);
+    inp.addEventListener("change", () => save({ ...cfg, models: { ...cfg.models, [t]: { ...cfg.models[t], [inp.dataset.m]: inp.value.trim() } } }, $("trErr")));
+  }
+  // GET /ui/api/models?track=…: the router asks the upstream with the track's key; the key never reaches the page
+  api("GET", "models?track=" + t, undefined, 15000).then((j) => {
+    $("dl-" + t).replaceChildren(...j.models.map((m) => el("option", { value: m })));
+  }, (e) => {
+    const w = row.querySelector(".warn");
+    w.textContent = `Couldn't load models (${e.message}). Type a model id.`;
+    w.hidden = false;
+  });
+}
+
 /* rulebook */
 const openCls = { v: false };
 const DEFAULT_TEXT = {
-  tags: ["when tag is plan go anthropic\nwhen tag is local go local", () => [el("b", {}, "#plan"), " → ", trk("anthropic"), ", ", el("b", {}, "#local"), " → ", trk("local", 1)]],
-  tier: ["when tier is opus go anthropic\nwhen tier is sonnet or tier is haiku go local", () => ["opus → ", trk("anthropic"), ", sonnet & haiku → ", trk("local", 1)]],
+  tags: ["when tag is planning go anthropic\nwhen tag is local go local\nwhen tag is execution go valar",
+    () => [el("b", {}, "#planning"), " → ", trk("anthropic"), ", ", el("b", {}, "#local"), " → ", trk("local", 1), ", ", el("b", {}, "#execution"), " → ", trk("valar")]],
+  tier: ["when tier is opus or tier is fable go anthropic\nwhen tier is sonnet or tier is haiku or tier is other go valar",
+    () => ["opus & fable → ", trk("anthropic"), ", sonnet, haiku & anything else → ", trk("valar")]],
 };
 const lines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
-// "Can send your main session local": a line going local whose condition never looks at tier or subagent.
-const risky = (r) => r.kind === "dsl" && lines(r.text).some((l) => /\bgo\s+local\s*$/i.test(l) && !/\btier\b|\bsubagent\b/i.test(l.replace(/\bgo\s+local\s*$/i, "")));
+// "Can send your main session off Anthropic": a line going valar/local whose condition never looks at tier or subagent.
+const GO_OFF = /\bgo\s+(valar|local)\s*$/i;
+const risky = (r) => r.kind === "dsl" && lines(r.text).some((l) => GO_OFF.test(l) && !/\btier\b|\bsubagent\b/i.test(l.replace(GO_OFF, "")));
 
 function describe(r) {
-  if (r.kind === "classifier") return el("div", { class: "rdesc" }, "A small local model reads your newest message once per turn and labels it.");
+  if (r.kind === "classifier") return el("div", { class: "rdesc" }, `A small model on ${UP[cfg.classifier.upstream]} reads your newest message once per turn and labels it.`);
   const d = DEFAULT_TEXT[r.builtin];
   if (d && r.text.trim() === d[0]) return el("div", { class: "rdesc" }, d[1]());
   return el("div", { class: "rdesc" }, lines(r.text).map((l) => {
-    const m = l.match(/^when\s+(.*?)\s+go\s+(anthropic|local)$/i);
+    const m = l.match(/^when\s+(.*?)\s+go\s+(anthropic|valar|local)$/i);
     return el("div", { class: "rline" }, m ? [m[1], " → ", trk(m[2].toLowerCase(), 1)] : l);
   }));
 }
@@ -191,18 +230,20 @@ function classifierBits(r, i) {
     const setLabel = (j, patch) => setCls({ labels: c.labels.map((l, k) => (k === j ? { ...l, ...patch } : l)) });
     out.push(el("div", { class: "cls" },
       el("div", { class: "row" },
-        el("label", {}, "Model ", el("input", { value: c.model, "data-k": "cmodel", spellcheck: "false", onchange: (e) => setCls({ model: e.target.value.trim() }) })),
+        el("label", {}, "Asks ", el("select", { "data-k": "cup", onchange: (e) => setCls({ upstream: e.target.value }) },
+          ["valar", "local"].map((u) => el("option", { value: u, selected: c.upstream === u }, UP[u])))),
+        el("label", {}, "Model ", el("input", { value: c.model, list: "dl-" + c.upstream, "data-k": "cmodel", spellcheck: "false", onchange: (e) => setCls({ model: e.target.value.trim() }) })),
         el("label", {}, "Time limit ", el("input", { type: "number", class: "narrow", min: 0.1, max: 30, step: 0.1, value: c.timeout_s, "data-k": "ctime",
           onchange: (e) => { const v = Number(e.target.value); if (v >= 0.1 && v <= 30) setCls({ timeout_s: v }); else renderConfig(true); } }), " s")),
       c.labels.map((l, j) => el("div", { class: "row" },
         el("input", { class: "lname", value: l.name, "aria-label": "Label name", "data-k": "ln:" + j, onchange: (e) => setLabel(j, { name: e.target.value.trim() }) }),
         el("input", { class: "ldesc", value: l.description, "aria-label": "What this label means", placeholder: "what it means", "data-k": "ld:" + j, onchange: (e) => setLabel(j, { description: e.target.value }) }),
         el("select", { "aria-label": "Track for " + l.name, "data-k": "lt:" + j, onchange: (e) => setLabel(j, { track: e.target.value }) },
-          ["anthropic", "local"].map((t) => el("option", { value: t, selected: l.track === t }, "→ " + NAME[t]))),
+          TRACKS.map((t) => el("option", { value: t, selected: l.track === t }, "→ " + NAME[t]))),
         el("button", { type: "button", class: "mini", "aria-label": "Remove label " + l.name, onclick: () => setCls({ labels: c.labels.filter((_, k) => k !== j) }) }, "remove"))),
       el("div", {}, el("button", { type: "button", class: "mini", "data-k": "addlabel", onclick: () => {
         let n = 1; while (c.labels.some((l) => l.name === "label " + n)) n++;
-        setCls({ labels: [...c.labels, { name: "label " + n, description: "", track: "local" }] });
+        setCls({ labels: [...c.labels, { name: "label " + n, description: "", track: "valar" }] });
       } }, "+ add label"))));
   }
   return out;
@@ -236,7 +277,7 @@ function ruleItem(r, i) {
   },
     num,
     el("div", { class: "rbody" },
-      el("div", { class: "rname" }, r.name, risky(r) && el("span", { class: "badge", title: "A line sends requests local without checking tier or subagent, so it can move your main (opus) conversation." }, "Can send your main session local")),
+      el("div", { class: "rname" }, r.name, risky(r) && el("span", { class: "badge", title: "A line sends requests to Valar or local without checking tier or subagent, so it can move your main (opus) conversation." }, "Can send your main session off Anthropic")),
       describe(r),
       r.kind === "classifier" ? classifierBits(r, i) : null,
       el("div", { class: "racts" }, acts)),
@@ -276,23 +317,25 @@ function renderStrip() {
   $("dRate").value = pct;
   $("dRateN").value = pct;
   $("dTag").value = d.tag;
-  $("dLocal").checked = d.when_local;
-  $("dAnth").checked = d.when_anthropic;
+  for (const sel of shadowSels) sel.value = d.shadow[sel.dataset.t] || "";
 }
+const shadowSels = [...document.querySelectorAll(".shadows select")];
 const setDbl = (patch) => save({ ...cfg, doubling: { ...cfg.doubling, ...patch } }, $("dblErr"));
 const setRate = (v) => { v = Math.max(0, Math.min(100, Math.round(Number(v) || 0))); setDbl({ rate: v / 100 }); };
 $("dRate").addEventListener("input", (e) => { $("dRateN").value = e.target.value; });
 $("dRate").addEventListener("change", (e) => setRate(e.target.value));
 $("dRateN").addEventListener("change", (e) => setRate(e.target.value));
 $("dTag").addEventListener("change", (e) => setDbl({ tag: e.target.value.trim().replace(/^#+/, "") }));
-$("dLocal").addEventListener("change", (e) => setDbl({ when_local: e.target.checked }));
-$("dAnth").addEventListener("change", (e) => setDbl({ when_anthropic: e.target.checked }));
-["dRate", "dRateN", "dTag", "dLocal", "dAnth"].forEach((id) => { $(id).dataset.k = id; });
+for (const sel of shadowSels) {
+  sel.dataset.k = "sh:" + sel.dataset.t;
+  sel.addEventListener("change", () => setDbl({ shadow: { ...cfg.doubling.shadow, [sel.dataset.t]: sel.value || null } }));
+}
+["dRate", "dRateN", "dTag"].forEach((id) => { $(id).dataset.k = id; });
 
 /* ---------- rule editor ---------- */
 let ed = null, edSeq = 0, edTimer = null;
-const TOK = /("(?:\\.|[^"\\])*"?)|(\/(?:\\.|[^/\\])*\/?[ims]*)|\b(when|and|or|not|is|contains|matches|go)\b|\b(anthropic)\b|\b(local)\b|\b(text|tag|tier|model|tokens|subagent|label)\b/gi;
-const TOKCLS = [null, "st", "st", "kw", "an", "lo", "fd"];
+const TOK = /("(?:\\.|[^"\\])*"?)|(\/(?:\\.|[^/\\])*\/?[ims]*)|\b(when|and|or|not|is|contains|matches|go)\b|\b(anthropic)\b|\b(valar)\b|\b(local)\b|\b(text|tag|tier|model|tokens|subagent|label)\b/gi;
+const TOKCLS = [null, "st", "st", "kw", "an", "va", "lo", "fd"];
 function highlight() {
   const src = $("edText").value, out = [];
   let i = 0;
@@ -411,13 +454,15 @@ function shortReason(reason, row) {
 }
 function why(r) {
   if (isErr(r.status)) {
-    if (r.track === "local") return r.status === 502 ? "LiteLLM down · 502" : "LiteLLM error · " + (r.status || "no answer");
+    // ponytail: "not configured" reads today's key state, not the state when the request ran
+    if (UP[r.track]) return r.status === 502 ? `${UP[r.track]} ${S && !S.upstreams[r.track].configured ? "not configured" : "down"} · 502`
+      : `${UP[r.track]} error · ` + (r.status || "no answer");
     return "Anthropic error · " + (r.status || "no answer");
   }
   return shortReason(r.reason, r);
 }
 function depRow(r) {
-  const err = isErr(r.status), c = err ? "x" : r.track === "local" ? "l" : "a";
+  const err = isErr(r.status), c = err ? "x" : C[r.track];
   const head = el("div", { class: "dephead", role: "button", tabindex: 0, "aria-expanded": "false", "data-k": "dep:" + r.id },
     el("time", { datetime: new Date(r.ts * 1000).toISOString() }, hms(r.ts)),
     el("span", { class: "sw " + c, role: "img", "aria-label": err ? "error" : NAME[r.track] }),
@@ -452,12 +497,12 @@ function explain(d) {
   if (d.turn_id) {
     let s = null;
     try { s = d.shadow ? JSON.parse(d.shadow.shadow) : null; } catch (_) { /* unreadable pair */ }
-    const to = d.shadow ? d.shadow.shadow_track : other(d.track);
+    const to = d.shadow && d.shadow.shadow_track;
     const what = !s ? "the other answer hasn't arrived yet"
       : s.skipped ? "skipped, " + s.skipped
       : s.error || isErr(s.status) ? `error: ${s.error || "status " + s.status} after ${fmtMs(s.ms)}`
       : `${NAME[to]} answered in ${fmtMs(s.ms)} (status ${s.status})`;
-    out.push(el("div", { class: "sh" }, `Doubled to ${NAME[to]} for comparison · ${what} · `,
+    out.push(el("div", { class: "sh" }, `Doubled${to ? " to " + NAME[to] : ""} for comparison · ${what} · `,
       el("button", { type: "button", class: "mini", onclick: () => showTurn(d.turn_id) }, "see side by side")));
   }
   return out;
@@ -504,12 +549,13 @@ $("older").addEventListener("click", async () => {
 function animate(rows) {
   if (reduceMotion.matches) return;
   rows.slice(-12).forEach((r, k) => setTimeout(() => {
-    run(r.track, isErr(r.status) ? "x" : r.track === "local" ? "l" : "a");
-    if (r.turn_id) run(other(r.track), "s");
+    run(r.track, isErr(r.status) ? "x" : C[r.track]);
+    const sh = r.turn_id && cfg && cfg.doubling.shadow[r.track];
+    if (sh) run(sh, "s");
   }, k * 220));
 }
 function run(track, cls) {
-  const p = $(track === "local" ? "pathL" : "pathA"), len = p.getTotalLength();
+  const p = $("path" + C[track].toUpperCase()), len = p.getTotalLength();
   const c = el("circle", { class: "dot " + cls, r: 6, cx: -20, cy: -20 }), base = cls === "s" ? 0.55 : 1;
   $("dots").append(c);
   const t0 = performance.now(), dur = 2600;
@@ -554,7 +600,7 @@ async function showTurn(id) {
   await loadTurns();
   $("pair").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" });
 }
-const tallyText = () => { const t = S ? S.stats.tally : { local: 0, anthropic: 0, same: 0 }; return `So far: local ${t.local} · Anthropic ${t.anthropic} · same ${t.same}`; };
+const tallyText = () => { const t = S ? S.stats.tally : {}; return "So far: " + [...TRACKS, "same"].map((k) => `${k === "same" ? "same" : NAME[k]} ${t[k] || 0}`).join(" · "); };
 
 function card(track, step) {
   const served = step.served_track === track;
@@ -575,7 +621,7 @@ function card(track, step) {
     })));
     if (!s.text && !(s.tools && s.tools.length) && !s.error) body.push(el("p", { class: "state" }, "(empty answer)"));
   }
-  return el("div", { class: "ans " + (track === "local" ? "l" : "a") }, meta, body);
+  return el("div", { class: "ans " + C[track] }, meta, body);
 }
 
 function renderTurn() {
@@ -589,7 +635,9 @@ function renderTurn() {
     }
     const d = turnData, steps = d.steps || [], ti = turns.findIndex((t) => t.id === d.id), st = steps[stepIdx];
     const nav = (label, k, dis, fn) => el("button", { type: "button", disabled: dis, "data-k": k, onclick: fn }, label);
-    const verdicts = [["local", "Local"], ["anthropic", "Anthropic"], ["same", "About the same"]];
+    // the pair's tracks (a turn's steps can in principle land on different tracks)
+    const pairT = TRACKS.filter((t) => steps.some((x) => x.served_track === t || x.shadow_track === t));
+    const verdicts = [...pairT.map((t) => [t, NAME[t]]), ["same", "About the same"]];
     box.replaceChildren(
       el("div", { class: "turnhead" },
         el("span", { class: "q", title: d.preview }, `“${d.preview || "(no text)"}”`),
@@ -598,7 +646,7 @@ function renderTurn() {
           nav("‹", "sprev", stepIdx <= 0, () => { stepIdx--; renderTurn(); }),
           el("span", { "aria-live": "polite" }, steps.length ? `step ${stepIdx + 1} of ${steps.length}` : "no steps yet"),
           nav("›", "snext", stepIdx >= steps.length - 1, () => { stepIdx++; renderTurn(); }))),
-      st ? el("div", { class: "twin" }, card("local", st), card("anthropic", st))
+      st ? el("div", { class: "twin" }, card(st.served_track, st), card(st.shadow_track, st))
         : el("p", { class: "state" }, "Waiting for both answers to the first step…"),
       el("div", { class: "verdict" }, "Which did better on this turn?",
         verdicts.map(([v, label]) => el("button", { type: "button", "aria-pressed": String(d.verdict === v), "data-k": "v:" + v, onclick: () => judge(v) }, label)),

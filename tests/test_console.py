@@ -211,6 +211,12 @@ class ConsoleTest(Fixture):
         self.app.store.record_turn({"id": "t2", "ts": time.time(), "preview": "p", "verdict": None})
         self.assertEqual(self.js("PUT", "/ui/api/turns/t2/verdict", {"verdict": "valar"})[0], 200)
 
+    def test_page_has_valar(self):
+        page = self.req("GET", "/ui/", origin=None)[1].decode()
+        self.assertIn('data-v="valar"', page)
+        self.assertIn('id="tracks"', page)
+        self.assertIn("/ui/api/models", self.req("GET", "/ui/app.js", origin=None)[1].decode())
+
 
 if __name__ == "__main__":
     unittest.main()
