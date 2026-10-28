@@ -70,7 +70,7 @@ class ConsoleTest(Fixture):
     def test_put_invalid_config_unchanged(self):
         cfg = self.js("GET", "/ui/api/state")[1]["config"]
         s, j = self.js("PUT", "/ui/api/config", {**cfg, "lever": "bogus"})
-        self.assertEqual((s, j["error"]), (400, "lever must be anthropic, rules or local"))
+        self.assertEqual((s, j["error"]), (400, "lever must be anthropic, rules, valar or local"))
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["config"]["lever"], "rules")
 
     def test_put_nested_rule_is_400(self):

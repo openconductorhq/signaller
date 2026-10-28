@@ -15,7 +15,7 @@ from unittest import mock
 from claude_router import App, Config, make_server
 from doubling import AnswerCapture, Doubler
 from routing import Doubling, Features
-from tests.test_proxy import CLASSIFIER_OFF, HDRS
+from tests.test_proxy import CLASSIFIER_OFF, HDRS, V1_SHADOW
 
 
 def sse(*events):
@@ -80,7 +80,7 @@ def msg(text, model="claude-opus-5-5", stream=True):
 
 
 def doubling(**kw):
-    return replace(CLASSIFIER_OFF, doubling=replace(Doubling(1, "", True, True), **kw))
+    return replace(CLASSIFIER_OFF, doubling=replace(Doubling(1, "", V1_SHADOW), **kw))
 
 
 class CaptureTest(unittest.TestCase):
@@ -138,7 +138,7 @@ class RngTest(unittest.TestCase):
         class S:
             def record_turn(self, row): pass
         d = Doubler(S(), None, random.Random(1))
-        cfg = Doubling(0.2, "", True, True)
+        cfg = Doubling(0.2, "", V1_SHADOW)
         n = sum(d.turn_for(Features.from_body(msg("turn %d" % i)), "anthropic", cfg) is not None for i in range(1000))
         self.assertTrue(150 <= n <= 250, n)
 
@@ -228,7 +228,7 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(self.app.store._all("SELECT preview FROM turns")[0]["preview"], "compare this #both")
 
     def test_direction_checkbox(self):
-        self.app.routing = doubling(when_local=False)
+        self.app.routing = doubling(shadow={**V1_SHADOW, "local": None})
         self.post(msg("do it #local"))
         self.assertEqual(self.settle(), [])
         self.assertEqual(len(self.a.seen), 0)

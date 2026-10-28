@@ -15,13 +15,19 @@ ERRORS = [
     ("when tokens contains 5 go local", 1, 13, "'contains' needs a text field"),
     ("when text > 5 go local", 1, 11, "'>' needs a number field"),
     ("when text matches /(/ go local", 1, 19, "bad regex"),
-    ("when tag is plan go elsewhere", 1, 21, "expected 'anthropic' or 'local'"),
+    ("when tag is plan go elsewhere", 1, 21, "expected anthropic, valar or local"),
     ("when (tag is plan go local", 1, 19, "expected ')'"),
     ("", 1, 1, "expected 'when'"),
 ]
 
 
 class RuleLangTests(unittest.TestCase):
+    def test_go_valar(self):
+        self.assertEqual(parse("when tag is execution go valar")[0].track, "valar")
+        with self.assertRaises(RuleError) as cm:
+            parse("when tag is x go openai")
+        self.assertIn("anthropic, valar or local", str(cm.exception))
+
     def test_table(self):
         self.assertEqual(ev("when tag is plan go anthropic", tag={"plan"}), [(True, "anthropic")])
         self.assertEqual(ev("when tag is #PLAN go anthropic", tag={"plan"}), [(True, "anthropic")])

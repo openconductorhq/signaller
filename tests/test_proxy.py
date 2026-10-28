@@ -17,7 +17,13 @@ from claude_router import App, Config, local_headers, make_server
 from classifier import Classifier
 from routing import DEFAULT_CONFIG
 
-CLASSIFIER_OFF = replace(DEFAULT_CONFIG, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in DEFAULT_CONFIG.rules))
+# the proxy still serves two tracks: pin the two-track rulebook (and doubling) the proxy tests were written against
+V1_TEXT = {"tags": "when tag is plan go anthropic\nwhen tag is local go local",
+           "tier": "when tier is opus go anthropic\nwhen tier is sonnet or tier is haiku go local"}
+V1_SHADOW = {"anthropic": "local", "valar": None, "local": "anthropic"}
+TWO_TRACK = replace(DEFAULT_CONFIG, rules=tuple(replace(r, text=V1_TEXT.get(r.builtin, r.text)) for r in DEFAULT_CONFIG.rules),
+                    doubling=replace(DEFAULT_CONFIG.doubling, shadow=V1_SHADOW))
+CLASSIFIER_OFF = replace(TWO_TRACK, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in TWO_TRACK.rules))
 
 
 class Fake(ThreadingHTTPServer):
@@ -182,7 +188,7 @@ class ProxyTest(unittest.TestCase):
         self.srv.shutdown()
         self.srv.server_close()
         self.start(self.l.url, slow.url)
-        self.app.routing = replace(DEFAULT_CONFIG, classifier=replace(DEFAULT_CONFIG.classifier, timeout_s=0.2))
+        self.app.routing = replace(TWO_TRACK, classifier=replace(TWO_TRACK.classifier, timeout_s=0.2))
         t = time.time()
         self.assertEqual(self.post(body_for("claude-sonnet-5-5"))[0], 200)
         self.assertLess(time.time() - t, 0.5)

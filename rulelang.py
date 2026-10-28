@@ -1,4 +1,4 @@
-"""Routing rule language: `when <cond> go anthropic|local`, one rule per line. Pure, no eval."""
+"""Routing rule language: `when <cond> go anthropic|valar|local`, one rule per line. Pure, no eval."""
 import re
 from dataclasses import dataclass
 
@@ -182,8 +182,8 @@ def parse(src):
         c = p.or_()
         p.eat("go")
         t = p.peek()
-        if not t or t[0] != "word" or t[1].lower() not in ("anthropic", "local"):
-            p.err("expected 'anthropic' or 'local'")
+        if not t or t[0] != "word" or t[1].lower() not in ("anthropic", "valar", "local"):
+            p.err("expected anthropic, valar or local")
         p.i += 1
         if p.peek():
             p.err("unexpected text after track")

@@ -130,7 +130,7 @@ class Doubler:
                 if tid:
                     self.by_id[tid] = e
             e[1] = now
-            if not e[0] or not (d.when_local if served_track == "local" else d.when_anthropic):
+            if not e[0] or d.shadow.get(served_track) is None:
                 return None
             if not e[3]:
                 e[3] = True
