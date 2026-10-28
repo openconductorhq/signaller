@@ -92,6 +92,26 @@ def upstream_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple
     return out
 
 
+def hoist_inline_tools(req: dict) -> bool:
+    """Valar only: it 400s on Claude Code's inline-tools `tool_addition` content blocks ("type tool_addition,
+    which the Messages API does not define"). Move each carried definition into top-level `tools` (a later
+    same-name one replaces it), drop the blocks and any message they leave empty. True if anything changed."""
+    tools, changed = {t.get("name"): t for t in req.get("tools") or []}, False
+    for m in req.get("messages") or []:
+        c = m.get("content") if isinstance(m, dict) else None
+        adds = [b for b in c if isinstance(b, dict) and b.get("type") == "tool_addition"] if isinstance(c, list) else []
+        for b in adds:
+            t = b.get("tool") or {}
+            if t.get("type") == "tool_definition" and isinstance(t.get("definition"), dict):
+                tools[t["definition"].get("name")] = t["definition"]
+        if adds:
+            changed, m["content"] = True, [b for b in c if b not in adds]
+    if changed:
+        req["messages"] = [m for m in req["messages"] if not (isinstance(m, dict) and m.get("content") == [])]
+        req["tools"] = list(tools.values())
+    return changed
+
+
 def open_upstream(cfg: Config, track: str, method: str, path: str, headers, body: bytes):
     """Send the request as given to the track's base URL; returns (conn, resp). Raises OSError/HTTPException."""
     u = urlsplit(upstream(cfg, track)[1])
@@ -180,7 +200,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__), file=sys.stderr, flush=True)
                 return
             route, reason = (d.track, d.reason) if d else ("anthropic", "passthrough")
-            model, stream = "-", False
+            model, stream, req = "-", False, None
             try:
                 req = json.loads(body)
                 model, stream = str(req.get("model", "-")), bool(req.get("stream"))
@@ -202,9 +222,11 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             name, base, key = upstream(cfg, route)
             if route != "anthropic":
                 out_model = track_model(model, routing.models[route])
-                if out_model != model:
+                hoisted = route == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
+                if out_model != model or hoisted:
                     req["model"] = out_model
                     body = json.dumps(req).encode()
+                if out_model != model:
                     shown = "%s→%s" % (model, out_model)
                 headers = upstream_headers(self.headers.items(), key)
             else:

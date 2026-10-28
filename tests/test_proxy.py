@@ -175,6 +175,24 @@ class ProxyTest(unittest.TestCase):
         self.post(body, {**HDRS, "x-api-key": "client"})
         self.assertEqual(json.loads(self.v.seen[0][3])["model"], "zai-org/GLM-5.3")
 
+    def test_valar_gets_inline_tools_hoisted(self):
+        # Claude Code's inline-tools beta: Valar 400s on any tool_addition block
+        t = {"name": "late", "input_schema": {"type": "object"}}
+        add = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": t}}
+        msgs = [{"role": "user", "content": "hi"},
+                {"role": "system", "content": [{"type": "text", "text": "ctx"}, add]},
+                {"role": "system", "content": [add]}]
+        body = body_for("zai-org/GLM-5.3", {"messages": msgs, "tools": [{"name": "Bash"}]})
+        self.post(body)
+        j = json.loads(self.v.seen[0][3])
+        self.assertNotIn(b"tool_addition", self.v.seen[0][3])
+        self.assertEqual(j["messages"], [{"role": "user", "content": "hi"},
+                                         {"role": "system", "content": [{"type": "text", "text": "ctx"}]}])
+        self.assertEqual(j["tools"], [{"name": "Bash"}, t])
+        self.app.set_routing(replace(self.app.routing, lever="anthropic"))
+        self.post(body)
+        self.assertEqual(self.a.seen[0][3], body)  # never on the Anthropic route
+
     def test_valar_not_configured_502(self):
         self.srv.shutdown()
         self.srv.server_close()

@@ -180,7 +180,7 @@ class Doubler:
         self.caps[track].release()
 
     def _run(self, h, track, method, path, headers, body, cfg, models):
-        from claude_router import HOP, upstream, upstream_headers  # late: claude_router imports this module
+        from claude_router import HOP, hoist_inline_tools, upstream, upstream_headers  # late: claude_router imports this module
         from routing import track_model
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
         try:
@@ -192,6 +192,8 @@ class Doubler:
                 if not key:
                     raise NotConfigured("%s not configured" % name)
                 req["model"] = track_model(str(req.get("model", "")), models[track])
+                if track == "valar":
+                    hoist_inline_tools(req)
                 headers = upstream_headers(headers, key)
             else:
                 headers = [(k, v) for k, v in headers if k.lower() not in HOP]

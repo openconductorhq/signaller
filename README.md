@@ -266,3 +266,14 @@ Router on 127.0.0.1:8799 with a scratch config dir; keys not logged.
    ```
    route=valar reason=about:chit-chat model=claude-sonnet-5-5→zai-org/GLM-5.3 status=200 ms=1958 stream=True
    ```
+
+The first-attempt 400s (items 2 and 3) were Valar rejecting Claude Code's
+inline-tools `tool_addition` content blocks ("This request contains a content
+block of type tool_addition, which the Messages API does not define"); Claude
+Code's retry dropped those blocks, and the tools they carried with them. On
+the valar route the router now moves those tool definitions into top-level
+`tools` and drops the blocks (never on the Anthropic route). Re-run of
+`claude -p "#execution say hi"`: a single Valar request, no 400.
+```
+route=valar reason="rule:Tags in your message:3" model=claude-opus-5-5→zai-org/GLM-5.3 status=200 ms=2681 stream=True
+```
