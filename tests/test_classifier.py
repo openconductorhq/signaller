@@ -9,7 +9,7 @@ from classifier import Classifier
 from routing import ClassifierSettings, ClassResult, Features, Label
 
 LABELS = (Label("coding", "writing code", "a"), Label("chat", "small talk", "b"))
-S = ClassifierSettings("gemma-haiku", 0.5, 2.0, LABELS)
+S = ClassifierSettings("gemma-haiku", 0.5, 2.0, LABELS, "local")
 
 
 def feat(text="hello", key="t1"):
@@ -49,7 +49,7 @@ class T(unittest.TestCase):
         f = Fake(**kw)
         self.addCleanup(f.shutdown)
         self.addCleanup(f.server_close)
-        return f, Classifier(f.url, "k")
+        return f, Classifier({"local": (f.url, "k")})
 
     def test_labels_and_confidence(self):
         f, c = self.fake(content='Sure: {"label": "coding", "confidence": 0.88}')
@@ -94,7 +94,7 @@ class T(unittest.TestCase):
 
     def test_litellm_down(self):
         f, c = self.fake()
-        c.url = "http://127.0.0.1:1"
+        c.upstreams["local"] = ("http://127.0.0.1:1", "k")
         t = time.time()
         r = c(feat(), S)
         self.assertTrue(r.note.startswith("error:"), r.note)
@@ -104,3 +104,32 @@ class T(unittest.TestCase):
         f, c = self.fake()
         c(feat("a" * 10000), S)
         self.assertEqual(len(f.seen[0][1]["messages"][1]["content"]), 4000)
+
+    def two(self, vkey="VK"):
+        fv, fl = Fake(), Fake()
+        for x in (fv, fl):
+            self.addCleanup(x.shutdown)
+            self.addCleanup(x.server_close)
+        return fv, fl, Classifier({"valar": (fv.url, vkey), "local": (fl.url, "LK")})
+
+    def test_upstream_valar(self):
+        fv, fl, c = self.two()
+        self.assertEqual(c(feat(), replace(S, upstream="valar")), ClassResult("coding", 0.88, ""))
+        auth, req = fv.seen[0]
+        self.assertEqual((auth, req["reasoning_effort"], fl.seen), ("Bearer VK", "none", []))
+
+    def test_upstream_local(self):
+        fv, fl, c = self.two()
+        c(feat(), S)
+        auth, req = fl.seen[0]
+        self.assertEqual((auth, "reasoning_effort" in req, fv.seen), ("Bearer LK", False, []))
+
+    def test_not_configured_silent(self):
+        fv, fl, c = self.two(vkey="")
+        self.assertEqual(c(feat(), replace(S, upstream="valar")), ClassResult(None, None, "classifier: Valar not configured"))
+        self.assertEqual((fv.seen, fl.seen), ([], []))
+
+    def test_cache_key_includes_upstream(self):
+        fv, fl, c = self.two()
+        c(feat(), replace(S, upstream="valar")); c(feat(), S)
+        self.assertEqual((len(fv.seen), len(fl.seen)), (1, 1))

@@ -2,6 +2,7 @@ import json
 import os
 import time
 import unittest
+from dataclasses import replace
 from http.client import HTTPConnection
 
 from tests import test_proxy
@@ -15,8 +16,8 @@ Fixture = type("Fixture", (unittest.TestCase,), {k: v for k, v in vars(test_prox
 
 
 class ConsoleTest(Fixture):
-    def req(self, method, path, body=None, origin="own", host=None):
-        h = {}
+    def req(self, method, path, body=None, origin="own", host=None, hdrs=None):
+        h = dict(hdrs or {})
         if origin == "own":
             origin = "http://127.0.0.1:%d" % self.port
         if origin:
@@ -54,7 +55,7 @@ class ConsoleTest(Fixture):
         s, j = self.js("GET", "/ui/api/state")
         self.assertEqual(s, 200)
         self.assertEqual(j["config"]["lever"], "rules")
-        self.assertEqual(j["upstreams"]["local"], "S via LiteLLM")
+        self.assertEqual(j["upstreams"]["local"], {"url": self.l.url[7:], "configured": True})
 
     def test_v1_with_own_origin_still_forbidden(self):
         s, _ = self.post(body_for("claude-opus-5-5"), {**HDRS, "Origin": "http://127.0.0.1:%d" % self.port})
@@ -70,7 +71,7 @@ class ConsoleTest(Fixture):
     def test_put_invalid_config_unchanged(self):
         cfg = self.js("GET", "/ui/api/state")[1]["config"]
         s, j = self.js("PUT", "/ui/api/config", {**cfg, "lever": "bogus"})
-        self.assertEqual((s, j["error"]), (400, "lever must be anthropic, rules or local"))
+        self.assertEqual((s, j["error"]), (400, "lever must be anthropic, rules, valar or local"))
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["config"]["lever"], "rules")
 
     def test_put_nested_rule_is_400(self):
@@ -95,7 +96,7 @@ class ConsoleTest(Fixture):
         rule = {"name": "mig", "text": 'when text contains "migration" go anthropic'}
         s, j = self.js("POST", "/ui/api/preview", {"rule": rule, "position": 0})
         self.assertEqual((s, j["matched"], j["changed"], j["count"]), (200, 1, 1, 3))
-        self.assertEqual((j["rows"][0]["went"], j["rows"][0]["would"]), ("local", "anthropic"))
+        self.assertEqual((j["rows"][0]["went"], j["rows"][0]["would"]), ("valar", "anthropic"))
         s, j = self.js("POST", "/ui/api/preview", {"rule": {"name": "x", "text": "when bogus"}, "position": 0})
         self.assertEqual(s, 400)
         self.assertIn("line", j)
@@ -172,6 +173,104 @@ class ConsoleTest(Fixture):
             r, _ = self.req("GET", path, origin=None)
             self.assertEqual(r.status, 200, path)
             self.assertTrue(r.getheader("Content-Type").startswith(ctype), path)
+
+    def test_models_endpoint(self):
+        self.v.models = b'{"data":[{"id":"b"},{"id":"a"}]}'
+        r, d = self.req("GET", "/ui/api/models?track=valar")
+        self.assertEqual((r.status, json.loads(d)), (200, {"models": ["a", "b"]}))
+        self.assertEqual(self.v.seen[0][:2], ("GET", "/v1/models"))
+        self.assertEqual(self.v.seen[0][2]["Authorization"], "Bearer VK")
+        self.assertNotIn(b"VK", d)
+
+    def test_models_sec_fetch_site(self):
+        self.v.models = b'{"data":[{"id":"a"}]}'
+        for site, want in (("cross-site", 403), ("same-site", 403), ("same-origin", 200), ("none", 200), (None, 200)):
+            n = len(self.v.seen)
+            r, _ = self.req("GET", "/ui/api/models?track=valar", hdrs={"Sec-Fetch-Site": site} if site else None)
+            self.assertEqual(r.status, want, site)
+            self.assertEqual(len(self.v.seen) - n, int(want == 200), site)
+
+    def test_models_errors(self):
+        self.assertEqual(self.js("GET", "/ui/api/models?track=anthropic")[0], 400)
+        self.assertEqual(self.js("GET", "/ui/api/models?track=bogus")[0], 400)
+        self.assertEqual(self.js("GET", "/ui/api/models")[0], 400)
+        self.assertEqual(self.req("GET", "/ui/api/models?track=valar", host="evil.example")[0].status, 403)
+        self.assertEqual(self.req("GET", "/ui/api/models?track=valar", origin="http://evil.com")[0].status, 403)
+        self.assertEqual(self.v.seen, [])
+        self.app.cfg = replace(self.app.cfg, valar_key="")
+        s, j = self.js("GET", "/ui/api/models?track=valar")
+        self.assertEqual((s, j["error"]), (502, "Valar not configured"))
+        self.assertEqual(self.v.seen, [])
+        self.app.cfg = replace(self.app.cfg, valar_key="VK", valar_url="http://127.0.0.1:1")
+        s, j = self.js("GET", "/ui/api/models?track=valar")
+        self.assertEqual(s, 502)
+        self.assertNotIn("VK", json.dumps(j))
+
+    def test_state_upstreams_no_key(self):
+        s, j = self.js("GET", "/ui/api/state")
+        self.assertTrue(j["upstreams"]["valar"]["configured"])
+        self.assertEqual(j["upstreams"]["valar"]["url"], self.v.url[7:])
+        self.assertNotIn("VK", json.dumps(j))
+        self.assertNotIn("LK", json.dumps(j))
+        self.app.cfg = replace(self.app.cfg, valar_key="")
+        self.assertFalse(self.js("GET", "/ui/api/state")[1]["upstreams"]["valar"]["configured"])
+
+    def test_verdict_api_valar(self):
+        self.app.store.record_turn({"id": "t2", "ts": time.time(), "preview": "p", "verdict": None})
+        self.assertEqual(self.js("PUT", "/ui/api/turns/t2/verdict", {"verdict": "valar"})[0], 200)
+
+    def test_page_has_valar(self):
+        page = self.req("GET", "/ui/", origin=None)[1].decode()
+        self.assertIn('data-v="valar"', page)
+        self.assertIn('id="tracks"', page)
+        self.assertIn('api("GET", "models?track="', self.req("GET", "/ui/app.js", origin=None)[1].decode())
+
+
+
+
+class ListModelsRedirectTest(unittest.TestCase):
+    def test_redirect_not_followed_and_key_not_leaked(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from console import list_models
+        auth = []
+
+        class B(BaseHTTPRequestHandler):
+            def do_GET(self):
+                auth.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"data":[]}')
+            log_message = lambda *a: None
+        b = HTTPServer(("127.0.0.1", 0), B)
+
+        class A(B):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/v1/models" % b.server_address[1])
+                self.end_headers()
+        a = HTTPServer(("127.0.0.1", 0), A)
+        for x in (a, b):
+            threading.Thread(target=x.serve_forever, daemon=True).start()
+        try:
+            with self.assertRaises(Exception):
+                list_models("http://127.0.0.1:%d" % a.server_address[1], "k")
+            self.assertEqual(auth, [])
+        finally:
+            a.shutdown(); b.shutdown(); a.server_close(); b.server_close()
+
+
+class HoistTolerantTest(unittest.TestCase):
+    def test_malformed_shapes(self):
+        from claude_router import hoist_inline_tools
+        good = {"type": "tool_definition", "definition": {"name": "g", "x": 1}}
+        req = {"tools": ["junk", {"name": "t"}], "messages": [{"role": "user", "content": [
+            {"type": "tool_addition", "tool": "junk"}, {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": "s"}},
+            {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": {"x": 1}}},
+            {"type": "tool_addition", "tool": good}]}]}
+        self.assertTrue(hoist_inline_tools(req))
+        self.assertEqual(req["tools"], ["junk", {"name": "t"}, {"name": "g", "x": 1}])
+        self.assertEqual(req["messages"], [])
 
 
 if __name__ == "__main__":

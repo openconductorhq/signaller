@@ -10,7 +10,7 @@ from rulelang import RuleError, evaluate, parse
 ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
 TAG_RE = re.compile(r"(?<!\w)#(\w+)", re.I)
 TEXT_CAP = 20_000
-TRACKS = ("anthropic", "local")
+TRACKS = ("anthropic", "valar", "local")
 
 
 def latest_human_text(messages: list) -> str:
@@ -36,7 +36,14 @@ def is_routed(method: str, path: str) -> bool:
 
 def tier_of(model: str) -> str:
     m = model.lower()
-    return "haiku" if "haiku" in m else "sonnet" if "sonnet" in m else "opus" if "opus" in m else "other"
+    return next((t for t in ("haiku", "sonnet", "opus", "fable") if t in m), "other")
+
+
+def track_model(model: str, m: dict) -> str:
+    """The model id a non-Anthropic track serves for a request's model; non-claude ids pass through."""
+    if not model.startswith("claude-"):
+        return model
+    return m["haiku"] if "haiku" in model else m["sonnet"]
 
 
 class Features:
@@ -86,6 +93,7 @@ class ClassifierSettings:
     threshold: float
     timeout_s: float
     labels: tuple[Label, ...]
+    upstream: str = "valar"
 
 
 @dataclass(frozen=True)
@@ -109,8 +117,7 @@ class Rule:
 class Doubling:
     rate: float
     tag: str
-    when_local: bool
-    when_anthropic: bool
+    shadow: dict  # served track -> track that answers the same turn too, or None
 
 
 @dataclass(frozen=True)
@@ -120,23 +127,27 @@ class RoutingConfig:
     rules: tuple[Rule, ...]
     classifier: ClassifierSettings
     doubling: Doubling
+    models: dict  # {"valar"|"local": {"sonnet": id, "haiku": id}}
 
 
 DEFAULT_CONFIG = RoutingConfig(
     lever="rules", otherwise="anthropic",
     rules=(
-        Rule("Tags in your message", "dsl", True, "when tag is plan go anthropic\nwhen tag is local go local", "tags"),
+        Rule("Tags in your message", "dsl", True, "when tag is planning go anthropic\nwhen tag is local go local\nwhen tag is execution go valar", "tags"),
         Rule("What the prompt is about", "classifier", True, "", "classifier"),
         Rule("Model the request asked for", "dsl", True,
-             "when tier is opus go anthropic\nwhen tier is sonnet or tier is haiku go local", "tier"),
+             "when tier is opus or tier is fable go anthropic\n"
+             "when tier is sonnet or tier is haiku or tier is other go valar", "tier"),
     ),
-    classifier=ClassifierSettings("gemma-haiku", 0.7, 1.5, (
+    classifier=ClassifierSettings("deepseek-ai/DeepSeek-V4.1-Flash", 0.7, 2.5, (
         Label("planning", "designing, specifying or planning work", "anthropic"),
         Label("design & review", "judging, reviewing or critiquing code or ideas", "anthropic"),
-        Label("coding", "writing, editing, fixing or running code", "local"),
-        Label("chit-chat", "greetings, thanks, small talk", "local"),
-    )),
-    doubling=Doubling(0, "", True, True),
+        Label("coding", "writing, editing, fixing or running code", "valar"),
+        Label("chit-chat", "greetings, thanks, small talk", "valar"),
+    ), "valar"),
+    doubling=Doubling(0, "", {"anthropic": "valar", "valar": "anthropic", "local": None}),
+    models={"valar": {"sonnet": "zai-org/GLM-5.3", "haiku": "deepseek-ai/DeepSeek-V4.1-Flash-1017"},
+            "local": {"sonnet": "claude-sonnet-4-6", "haiku": "claude-haiku-4-5-20251001"}},
 )
 
 
@@ -152,16 +163,23 @@ def _unit(v, what):
 
 def _track(v, what):
     if v not in TRACKS:
-        raise ValueError(f"{what} must be anthropic or local")
+        raise ValueError(f"{what} must be anthropic, valar or local")
     return v
 
 
 def config_from_json(obj: dict) -> RoutingConfig:
     try:
-        if obj.get("version") != 1:
+        if obj.get("version") == 1:
+            d = obj["doubling"]
+            obj = {**obj, "version": 2, "models": {k: dict(v) for k, v in DEFAULT_CONFIG.models.items()},
+                   "classifier": {**obj["classifier"], "upstream": "local"},
+                   "doubling": {"rate": d["rate"], "tag": d["tag"],
+                                "shadow": {"anthropic": "local" if d["when_anthropic"] else None, "valar": None,
+                                           "local": "anthropic" if d["when_local"] else None}}}
+        if obj.get("version") != 2:
             raise ValueError("unsupported config version")
-        if obj["lever"] not in ("anthropic", "rules", "local"):
-            raise ValueError("lever must be anthropic, rules or local")
+        if obj["lever"] not in ("anthropic", "rules", "valar", "local"):
+            raise ValueError("lever must be anthropic, rules, valar or local")
         otherwise = _track(obj["otherwise"], "otherwise")
         rules = tuple(Rule(r["name"], r["kind"], bool(r["enabled"]), r.get("text", ""), r.get("builtin"))
                       for r in obj["rules"])
@@ -177,26 +195,41 @@ def config_from_json(obj: dict) -> RoutingConfig:
         c = obj["classifier"]
         labels = tuple(Label(l["name"], l["description"], _track(l["track"], "label track")) for l in c["labels"])
         thr = _unit(c["threshold"], "classifier threshold")
+        if c["upstream"] not in ("valar", "local"):
+            raise ValueError("classifier upstream must be valar or local")
         d = obj["doubling"]
-        dbl = Doubling(_unit(d["rate"], "doubling rate"), str(d["tag"]), bool(d["when_local"]), bool(d["when_anthropic"]))
+        sh = d["shadow"]
+        if set(sh) != set(TRACKS):
+            raise ValueError("doubling shadow must cover every track")
+        for t, o in sh.items():
+            if o is not None and (o not in TRACKS or o == t):
+                raise ValueError(f"doubling shadow for {t} must be another track or none")
+        dbl = Doubling(_unit(d["rate"], "doubling rate"), str(d["tag"]), {t: sh[t] for t in TRACKS})
+        models = {}
+        for t in ("valar", "local"):
+            models[t] = {k: obj["models"][t][k] for k in ("sonnet", "haiku")}
+            if not all(isinstance(v, str) and v for v in models[t].values()):
+                raise ValueError(f"models.{t} must be non-empty text")
         return RoutingConfig(obj["lever"], otherwise, rules,
                              ClassifierSettings(str(c["model"]), thr,
-                                                float(_num(c["timeout_s"], 0.1, 30, "classifier time limit must be 0.1–30 s")), labels), dbl)
+                                                float(_num(c["timeout_s"], 0.1, 30, "classifier time limit must be 0.1–30 s")), labels,
+                                                c["upstream"]), dbl, models)
     except (KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"bad config: {e!r}") from None
 
 
 def config_to_json(cfg: RoutingConfig) -> dict:
     return {
-        "version": 1, "lever": cfg.lever, "otherwise": cfg.otherwise,
+        "version": 2, "lever": cfg.lever, "otherwise": cfg.otherwise,
         "rules": [{"name": r.name, "kind": r.kind, "enabled": r.enabled, "text": r.text, "builtin": r.builtin}
                   for r in cfg.rules],
         "classifier": {"model": cfg.classifier.model, "threshold": cfg.classifier.threshold,
-                       "timeout_s": cfg.classifier.timeout_s,
+                       "timeout_s": cfg.classifier.timeout_s, "upstream": cfg.classifier.upstream,
                        "labels": [{"name": l.name, "description": l.description, "track": l.track}
                                   for l in cfg.classifier.labels]},
         "doubling": {"rate": cfg.doubling.rate, "tag": cfg.doubling.tag,
-                     "when_local": cfg.doubling.when_local, "when_anthropic": cfg.doubling.when_anthropic},
+                     "shadow": dict(cfg.doubling.shadow)},
+        "models": {t: dict(m) for t, m in cfg.models.items()},
     }
 
 
@@ -227,7 +260,7 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
     on = any(r.kind == "classifier" and r.enabled for r in cfg.rules)
 
     def label():
-        if f.tier == "opus" or not on:
+        if f.tier in ("opus", "fable") or not on:
             return "none"
         r = result()
         return r.label if confident(r) else "none"
@@ -248,8 +281,8 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
                     reason = f"rule:{rule.name}" + (f":{n}" if len(rule.lines) > 1 else "")
                     item["outcome"] = f"line {n} matched → {track}"
                     break
-        elif f.tier == "opus":
-            item["outcome"] = "skipped: main session (opus)"
+        elif f.tier in ("opus", "fable"):
+            item["outcome"] = f"skipped: main session ({f.tier})"
         else:
             r = result()
             pct = f"{round((r.confidence or 0) * 100)}%"

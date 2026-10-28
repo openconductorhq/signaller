@@ -3,10 +3,11 @@ import json
 import os
 import re
 import time
+import urllib.request
 from dataclasses import replace
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from routing import ClassResult, Rule, config_from_json, config_to_json, route
+from routing import TRACKS, ClassResult, Rule, config_from_json, config_to_json, route
 from rulelang import RuleError, parse
 
 UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui")
@@ -77,13 +78,24 @@ def preview(app, body):
             "since_restart": True, "count": len(app.recent)}
 
 
+def list_models(url, key, timeout=5):
+    req = urllib.request.Request(url + "/v1/models", headers={"Authorization": "Bearer " + key})
+    nored = urllib.request.build_opener(type("NoRedirect", (urllib.request.HTTPRedirectHandler,), {"redirect_request": lambda *a: None}))
+    with nored.open(req, timeout=timeout) as r:  # a redirect would re-send the key elsewhere
+        return sorted(m["id"] for m in json.load(r)["data"])
+
+
 def state(app):
+    from claude_router import upstream
+    def up(t):
+        _, url, key = upstream(app.cfg, t)
+        return {"url": urlsplit(url).netloc, "configured": bool(key)}
     hint = next((f.model for f, d, rid in reversed(list(app.recent)) if f.tier == "opus"), "Anthropic")
     c = app.cfg
     return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
-            "upstreams": {"anthropic_model_hint": hint, "local": "%s via LiteLLM" % c.local_sonnet},
+            "upstreams": {"anthropic_model_hint": hint, "valar": up("valar"), "local": up("local")},
             "recent_count": len(app.recent)}
 
 
@@ -91,6 +103,18 @@ def api(h, app, method, path, query, body):
     st = app.store
     if path == "/ui/api/state" and method == "GET":
         return state(app)
+    if path == "/ui/api/models" and method == "GET":
+        from claude_router import upstream
+        t = (query.get("track") or [""])[0]
+        if t not in ("valar", "local"):
+            raise Err(400, "track must be valar or local")
+        name, url, key = upstream(app.cfg, t)
+        if not key:
+            raise Err(502, "%s not configured" % name)
+        try:
+            return {"models": list_models(url, key)}
+        except Exception as e:  # reason only: never headers, never the key
+            raise Err(502, "%s unreachable: %s" % (name, getattr(e, "reason", None) or type(e).__name__))
     if path == "/ui/api/departures" and method == "GET":
         q = {k: int(v[0]) for k, v in query.items() if k in ("since", "before")}
         return st.departures(q.get("since"), q.get("before"), 200)
@@ -129,7 +153,7 @@ def api(h, app, method, path, query, body):
     if m and m[2] and method == "PUT":
         v = body.get("verdict") if isinstance(body, dict) else None
         if not st.set_verdict(unquote(m[1]), v):
-            raise Err(404 if v in ("local", "anthropic", "same") else 400, "bad verdict or unknown turn")
+            raise Err(404 if v in TRACKS + ("same",) else 400, "bad verdict or unknown turn")
         return {"ok": True}
     raise Err(404, "not found")
 
@@ -162,7 +186,7 @@ def _handle(h, app):
     ok = {"http://127.0.0.1:%d" % port, "http://localhost:%d" % port, "http://[::1]:%d" % port}
     origin = h.headers.get("origin")
     if not LOOPBACK_HOST_RE.fullmatch(h.headers.get("host", "")) or \
-            (origin is not None and origin not in ok) or (h.command in ("PUT", "POST", "DELETE") and origin is None):
+            (origin is not None and origin not in ok) or h.headers.get("sec-fetch-site", "none") not in ("same-origin", "none") or (h.command in ("PUT", "POST", "DELETE") and origin is None):
         raise Err(403, "claude-router: forbidden origin/host")  # body left unread
     n = int(h.headers.get("content-length") or 0)
     if not 0 <= n <= MAX_BODY:

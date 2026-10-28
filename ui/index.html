@@ -18,31 +18,58 @@
     <div class="frame" id="lever" role="radiogroup" aria-label="Lever: where requests go">
       <button type="button" class="lever a" role="radio" data-v="anthropic" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
       <button type="button" class="lever r" role="radio" data-v="rules" aria-checked="false"><b>Rules</b><small>follow the rulebook</small></button>
+      <button type="button" class="lever v" role="radio" data-v="valar" aria-checked="false"><b>Valar</b><small>everything, ignore rules</small></button>
       <button type="button" class="lever l" role="radio" data-v="local" aria-checked="false"><b>Local</b><small>everything, ignore rules</small></button>
     </div>
   </header>
   <p id="leverErr" class="err" role="alert" hidden></p>
-  <p id="localWarn" class="warnline" role="status" hidden>Conversations that run on local may fail when you switch back. Start a new session afterwards if they do. <button type="button" class="linkish" id="localWarnX">OK</button></p>
+  <p id="localWarn" class="warnline" role="status" hidden>Conversations that run on Valar or local may fail when you switch back. Start a new session afterwards if they do. <button type="button" class="linkish" id="localWarnX">OK</button></p>
 
   <div class="yard">
-    <svg id="yard" viewBox="0 0 1000 210" role="img" aria-label="Live traffic">
-      <path class="trk rail" d="M30 105 H430"/>
-      <path class="trk anth" d="M430 105 C520 105 540 40 640 40 H960"/>
-      <path class="trk loc" d="M430 105 C520 105 540 170 640 170 H960"/>
-      <path id="pathA" class="ghost" d="M30 105 H430 C520 105 540 40 640 40 H960"/>
-      <path id="pathL" class="ghost" d="M30 105 H430 C520 105 540 170 640 170 H960"/>
-      <text x="30" y="85" class="branch">Claude Code</text>
-      <text x="30" y="135" class="branch mut" id="rpm">– req/min</text>
+    <svg id="yard" viewBox="0 0 1000 250" role="img" aria-label="Live traffic">
+      <path class="trk rail" d="M30 125 H430"/>
+      <path class="trk anth" d="M430 125 C520 125 540 40 640 40 H960"/>
+      <path class="trk val" id="trkV" d="M430 125 H960"/>
+      <path class="trk loc" id="trkL" d="M430 125 C520 125 540 210 640 210 H960"/>
+      <path id="pathA" class="ghost" d="M30 125 H430 C520 125 540 40 640 40 H960"/>
+      <path id="pathV" class="ghost" d="M30 125 H960"/>
+      <path id="pathL" class="ghost" d="M30 125 H430 C520 125 540 210 640 210 H960"/>
+      <text x="30" y="105" class="branch">Claude Code</text>
+      <text x="30" y="155" class="branch mut" id="rpm">– req/min</text>
       <g id="dots"></g>
-      <circle cx="430" cy="105" r="11" class="junction"/>
-      <text x="402" y="140" class="branch mut" id="jlabel">rulebook</text>
+      <circle cx="430" cy="125" r="11" class="junction"/>
+      <text x="402" y="160" class="branch mut" id="jlabel">rulebook</text>
       <text x="660" y="26" class="branch" id="nameA">Anthropic<tspan class="model" id="modelA"></tspan></text>
-      <text x="660" y="198" class="branch" id="nameL">Local<tspan class="model" id="modelL"></tspan></text>
+      <text x="660" y="111" class="branch" id="nameV">Valar<tspan class="model" id="modelV"></tspan></text>
+      <text x="660" y="238" class="branch" id="nameL">Local<tspan class="model" id="modelL"></tspan></text>
       <text x="960" y="28" class="big anthf" text-anchor="end" id="pctA">–</text>
-      <text x="960" y="160" class="big locf" text-anchor="end" id="pctL">–</text>
-      <text x="960" y="110" class="branch mut share" text-anchor="end">share of the last hour</text>
+      <text x="960" y="111" class="big valf" text-anchor="end" id="pctV">–</text>
+      <text x="960" y="200" class="big locf" text-anchor="end" id="pctL">–</text>
+      <text x="960" y="152" class="branch mut share" text-anchor="end">share of the last hour</text>
     </svg>
   </div>
+
+  <section id="tracks" aria-labelledby="trH">
+    <h2 id="trH">Tracks</h2>
+    <p class="hint">Which model serves Claude Code's requests on each track. Anthropic always gets Claude Code's own model.</p>
+    <p id="trErr" class="err" role="alert" hidden></p>
+    <div class="tracks">
+      <div class="trow v" data-t="valar">
+        <div><div class="tname">Valar</div><div class="tmeta"><span class="turl"></span> · <span class="tkey"></span></div></div>
+        <label class="f">Sonnet &amp; bigger <input data-m="sonnet" list="dl-valar" spellcheck="false" autocomplete="off"></label>
+        <label class="f">Haiku <input data-m="haiku" list="dl-valar" spellcheck="false" autocomplete="off"></label>
+        <p class="warn" role="status" hidden></p>
+        <datalist id="dl-valar"></datalist>
+      </div>
+      <div class="trow l" data-t="local">
+        <div><div class="tname">Local</div><div class="tmeta"><span class="turl"></span> · <span class="tkey"></span></div></div>
+        <label class="f">Sonnet &amp; bigger <input data-m="sonnet" list="dl-local" spellcheck="false" autocomplete="off"></label>
+        <label class="f">Haiku <input data-m="haiku" list="dl-local" spellcheck="false" autocomplete="off"></label>
+        <p class="warn" role="status" hidden></p>
+        <datalist id="dl-local"></datalist>
+      </div>
+    </div>
+  </section>
 
   <div class="cols">
     <section id="rulebook" aria-labelledby="rbH">
@@ -52,7 +79,7 @@
       <p id="rbErr" class="err" role="alert" hidden></p>
       <div id="rbBody">
         <ol class="rules" id="rules"></ol>
-        <div class="otherwise"><span class="onum">∗</span><span class="rname">Otherwise</span> → <span class="seg" role="group" aria-label="Otherwise track" id="otherwise"><button type="button" data-v="anthropic">Anthropic</button><button type="button" data-v="local">Local</button></span></div>
+        <div class="otherwise"><span class="onum">∗</span><span class="rname">Otherwise</span> → <span class="seg" role="group" aria-label="Otherwise track" id="otherwise"><button type="button" data-v="anthropic">Anthropic</button><button type="button" data-v="valar">Valar</button><button type="button" data-v="local">Local</button></span></div>
         <button type="button" class="btn" id="addRule">+ Add rule</button>
       </div>
       <div id="editor" class="editor" hidden>
@@ -79,7 +106,7 @@
             <div><code>subagent</code> yes or no</div>
             <div><b>Joining</b> <code>and</code> <code>or</code> <code>not</code> <code>( )</code></div>
             <div><b>Comparing</b> <code>is</code> <code>contains</code> <code>matches /re/i</code> <code>&gt;</code> <code>&lt;</code></div>
-            <div><b>Ending</b> <code>go anthropic</code> / <code>go local</code></div>
+            <div><b>Ending</b> <code>go anthropic</code> / <code>go valar</code> / <code>go local</code></div>
           </div>
           <p class="hint">One <code>when … go …</code> per line; the first line that matches decides.</p>
         </details>
@@ -103,8 +130,11 @@
     <div class="strip" id="strip">
       <label class="sfld">Double <input type="range" id="dRate" min="0" max="100" step="1" aria-label="Doubling rate, percent of turns"> <input type="number" id="dRateN" min="0" max="100" step="1" class="num3" aria-label="Doubling rate percent">% of turns</label>
       <label class="sfld">only with tag <span class="hash">#</span><input id="dTag" class="tagin" placeholder="any" spellcheck="false" autocomplete="off"></label>
-      <label class="sfld"><input type="checkbox" id="dLocal"> when local answers</label>
-      <label class="sfld"><input type="checkbox" id="dAnth"> when Anthropic answers</label>
+      <div class="shadows">
+        <label class="srow"><span class="sw a"></span>When Anthropic answers, compare with <select data-t="anthropic"><option value="valar">Valar</option><option value="local">Local</option><option value="">off</option></select></label>
+        <label class="srow"><span class="sw v"></span>When Valar answers, compare with <select data-t="valar"><option value="anthropic">Anthropic</option><option value="local">Local</option><option value="">off</option></select></label>
+        <label class="srow"><span class="sw l"></span>When Local answers, compare with <select data-t="local"><option value="">off</option><option value="anthropic">Anthropic</option><option value="valar">Valar</option></select></label>
+      </div>
     </div>
     <p id="dblErr" class="err" role="alert" hidden></p>
     <div id="turn"></div>
