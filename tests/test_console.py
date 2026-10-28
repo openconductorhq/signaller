@@ -16,7 +16,7 @@ Fixture = type("Fixture", (unittest.TestCase,), {k: v for k, v in vars(test_prox
 
 
 class ConsoleTest(Fixture):
-    def req(self, method, path, body=None, origin="own", host=None):
+    def req(self, method, path, body=None, origin="own", host=None, ):
         h = {}
         if origin == "own":
             origin = "http://127.0.0.1:%d" % self.port
@@ -220,3 +220,35 @@ class ConsoleTest(Fixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ListModelsRedirectTest(unittest.TestCase):
+    def test_redirect_not_followed_and_key_not_leaked(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from console import list_models
+        auth = []
+
+        class B(BaseHTTPRequestHandler):
+            def do_GET(self):
+                auth.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"data":[]}')
+            log_message = lambda *a: None
+        b = HTTPServer(("127.0.0.1", 0), B)
+
+        class A(B):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/v1/models" % b.server_address[1])
+                self.end_headers()
+        a = HTTPServer(("127.0.0.1", 0), A)
+        for x in (a, b):
+            threading.Thread(target=x.serve_forever, daemon=True).start()
+        try:
+            with self.assertRaises(Exception):
+                list_models("http://127.0.0.1:%d" % a.server_address[1], "k")
+            self.assertEqual(auth, [])
+        finally:
+            a.shutdown(); b.shutdown(); a.server_close(); b.server_close()

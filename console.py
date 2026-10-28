@@ -80,7 +80,8 @@ def preview(app, body):
 
 def list_models(url, key, timeout=5):
     req = urllib.request.Request(url + "/v1/models", headers={"Authorization": "Bearer " + key})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    nored = urllib.request.build_opener(type("NoRedirect", (urllib.request.HTTPRedirectHandler,), {"redirect_request": lambda *a: None}))
+    with nored.open(req, timeout=timeout) as r:  # a redirect would re-send the key elsewhere
         return sorted(m["id"] for m in json.load(r)["data"])
 
 
