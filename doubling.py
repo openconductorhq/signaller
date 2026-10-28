@@ -10,6 +10,10 @@ TEXT_CAP, INPUT_CAP = 50_000, 2000
 TURN_TTL = 30 * 60
 
 
+class NotConfigured(Exception):
+    pass
+
+
 class AnswerCapture:
     """Collects text, tool calls and output tokens from a response, fed in arbitrary chunks. Never raises."""
 
@@ -85,10 +89,10 @@ class AnswerCapture:
 class PairHandle:
     """Joins the served side and the shadow side; whichever arrives second writes the pair."""
 
-    def __init__(self, store, turn_id, request_id, step, served_track):
+    def __init__(self, store, turn_id, request_id, step, served_track, shadow_track):
         self.store, self.lock, self.sides = store, threading.Lock(), {}
         self.row = {"turn_id": turn_id, "request_id": request_id, "step": step, "served_track": served_track,
-                    "shadow_track": "local" if served_track == "anthropic" else "anthropic"}
+                    "shadow_track": shadow_track}
 
     def _side(self, name, value):
         with self.lock:
@@ -112,8 +116,9 @@ class Doubler:
         self.turns = {}  # turn_key -> [turn_id | None, last_seen, steps, recorded]
         self.by_id = {}  # turn_id -> same entry
         self.pending = {}  # request_id -> PairHandle, until start_shadow takes it
-        self.caps = {"local": threading.BoundedSemaphore(1), "anthropic": threading.BoundedSemaphore(2)}
-        self.inflight = {"local": 0, "anthropic": 0}
+        self.caps = {"anthropic": threading.BoundedSemaphore(2), "valar": threading.BoundedSemaphore(2),
+                     "local": threading.BoundedSemaphore(1)}
+        self.inflight = {"anthropic": 0, "valar": 0, "local": 0}
 
     def turn_for(self, f, served_track: str, d) -> str | None:
         if d.rate <= 0 or (d.tag and d.tag.lower() not in f.tags):
@@ -137,7 +142,7 @@ class Doubler:
                 self.store.record_turn({"id": e[0], "ts": now, "preview": f.text[:120]})
             return e[0]
 
-    def pending_served(self, turn_id, request_id, step, served_track) -> PairHandle:
+    def pending_served(self, turn_id, request_id, step, served_track, shadow_track) -> PairHandle:
         """step None = next step of the turn."""
         with self.lock:
             if step is None:
@@ -145,13 +150,13 @@ class Doubler:
                 if e:
                     e[2] += 1
                 step = e[2] if e else 1
-            h = self.pending[request_id] = PairHandle(self.store, turn_id, request_id, step, served_track)
+            h = self.pending[request_id] = PairHandle(self.store, turn_id, request_id, step, served_track, shadow_track)
         return h
 
-    def start_shadow(self, turn_id, request_id, f, served_track, method, path, headers, body, cfg) -> str:
+    def start_shadow(self, turn_id, request_id, f, served_track, method, path, headers, body, cfg, models) -> str:
         """Starts the shadow in a daemon thread; returns its track, or "busy" when that direction is full."""
         with self.lock:
-            h = self.pending.pop(request_id, None) or PairHandle(self.store, turn_id, request_id, 1, served_track)
+            h = self.pending.pop(request_id)  # pending_served always comes first
         track = h.row["shadow_track"]
         if not self.caps[track].acquire(blocking=False):
             h.shadow({"skipped": "busy", "status": None, "ttfb_ms": None, "ms": None, "error": None,
@@ -161,7 +166,7 @@ class Doubler:
             self.inflight[track] += 1
         headers = list(headers)  # credentials stay in memory only, in this thread
         try:
-            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, cfg), daemon=True).start()
+            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, cfg, models), daemon=True).start()
         except Exception as e:  # e.g. can't start new thread: give the slot back, the served request goes on
             self._release(track)
             h.shadow({"skipped": "error", "status": None, "ttfb_ms": None, "ms": None, "error": type(e).__name__,
@@ -174,16 +179,20 @@ class Doubler:
             self.inflight[track] -= 1
         self.caps[track].release()
 
-    def _run(self, h, track, method, path, headers, body, cfg):
-        from claude_router import HOP, local_headers, local_model  # late: claude_router imports this module
+    def _run(self, h, track, method, path, headers, body, cfg, models):
+        from claude_router import HOP, upstream, upstream_headers  # late: claude_router imports this module
+        from routing import track_model
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
         try:
             req = json.loads(body)
             req["stream"] = False
             headers = [(k, v) for k, v in headers if k.lower() != "accept-encoding"]  # identity, so it can be read
-            if track == "local":
-                req["model"] = local_model(str(req.get("model", "")), cfg.local_sonnet, cfg.local_haiku)
-                headers = local_headers(headers, cfg.litellm_key)
+            name, _, key = upstream(cfg, track)
+            if track != "anthropic":
+                if not key:
+                    raise NotConfigured("%s not configured" % name)
+                req["model"] = track_model(str(req.get("model", "")), models[track])
+                headers = upstream_headers(headers, key)
             else:
                 headers = [(k, v) for k, v in headers if k.lower() not in HOP]
             conn, resp = self.open_upstream(cfg, track, method, path, headers, json.dumps(req).encode())
@@ -191,7 +200,7 @@ class Doubler:
             cap = AnswerCapture(resp.getheader("content-type", ""), resp.getheader("content-encoding", ""))
             cap.feed(resp.read())
         except Exception as e:
-            out["error"] = "%s: %s" % (type(e).__name__, str(e)[:200])
+            out["error"] = str(e) if isinstance(e, NotConfigured) else "%s: %s" % (type(e).__name__, str(e)[:200])
         finally:
             if conn:
                 conn.close()

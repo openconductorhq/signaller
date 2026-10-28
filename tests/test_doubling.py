@@ -14,8 +14,10 @@ from unittest import mock
 
 from claude_router import App, Config, make_server
 from doubling import AnswerCapture, Doubler
-from routing import Doubling, Features
-from tests.test_proxy import CLASSIFIER_OFF, HDRS, V1_SHADOW
+from routing import DEFAULT_CONFIG, Doubling, Features
+from tests.test_proxy import CLASSIFIER_OFF, HDRS
+
+SHADOW = DEFAULT_CONFIG.doubling.shadow
 
 
 def sse(*events):
@@ -41,7 +43,7 @@ JSON = json.dumps({"content": [{"type": "text", "text": "Hi"},
 
 
 class Up(ThreadingHTTPServer):
-    """Fake Anthropic / LiteLLM: SSE when stream is true, JSON otherwise; delay applies to stream:false calls."""
+    """Fake Anthropic / Valar / LiteLLM: SSE when stream is true, JSON otherwise; delay applies to stream:false calls."""
     daemon_threads = True
 
     def __init__(self):
@@ -80,7 +82,7 @@ def msg(text, model="claude-opus-5-5", stream=True):
 
 
 def doubling(**kw):
-    return replace(CLASSIFIER_OFF, doubling=replace(Doubling(1, "", V1_SHADOW), **kw))
+    return replace(CLASSIFIER_OFF, doubling=replace(Doubling(1, "", SHADOW), **kw))
 
 
 class CaptureTest(unittest.TestCase):
@@ -138,7 +140,7 @@ class RngTest(unittest.TestCase):
         class S:
             def record_turn(self, row): pass
         d = Doubler(S(), None, random.Random(1))
-        cfg = Doubling(0.2, "", V1_SHADOW)
+        cfg = Doubling(0.2, "", SHADOW)
         n = sum(d.turn_for(Features.from_body(msg("turn %d" % i)), "anthropic", cfg) is not None for i in range(1000))
         self.assertTrue(150 <= n <= 250, n)
 
@@ -149,11 +151,11 @@ class DoublingTest(unittest.TestCase):
         quiet = contextlib.redirect_stderr(self.err)
         quiet.__enter__()
         self.addCleanup(quiet.__exit__, None, None, None)
-        self.a, self.l = Up(), Up()
-        self.start(self.l.url)
+        self.a, self.v, self.l = Up(), Up(), Up()
+        self.start()
 
-    def start(self, litellm_url):
-        self.cfg = Config("127.0.0.1", 0, self.a.url, litellm_url, "LK", "S", "H")
+    def start(self, valar_key="VK"):
+        self.cfg = Config("127.0.0.1", 0, self.a.url, self.l.url, "LK", self.v.url, valar_key)
         self.app = App(self.cfg, tempfile.mkdtemp())
         self.app.routing = doubling()
         self.srv = make_server(self.cfg, self.app)
@@ -161,7 +163,7 @@ class DoublingTest(unittest.TestCase):
         self.port = self.srv.server_address[1]
 
     def tearDown(self):
-        for s in (self.srv, self.a, self.l):
+        for s in (self.srv, self.a, self.v, self.l):
             s.shutdown()
             s.server_close()
         self.app.store.close()
@@ -201,7 +203,7 @@ class DoublingTest(unittest.TestCase):
         self.assertNotEqual(rows[3]["turn_id"], rows[0]["turn_id"])
         self.assertEqual(rows[3]["step"], 1)
         r = rows[0]
-        self.assertEqual((r["served_track"], r["shadow_track"]), ("anthropic", "local"))
+        self.assertEqual((r["served_track"], r["shadow_track"]), ("anthropic", "valar"))
         self.assertEqual(r["served"]["text"], "Hello world")
         self.assertEqual(r["served"]["output_tokens"], 12)
         self.assertEqual(r["served"]["status"], 200)
@@ -211,13 +213,13 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(len(turns), 2)
         reqs = {q["id"]: q["turn_id"] for q in self.app.store._all("SELECT id, turn_id FROM requests")}
         self.assertEqual(reqs[r["request_id"]], r["turn_id"])
-        self.assertIn("shadow=local", self.err.getvalue())
+        self.assertIn("shadow=valar", self.err.getvalue())
 
     def test_rate_zero_and_tag(self):
         self.app.routing = doubling(rate=0)
         self.post(msg("hello"))
         self.assertEqual(self.settle(), [])
-        self.assertEqual(len(self.l.seen), 0)
+        self.assertEqual(len(self.v.seen), 0)
         self.assertIn("shadow=-", self.err.getvalue())
         self.app.routing = doubling(tag="Both")
         self.post(msg("plain"))
@@ -228,19 +230,19 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(self.app.store._all("SELECT preview FROM turns")[0]["preview"], "compare this #both")
 
     def test_direction_checkbox(self):
-        self.app.routing = doubling(shadow={**V1_SHADOW, "local": None})
-        self.post(msg("do it #local"))
+        self.app.routing = doubling(shadow={**SHADOW, "valar": None})
+        self.post(msg("do it", "claude-sonnet-5-5"))
         self.assertEqual(self.settle(), [])
         self.assertEqual(len(self.a.seen), 0)
         self.post(msg("do it"))
         rows = self.pairs(1)
-        self.assertEqual((rows[0]["served_track"], rows[0]["shadow_track"]), ("anthropic", "local"))
+        self.assertEqual((rows[0]["served_track"], rows[0]["shadow_track"]), ("anthropic", "valar"))
 
     def test_served_identical_and_not_delayed(self):
         self.app.routing = doubling(rate=0)
         _, plain = self.post(msg("same"))
         self.app.routing = doubling()
-        self.l.delay = 1
+        self.v.delay = 1
         t = time.time()
         status, doubled = self.post(msg("same again"))
         self.assertLess(time.time() - t, 0.3)
@@ -249,61 +251,82 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(rows[0]["shadow"]["text"], "Hi")
 
     def test_shadow_failure_only_on_pair(self):
-        self.l.shutdown()
-        self.l.server_close()
+        self.v.shutdown()
+        self.v.server_close()
         status, data = self.post(msg("go"))
         self.assertEqual((status, data), (200, SSE))
         rows = self.pairs(1)
         self.assertTrue(rows[0]["shadow"]["error"])
         self.assertEqual(rows[0]["served"]["status"], 200)
 
-    def test_busy_local_shadow_skips_not_queues(self):
-        self.l.delay = 1
+    def test_busy_valar_shadow_skips_not_queues(self):
+        self.v.delay = 1
         for _ in range(3):
             self.post(msg("busy turn"))
-        self.assertEqual(self.app.doubler.active()["local"], 1)
+        self.assertEqual(self.app.doubler.active()["valar"], 2)
         rows = self.pairs(3)
         self.assertEqual([r["step"] for r in rows], [1, 2, 3])
-        self.assertEqual(rows[0]["shadow"]["text"], "Hi")
-        self.assertTrue(all(r["shadow"].get("skipped") == "busy" for r in rows[1:]))
+        self.assertEqual([r["shadow"]["text"] for r in rows[:2]], ["Hi", "Hi"])
+        self.assertEqual(rows[2]["shadow"].get("skipped"), "busy")
         self.assertIn("shadow=busy", self.err.getvalue())
-        self.assertEqual(len(self.l.seen), 1)
+        self.assertEqual(len(self.v.seen), 2)
 
-    def test_shadow_to_anthropic_keeps_client_auth_local_gets_key(self):
-        self.post(msg("served local #local"))
+    def test_shadow_per_served_track(self):
         self.post(msg("served anthropic"))
-        self.pairs(2)
-        shadows_a = [s for s in self.a.seen if s[2]["stream"] is False]
-        shadows_l = [s for s in self.l.seen if s[2]["stream"] is False]
-        self.assertEqual(len(shadows_a), 1)
-        self.assertEqual(len(shadows_l), 1)
-        self.assertEqual(shadows_a[0][1]["Authorization"], HDRS["Authorization"])
-        self.assertEqual(shadows_a[0][2]["model"], "claude-opus-5-5")
-        h = shadows_l[0][1]
-        self.assertEqual(h["Authorization"], "Bearer LK")
-        self.assertEqual(h.get_all("Authorization"), ["Bearer LK"])
+        r = self.pairs(1)[0]
+        self.assertEqual((r["served_track"], r["shadow_track"]), ("anthropic", "valar"))
+        _, h, req = self.v.seen[0]
+        self.assertEqual(h.get_all("Authorization"), ["Bearer VK"])
         self.assertNotIn("oauth-2025-04-20", h.get("anthropic-beta", ""))
-        self.assertEqual(shadows_l[0][2]["model"], "S")
+        self.assertIs(req["stream"], False)
+        self.assertEqual(req["model"], self.app.routing.models["valar"]["sonnet"])
+        self.assertEqual(self.a.seen[0][1]["Authorization"], HDRS["Authorization"])
+        self.assertEqual(self.l.seen, [])
+
+    def test_shadow_none_means_off(self):
+        self.app.routing = doubling(shadow={**SHADOW, "valar": None})
+        self.post(msg("sonnet turn", "claude-sonnet-5-5"))
+        self.assertEqual(self.settle(), [])
+        self.assertEqual(self.a.seen, [])
+
+    def test_shadow_to_anthropic_keeps_client_auth(self):
+        self.post(msg("served valar", "claude-sonnet-5-5"))
+        r = self.pairs(1)[0]
+        self.assertEqual((r["served_track"], r["shadow_track"]), ("valar", "anthropic"))
+        (_, h, req), = self.a.seen
+        self.assertEqual(h["Authorization"], HDRS["Authorization"])
+        self.assertIs(req["stream"], False)
+        self.assertEqual(req["model"], "claude-sonnet-5-5")
+        self.assertEqual(self.v.seen[0][1].get_all("Authorization"), ["Bearer VK"])  # served; the client token never reaches Valar
+        self.assertNotIn(HDRS["Authorization"], [x[1]["Authorization"] for x in self.v.seen])
+
+    def test_shadow_valar_not_configured_on_pair(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.start(valar_key="")
+        self.post(msg("no key"))
+        self.assertEqual(self.pairs(1)[0]["shadow"]["error"], "Valar not configured")
+        self.assertEqual(self.v.seen, [])
 
     def test_gzipped_shadow_and_served_captured(self):
-        self.a.encoding = self.l.encoding = "gzip"
+        self.a.encoding = self.v.encoding = "gzip"
         status, data = self.post(msg("zipped"), headers={**HDRS, "Accept-Encoding": "gzip"})
         self.assertEqual((status, data), (200, gzip.compress(SSE)))  # served bytes untouched
         r = self.pairs(1)[0]
         self.assertEqual((r["served"]["text"], r["served"]["output_tokens"], r["served"]["error"]), ("Hello world", 12, None))
         self.assertEqual((r["shadow"]["text"], r["shadow"]["error"]), ("Hi", None))
-        served_h, shadow_h = self.a.seen[0][1], self.l.seen[0][1]
+        served_h, shadow_h = self.a.seen[0][1], self.v.seen[0][1]
         self.assertEqual(served_h["Accept-Encoding"], "gzip")
         self.assertIsNone(shadow_h.get("Accept-Encoding"))
 
     def test_shadow_to_anthropic_has_no_accept_encoding(self):
-        self.post(msg("served local #local"), headers={**HDRS, "Accept-Encoding": "gzip, br"})
+        self.post(msg("served valar", "claude-sonnet-5-5"), headers={**HDRS, "Accept-Encoding": "gzip, br"})
         self.pairs(1)
         shadow = [s for s in self.a.seen if s[2]["stream"] is False][0]
         self.assertIsNone(shadow[1].get("Accept-Encoding"))
 
     def test_unknown_encoding_is_an_error_not_blank(self):
-        self.l.encoding = "br"
+        self.v.encoding = "br"
         self.post(msg("brotli"))
         self.assertEqual(self.pairs(1)[0]["shadow"]["error"], "encoded br")
 
@@ -324,14 +347,14 @@ class DoublingTest(unittest.TestCase):
             self.assertEqual(self.post(msg("no threads")), (200, SSE))
         r = self.pairs(1)[0]
         self.assertEqual(r["shadow"]["skipped"], "error")
-        self.assertEqual(self.app.doubler.active(), {"local": 0, "anthropic": 0})
+        self.assertEqual(self.app.doubler.active(), {"anthropic": 0, "valar": 0, "local": 0})
         self.post(msg("no threads"))  # the slot came back: next step really goes out
         self.assertEqual(self.pairs(2)[1]["shadow"]["text"], "Hi")
 
     def test_count_tokens_never_doubled(self):
         self.post(msg("count me", stream=False), path="/v1/messages/count_tokens")
         self.assertEqual(self.settle(), [])
-        self.assertEqual(len(self.l.seen), 0)
+        self.assertEqual(len(self.v.seen), 0)
 
 
 if __name__ == "__main__":

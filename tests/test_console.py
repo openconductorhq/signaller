@@ -95,7 +95,7 @@ class ConsoleTest(Fixture):
         rule = {"name": "mig", "text": 'when text contains "migration" go anthropic'}
         s, j = self.js("POST", "/ui/api/preview", {"rule": rule, "position": 0})
         self.assertEqual((s, j["matched"], j["changed"], j["count"]), (200, 1, 1, 3))
-        self.assertEqual((j["rows"][0]["went"], j["rows"][0]["would"]), ("local", "anthropic"))
+        self.assertEqual((j["rows"][0]["went"], j["rows"][0]["would"]), ("valar", "anthropic"))
         s, j = self.js("POST", "/ui/api/preview", {"rule": {"name": "x", "text": "when bogus"}, "position": 0})
         self.assertEqual(s, 400)
         self.assertIn("line", j)

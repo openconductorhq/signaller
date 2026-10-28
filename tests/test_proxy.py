@@ -13,17 +13,13 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import claude_router
-from claude_router import App, Config, local_headers, make_server
+from claude_router import App, Config, make_server, upstream_headers
 from classifier import Classifier
 from routing import DEFAULT_CONFIG
 
-# the proxy still serves two tracks: pin the two-track rulebook (and doubling) the proxy tests were written against
-V1_TEXT = {"tags": "when tag is plan go anthropic\nwhen tag is local go local",
-           "tier": "when tier is opus go anthropic\nwhen tier is sonnet or tier is haiku go local"}
-V1_SHADOW = {"anthropic": "local", "valar": None, "local": "anthropic"}
-TWO_TRACK = replace(DEFAULT_CONFIG, rules=tuple(replace(r, text=V1_TEXT.get(r.builtin, r.text)) for r in DEFAULT_CONFIG.rules),
-                    doubling=replace(DEFAULT_CONFIG.doubling, shadow=V1_SHADOW))
-CLASSIFIER_OFF = replace(TWO_TRACK, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in TWO_TRACK.rules))
+MODELS = {"valar": {"sonnet": "VS", "haiku": "VH"}, "local": {"sonnet": "S", "haiku": "H"}}
+BASE = replace(DEFAULT_CONFIG, models=MODELS)
+CLASSIFIER_OFF = replace(BASE, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in BASE.rules))
 
 
 class Fake(ThreadingHTTPServer):
@@ -100,12 +96,12 @@ class ProxyTest(unittest.TestCase):
         quiet = contextlib.redirect_stderr(self.err)
         quiet.__enter__()
         self.addCleanup(quiet.__exit__, None, None, None)
-        self.a, self.l = Fake(), Fake()
+        self.a, self.v, self.l = Fake(), Fake(), Fake()
         self.start(self.l.url)
 
-    def start(self, litellm_url, classifier_url=None):
+    def start(self, litellm_url, classifier_url=None, valar_key="VK"):
         self.dir = tempfile.mkdtemp()
-        cfg = Config("127.0.0.1", 0, self.a.url, litellm_url, "LK", "S", "H")
+        cfg = Config("127.0.0.1", 0, self.a.url, litellm_url, "LK", self.v.url, valar_key)
         self.app = App(cfg, self.dir)
         self.app.routing = CLASSIFIER_OFF
         if classifier_url:
@@ -115,7 +111,7 @@ class ProxyTest(unittest.TestCase):
         self.port = self.srv.server_address[1]
 
     def tearDown(self):
-        for s in (self.srv, self.a, self.l):
+        for s in (self.srv, self.a, self.v, self.l):
             s.shutdown()
             s.server_close()
         self.app.store.close()
@@ -144,24 +140,69 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(h["anthropic-beta"], HDRS["anthropic-beta"])
         self.assertEqual(self.l.seen, [])
 
-    def test_local_swaps_credentials_and_model(self):
+    def test_valar_swaps_credentials_and_model(self):
         self.post(body_for("claude-sonnet-5-5", {"max_tokens": 7}), {**HDRS, "x-api-key": "client"})
-        _, path, h, got = self.l.seen[0]
+        _, path, h, got = self.v.seen[0]
         self.assertEqual(path, "/v1/messages?beta=true")
-        self.assertEqual(h["Authorization"], "Bearer LK")
+        self.assertEqual(h["Authorization"], "Bearer VK")
         self.assertIsNone(h["x-api-key"])
         self.assertEqual(h["anthropic-beta"], "claude-code-20250219")
         j = json.loads(got)
-        self.assertEqual(j["model"], "S")
+        self.assertEqual(j["model"], "VS")
         self.assertEqual(j["max_tokens"], 7)
+        self.assertEqual(self.a.seen + self.l.seen, [])
+        self.post(body_for("claude-haiku-4-5"))
+        self.assertEqual(json.loads(self.v.seen[1][3])["model"], "VH")
+
+    def test_valar_streams(self):
+        c = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        t = time.time()
+        c.request("POST", "/v1/messages", body_for("claude-sonnet-5-5", stream=True), HDRS)
+        r = c.getresponse()
+        self.assertEqual(r.fp.readline(), b"data: 0\n")
+        self.assertLess(time.time() - t, 0.25)
+        c.close()
+
+    def test_non_claude_model_untouched(self):
+        body = body_for("zai-org/GLM-5.3")
+        self.post(body, {**HDRS, "x-api-key": "client"})
+        self.assertEqual(json.loads(self.v.seen[0][3])["model"], "zai-org/GLM-5.3")
+
+    def test_valar_not_configured_502(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.start(self.l.url, valar_key="")
+        status, data = self.post(body_for("claude-sonnet-5-5"))
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Valar not configured (VALAR_API_KEY unset)")
+        self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
+
+    def test_valar_down_502(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            self.v.server_address = ("127.0.0.1", s.getsockname()[1])  # url of a closed port
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.start(self.l.url)
+        status, data = self.post(body_for("claude-sonnet-5-5"))
+        self.assertEqual(status, 502)
+        self.assertIn("Valar unreachable", json.loads(data)["error"]["message"])
         self.assertEqual(self.a.seen, [])
+
+    def test_local_still_works(self):
+        self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "go #local"}]}), {**HDRS, "x-api-key": "client"})
+        _, path, h, got = self.l.seen[0]
+        self.assertEqual(h["Authorization"], "Bearer LK")
+        self.assertIsNone(h["x-api-key"])
+        self.assertEqual(json.loads(got)["model"], "S")
+        self.assertEqual(self.v.seen + self.a.seen, [])
 
     def test_config_change_applies_next_request(self):
         self.post(body_for("claude-sonnet-5-5"))
-        self.assertEqual((len(self.l.seen), len(self.a.seen)), (1, 0))
+        self.assertEqual((len(self.v.seen), len(self.a.seen)), (1, 0))
         self.app.set_routing(replace(self.app.routing, lever="anthropic"))
         self.post(body_for("claude-sonnet-5-5"))
-        self.assertEqual((len(self.l.seen), len(self.a.seen)), (1, 1))
+        self.assertEqual((len(self.v.seen), len(self.a.seen)), (1, 1))
         with open(os.path.join(self.dir, "console.json")) as f:
             self.assertEqual(json.load(f)["lever"], "anthropic")
 
@@ -176,7 +217,7 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         r = rows[0]
         self.assertEqual((r["track"], r["reason"], r["status"], r["preview"]),
-                         ("local", "rule:Model the request asked for:2", 200, long[:120]))
+                         ("valar", "rule:Model the request asked for:2", 200, long[:120]))
         self.assertIsInstance(r["ttfb_ms"], int)
         self.assertIsInstance(r["ms"], int)
         self.assertEqual(len(self.app.recent), 1)
@@ -188,11 +229,11 @@ class ProxyTest(unittest.TestCase):
         self.srv.shutdown()
         self.srv.server_close()
         self.start(self.l.url, slow.url)
-        self.app.routing = replace(TWO_TRACK, classifier=replace(TWO_TRACK.classifier, timeout_s=0.2))
+        self.app.routing = replace(BASE, classifier=replace(BASE.classifier, timeout_s=0.2))
         t = time.time()
         self.assertEqual(self.post(body_for("claude-sonnet-5-5"))[0], 200)
         self.assertLess(time.time() - t, 0.5)
-        self.assertEqual(len(self.l.seen), 1)
+        self.assertEqual(len(self.v.seen), 1)
         self.logged()
         self.assertIn("timed out after 0.2 s", json.dumps(self.app.recent[0][1].explanation))
 
@@ -224,7 +265,7 @@ class ProxyTest(unittest.TestCase):
         self.srv.shutdown()
         self.srv.server_close()
         self.start(dead)
-        status, data = self.post(body_for("claude-sonnet-5-5"))
+        status, data = self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "#local"}]}))
         self.assertEqual(status, 502)
         j = json.loads(data)
         self.assertEqual(j["type"], "error")
@@ -264,12 +305,12 @@ class ProxyTest(unittest.TestCase):
         s, data = self.post(body_for("claude-sonnet-5-5"), {**HDRS, "Origin": "http://evil.example"})
         self.assertEqual(s, 403)
         self.assertEqual(json.loads(data)["type"], "error")
-        self.assertEqual(self.l.seen + self.a.seen, [])
+        self.assertEqual(self.l.seen + self.a.seen + self.v.seen, [])
 
     def test_rejects_foreign_host(self):
         for host in ("evil.example", "evil.example:80", "127.0.0.1.evil.example"):
             self.assertEqual(self.post(body_for("claude-sonnet-5-5"), {**HDRS, "Host": host})[0], 403, host)
-        self.assertEqual(self.l.seen + self.a.seen, [])
+        self.assertEqual(self.l.seen + self.a.seen + self.v.seen, [])
         for host in ("localhost:8787", "[::1]:8787", "127.0.0.1"):
             self.assertEqual(self.post(body_for("claude-opus-5-5"), {**HDRS, "Host": host})[0], 200, host)
 
@@ -309,7 +350,7 @@ class ProxyTest(unittest.TestCase):
             s, data = self.post(body_for("claude-sonnet-5-5"))
         self.assertEqual(s, 500)
         self.assertEqual(json.loads(data)["error"]["message"], "claude-router: routing failed")
-        self.assertEqual(self.l.seen + self.a.seen, [])
+        self.assertEqual(self.l.seen + self.a.seen + self.v.seen, [])
         self.logged()
         self.assertRegex(self.err.getvalue(), r"route=- reason=error status=500 .*shadow=-")
         self.assertNotIn("Traceback", self.err.getvalue())
@@ -326,7 +367,7 @@ class ProxyTest(unittest.TestCase):
         r.read()
         c.close()
         self.assertEqual(r.status, 404)
-        self.assertEqual(self.l.seen + self.a.seen, [])
+        self.assertEqual(self.l.seen + self.a.seen + self.v.seen, [])
 
     def test_broken_stats_db_keeps_routing(self):
         for make in (lambda p: os.mkdir(p), lambda p: open(p, "wb").write(b"not a database" * 100)):
@@ -335,7 +376,7 @@ class ProxyTest(unittest.TestCase):
             self.app.store.close()
             self.dir = tempfile.mkdtemp()
             make(os.path.join(self.dir, "stats.db"))
-            cfg = Config("127.0.0.1", 0, self.a.url, self.l.url, "LK", "S", "H")
+            cfg = Config("127.0.0.1", 0, self.a.url, self.l.url, "LK", self.v.url, "VK")
             self.app = App(cfg, self.dir)
             self.assertTrue(self.app.banner.startswith("Stats are off: "), self.app.banner)
             self.srv = make_server(cfg, self.app)
@@ -362,15 +403,15 @@ class MainTest(unittest.TestCase):
         self.assertNotIn("Traceback", err.getvalue())
 
 
-class LocalHeadersTest(unittest.TestCase):
-    def test_local_headers(self):
-        h = dict(local_headers([
+class UpstreamHeadersTest(unittest.TestCase):
+    def test_upstream_headers(self):
+        h = dict(upstream_headers([
             ("Authorization", "x"), ("X-Api-Key", "y"), ("Host", "h"), ("Content-Length", "1"),
             ("Connection", "c"), ("Transfer-Encoding", "t"), ("anthropic-version", "v"),
             ("anthropic-beta", "a, oauth-2025-04-20,b"),
         ], "K"))
         self.assertEqual(h, {"anthropic-version": "v", "anthropic-beta": "a,b", "Authorization": "Bearer K"})
-        h = dict(local_headers([("Anthropic-Beta", "oauth-2025-04-20")], "K"))
+        h = dict(upstream_headers([("Anthropic-Beta", "oauth-2025-04-20")], "K"))
         self.assertEqual(h, {"Authorization": "Bearer K"})
 
 

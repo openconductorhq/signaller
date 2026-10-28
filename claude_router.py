@@ -1,4 +1,4 @@
-"""claude-router: route Claude Code requests to Anthropic or a local LiteLLM."""
+"""claude-router: route Claude Code requests to Anthropic, Valar or a local LiteLLM."""
 import collections
 import http.client
 import http.server
@@ -20,12 +20,8 @@ import console
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
-from routing import Features, RoutingConfig, is_routed, route as decide_route
+from routing import Features, RoutingConfig, is_routed, route as decide_route, track_model
 from store import NullStore, Store, load_console_config, save_console_config
-
-def local_model(model: str, sonnet: str, haiku: str) -> str:
-    return haiku if "haiku" in model else sonnet
-
 
 @dataclass
 class Config:
@@ -34,14 +30,11 @@ class Config:
     anthropic_url: str
     litellm_url: str
     litellm_key: str
-    local_sonnet: str
-    local_haiku: str
+    valar_url: str = "https://api.valarhq.ai"
+    valar_key: str = ""
 
 
 def load_config(env: Mapping[str, str]) -> Config:
-    key = env.get("LITELLM_API_KEY")
-    if not key:
-        raise ValueError("LITELLM_API_KEY is required")
     listen = env.get("CLAUDE_ROUTER_LISTEN", "127.0.0.1:8787")
     host, _, port = listen.rpartition(":")
     host = host.strip("[]")
@@ -57,9 +50,9 @@ def load_config(env: Mapping[str, str]) -> Config:
         listen_port=port,
         anthropic_url=env.get("CLAUDE_ROUTER_ANTHROPIC_URL", "https://api.anthropic.com"),
         litellm_url=env.get("LITELLM_URL", "http://127.0.0.1:4000"),
-        litellm_key=key,
-        local_sonnet=env.get("CLAUDE_ROUTER_LOCAL_SONNET", "claude-sonnet-4-6"),
-        local_haiku=env.get("CLAUDE_ROUTER_LOCAL_HAIKU", "claude-haiku-4-5-20251001"),
+        litellm_key=env.get("LITELLM_API_KEY", ""),
+        valar_url=env.get("VALAR_URL", "https://api.valarhq.ai").rstrip("/").removesuffix("/v1"),
+        valar_key=env.get("VALAR_API_KEY", ""),
     )
 
 
@@ -71,8 +64,20 @@ MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_erro
                  b'"message":"claude-router: upstream ended mid-stream"}}\n\n')
 
 
-def local_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple[str, str]]:
-    """Client headers for LiteLLM: no client credentials, no oauth beta, our key."""
+KEY_VAR = {"valar": "VALAR_API_KEY", "local": "LITELLM_API_KEY"}
+
+
+def upstream(cfg: Config, track: str) -> tuple[str, str, str]:
+    """(display name, base url, key) of a track; anthropic has no key of ours."""
+    if track == "valar":
+        return "Valar", cfg.valar_url, cfg.valar_key
+    if track == "local":
+        return "LiteLLM", cfg.litellm_url, cfg.litellm_key
+    return "Anthropic", cfg.anthropic_url, ""
+
+
+def upstream_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple[str, str]]:
+    """Client headers for Valar/LiteLLM: no client credentials, no oauth beta, our key."""
     out = []
     for k, v in headers:
         lk = k.lower()
@@ -89,7 +94,7 @@ def local_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple[st
 
 def open_upstream(cfg: Config, track: str, method: str, path: str, headers, body: bytes):
     """Send the request as given to the track's base URL; returns (conn, resp). Raises OSError/HTTPException."""
-    u = urlsplit(cfg.litellm_url if track == "local" else cfg.anthropic_url)
+    u = urlsplit(upstream(cfg, track)[1])
     Conn = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
     conn = Conn(u.hostname, u.port, timeout=UPSTREAM_TIMEOUT)
     try:
@@ -159,7 +164,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 return self._error(404, "not found")
             t0 = time.time()
             body = self.rfile.read(int(self.headers.get("content-length") or 0))
-            # browsers (cross-origin) and DNS rebinding must not reach the injected LiteLLM key
+            # browsers (cross-origin) and DNS rebinding must not reach the injected Valar/LiteLLM keys
             if "origin" in self.headers or not LOOPBACK_HOST_RE.fullmatch(self.headers.get("host", "")):
                 self._error(403, "claude-router: forbidden origin/host")
                 print("%s route=- reason=forbidden status=403 shadow=-" % time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -188,23 +193,28 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             try:  # a doubling fault must never change the served request
                 turn_id = app.doubler.turn_for(f, route, routing.doubling) if rec and app.doubler else None
                 if turn_id:  # shadow starts before the served upstream; it never touches the served path again
-                    pair = app.doubler.pending_served(turn_id, rid, None, route)
+                    pair = app.doubler.pending_served(turn_id, rid, None, route, routing.doubling.shadow[route])
                     shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
-                                                      self.headers.items(), body, cfg)
+                                                      self.headers.items(), body, cfg, routing.models)
             except Exception as e:
                 print("doubling failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
                 pair, shadow, turn_id = None, "-", None
-            if route == "local":
-                name = "LiteLLM"
-                out_model = req["model"] = local_model(model, cfg.local_sonnet, cfg.local_haiku)
-                body = json.dumps(req).encode()
-                shown = "%s→%s" % (model, out_model)
-                headers = local_headers(self.headers.items(), cfg.litellm_key)
+            name, base, key = upstream(cfg, route)
+            if route != "anthropic":
+                out_model = track_model(model, routing.models[route])
+                if out_model != model:
+                    req["model"] = out_model
+                    body = json.dumps(req).encode()
+                    shown = "%s→%s" % (model, out_model)
+                headers = upstream_headers(self.headers.items(), key)
             else:
-                name = "Anthropic"
                 headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]
             status, err, ttfb, conn = 0, "", None, None
             try:
+                if route != "anthropic" and not key:  # never fall back to another track
+                    status = 502
+                    self._error(502, "claude-router: %s not configured (%s unset)" % (name, KEY_VAR[route]))
+                    return
                 try:
                     conn, resp = open_upstream(cfg, route, self.command, self.path, headers, body)
                     ttfb = int((time.time() - t0) * 1000)
@@ -212,7 +222,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     status = 502
                     what = "timed out" if isinstance(e, TimeoutError) else "unreachable"
                     self._error(502, "claude-router: %s %s at %s" % (
-                        name, what, cfg.litellm_url if route == "local" else cfg.anthropic_url))
+                        name, what, base))
                     return
                 status = resp.status
                 self.send_response(status)
@@ -284,8 +294,9 @@ def main() -> None:
         print("claude-router: config dir unusable: %s" % e, file=sys.stderr)
         sys.exit(2)
     srv = make_server(cfg, app)
-    print("listening on %s:%d; anthropic=%s litellm=%s" % (
-        cfg.listen_host, cfg.listen_port, cfg.anthropic_url, cfg.litellm_url), file=sys.stderr, flush=True)
+    print("listening on %s:%d; anthropic=%s valar=%s (%s) litellm=%s (%s)" % (
+        cfg.listen_host, cfg.listen_port, cfg.anthropic_url, cfg.valar_url, "key set" if cfg.valar_key else "no key",
+        cfg.litellm_url, "key set" if cfg.litellm_key else "no key"), file=sys.stderr, flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

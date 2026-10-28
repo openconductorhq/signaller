@@ -83,7 +83,7 @@ def state(app):
     return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
-            "upstreams": {"anthropic_model_hint": hint, "local": "%s via LiteLLM" % c.local_sonnet},
+            "upstreams": {"anthropic_model_hint": hint, "local": "%s via LiteLLM" % app.routing.models["local"]["sonnet"]},
             "recent_count": len(app.recent)}
 
 

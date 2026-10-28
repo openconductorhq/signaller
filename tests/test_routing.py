@@ -3,7 +3,7 @@ import json
 import unittest
 from dataclasses import replace
 
-from claude_router import load_config, local_model
+from claude_router import load_config
 from routing import (DEFAULT_CONFIG, ClassResult, Features, Rule, is_routed, config_from_json, config_to_json, route, tier_of, track_model)
 
 
@@ -106,11 +106,6 @@ class RouteTests(unittest.TestCase):
         for m in (None, 5, ["x"]):
             b = json.dumps({"model": m, "messages": [user("hi")]}).encode()
             self.assertIsNone(Features.from_body(b))
-
-    def test_local_model(self):
-        self.assertEqual(local_model("claude-haiku-5-5", "S", "H"), "H")
-        self.assertEqual(local_model("claude-opus-5-5", "S", "H"), "S")
-        self.assertEqual(local_model("claude-sonnet-5-5", "S", "H"), "S")
 
 
 OPUS_CASES = [
@@ -332,12 +327,18 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(c.anthropic_url, "https://api.anthropic.com")
         self.assertEqual(c.litellm_url, "http://127.0.0.1:4000")
         self.assertEqual(c.litellm_key, "k")
-        self.assertEqual(c.local_sonnet, "claude-sonnet-4-6")
-        self.assertEqual(c.local_haiku, "claude-haiku-4-5-20251001")
+        self.assertEqual(c.valar_url, "https://api.valarhq.ai")
+        c = load_config({})
+        self.assertEqual((c.litellm_key, c.valar_key), ("", ""))
 
-    def test_config_requires_key(self):
-        with self.assertRaises(ValueError):
-            load_config({})
+    def test_config_valar_url_strip(self):
+        for u in ("https://api.valarhq.ai/v1/", "https://api.valarhq.ai/", "https://api.valarhq.ai/v1"):
+            self.assertEqual(load_config({"VALAR_URL": u}).valar_url, "https://api.valarhq.ai")
+
+    def test_config_keys_optional(self):
+        c = load_config({"VALAR_API_KEY": "v"})
+        self.assertEqual((c.valar_key, c.litellm_key), ("v", ""))
+        self.assertEqual(load_config({}).listen_port, 8787)
 
     def test_config_rejects_non_loopback(self):
         for listen in ("0.0.0.0:8787", "192.168.1.5:8787", "example.com:8787"):
