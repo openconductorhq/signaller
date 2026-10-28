@@ -1,0 +1,153 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cockpit with Valar</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body{margin:0;background:#dfe4df}
+  .sb{--paper:#EEF1EC;--ink:#1C2B36;--muted:#5E6B73;--rail:#B9C2BD;--anth:#D8901E;--val:#2F6DB5;--loc:#1F8A5B;--shadow:#6B5BD6;--stop:#C8412F;
+      background:var(--paper);color:var(--ink);font-family:"IBM Plex Sans",system-ui,sans-serif;border-radius:14px;padding:22px 26px;max-width:1100px;margin:12px auto}
+  .sb h1,.sb .lever b,.big{font-family:"Barlow Condensed",sans-serif}
+  .new{outline:2px dashed var(--shadow);outline-offset:6px;border-radius:6px;position:relative}
+  .new::after{content:"new / changed";position:absolute;top:-18px;right:0;font-size:10px;color:var(--shadow);letter-spacing:.5px;text-transform:uppercase}
+  .top{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+  .top h1{font-size:30px;margin:0;letter-spacing:.5px;font-weight:700}
+  .top .who{color:var(--muted);font-size:13px}
+  .frame{margin-left:auto;display:flex;gap:6px;background:#DCE2DD;padding:6px;border-radius:10px;flex-wrap:wrap}
+  .lever{border:0;border-radius:7px;padding:8px 14px;background:transparent;color:var(--ink);font:inherit;cursor:pointer;text-align:left}
+  .lever b{display:block;font-size:18px;line-height:1}
+  .lever small{font-size:11px;color:var(--muted)}
+  .lever.on{background:var(--ink);color:#fff}.lever.on small{color:#C9D3D8}
+  .lever b::before{content:"";display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:var(--c,transparent)}
+  .lever.a{--c:var(--anth)}.lever.v{--c:var(--val)}.lever.l{--c:var(--loc)}
+  .yard{margin:26px 0 8px}
+  .yard svg{width:100%;height:auto;display:block}
+  .trk{fill:none;stroke-width:6;stroke-linecap:round}
+  .branch{font-size:13px;fill:var(--ink)}.mut{fill:var(--muted)}
+  .model{fill:var(--muted);font-size:12px}
+  .big{font-size:38px;font-weight:600}
+  .cols{display:grid;grid-template-columns:1.05fr 1fr;gap:26px;margin-top:22px}
+  @media (max-width:820px){.cols{grid-template-columns:1fr}}
+  .sb h2{font-size:17px;margin:0 0 4px;font-weight:600}
+  .hint{font-size:12.5px;color:var(--muted);margin:0 0 10px}
+  .tracks{display:grid;gap:10px}
+  .trow{background:#fff;border-radius:10px;padding:12px 14px;border-left:5px solid var(--c);display:grid;grid-template-columns:150px 1fr 1fr;gap:12px;align-items:end}
+  @media (max-width:700px){.trow{grid-template-columns:1fr}}
+  .trow.v{--c:var(--val)}.trow.l{--c:var(--loc)}
+  .tname{font-family:"Barlow Condensed";font-size:22px;font-weight:600;line-height:1}
+  .tmeta{font-size:11.5px;color:var(--muted);margin-top:4px;font-family:"IBM Plex Mono",monospace}
+  .ok{color:var(--loc)}.no{color:var(--stop)}
+  label.f{font-size:11.5px;color:var(--muted);display:grid;gap:3px}
+  .f input,.f select,.sel{font:13px "IBM Plex Mono",monospace;color:var(--ink);background:var(--paper);border:1px solid #CBD3CE;border-radius:6px;padding:6px 8px;width:100%;box-sizing:border-box}
+  .warn{grid-column:2/-1;font-size:12px;color:#7a4b00;background:#fbf0d9;border-radius:6px;padding:5px 8px}
+  ol.rules{list-style:none;padding:0;margin:0;counter-reset:r}
+  ol.rules li{counter-increment:r;display:grid;grid-template-columns:28px 1fr auto;gap:10px;align-items:start;padding:10px 0;border-top:1px solid #D3DAD5}
+  ol.rules li::before{content:counter(r);font-family:"Barlow Condensed";font-size:22px;color:var(--muted);line-height:1}
+  .rname{font-weight:600;font-size:14px}
+  .rdesc{font-size:12.5px;color:var(--muted);margin-top:2px;line-height:1.6}
+  .to-a{color:var(--anth);font-weight:600}.to-v{color:var(--val);font-weight:600}.to-l{color:var(--loc);font-weight:600}
+  .tg{width:34px;height:20px;border-radius:10px;background:var(--loc);position:relative}
+  .tg::after{content:"";position:absolute;top:3px;right:3px;width:14px;height:14px;border-radius:50%;background:#fff}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px;align-items:center}
+  .chip{font-size:12px;border-radius:6px;padding:3px 8px;background:#fff;border:1px solid #D3DAD5}
+  .cls{display:flex;gap:8px;margin-top:8px;font-size:12px;color:var(--muted);align-items:center;flex-wrap:wrap}
+  .cls .sel{width:auto;padding:3px 6px;font-size:12px}
+  .otherwise{padding:10px 0;border-top:1px solid #D3DAD5;font-size:14px}
+  .seg{display:inline-flex;background:#DCE2DD;border-radius:7px;padding:3px;gap:2px;margin-left:6px}
+  .seg b{font-weight:500;font-size:12.5px;padding:3px 10px;border-radius:5px}
+  .seg b.on{background:var(--ink);color:#fff}
+  .pair{margin-top:26px;border-top:2px solid var(--ink);padding-top:14px}
+  .strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px}
+  @media (max-width:700px){.strip{grid-template-columns:1fr}}
+  .srow{background:#fff;border-radius:8px;padding:8px 10px;font-size:13px;display:flex;gap:8px;align-items:center}
+  .srow .sel{width:auto;padding:3px 6px;font-size:12px;margin-left:auto}
+  .sw{width:10px;height:10px;border-radius:50%;background:var(--c);flex:none}
+</style>
+
+<div class="sb">
+  <div class="top new">
+    <h1>claude-router</h1>
+    <span class="who">127.0.0.1:8787 · up 3h 12m</span>
+    <div class="frame" role="radiogroup" aria-label="Lever">
+      <button class="lever a"><b>Anthropic</b><small>everything, ignore rules</small></button>
+      <button class="lever r on"><b>Rules</b><small>follow the rulebook</small></button>
+      <button class="lever v"><b>Valar</b><small>everything, ignore rules</small></button>
+      <button class="lever l"><b>Local</b><small>everything, ignore rules</small></button>
+    </div>
+  </div>
+
+  <div class="yard new">
+    <svg viewBox="0 0 1000 250" role="img" aria-label="Live traffic">
+      <path class="trk" stroke="#B9C2BD" d="M30 125 H430"/>
+      <path class="trk" stroke="#D8901E" d="M430 125 C520 125 540 40 640 40 H960"/>
+      <path class="trk" stroke="#2F6DB5" d="M430 125 H960"/>
+      <path class="trk" stroke="#1F8A5B" stroke-dasharray="2 14" d="M430 125 C520 125 540 210 640 210 H960"/>
+      <circle cx="300" cy="125" r="6" fill="#1C2B36"/>
+      <circle cx="760" cy="125" r="6" fill="#2F6DB5"/>
+      <circle cx="700" cy="40" r="6" fill="#D8901E"/>
+      <text x="30" y="110" class="branch">Claude Code</text>
+      <text x="30" y="152" class="branch mut">14 req/min</text>
+      <text x="402" y="155" class="branch mut">rulebook</text>
+      <text x="660" y="24" class="branch">Anthropic <tspan class="model">claude-opus-5-5</tspan></text>
+      <text x="660" y="112" class="branch">Valar <tspan class="model">zai-org/GLM-5.3</tspan></text>
+      <text x="660" y="238" class="branch">Local <tspan class="model">not configured: no LITELLM_API_KEY</tspan></text>
+      <text x="960" y="30" class="big" fill="#D8901E" text-anchor="end">22%</text>
+      <text x="960" y="112" class="big" fill="#2F6DB5" text-anchor="end">78%</text>
+      <text x="960" y="200" class="big" fill="#B9C2BD" text-anchor="end">0%</text>
+    </svg>
+  </div>
+
+  <section class="new" style="margin-top:28px">
+    <h2>Tracks</h2>
+    <p class="hint">Which model serves Claude Code's requests on each track. Anthropic always gets Claude Code's own model.</p>
+    <div class="tracks">
+      <div class="trow v">
+        <div><div class="tname">Valar</div><div class="tmeta">api.valarhq.ai · <span class="ok">key set</span></div></div>
+        <label class="f">Sonnet &amp; bigger <input list="vm" value="zai-org/GLM-5.3"></label>
+        <label class="f">Haiku <input list="vm" value="deepseek-ai/DeepSeek-V4.1-Flash-1017"></label>
+      </div>
+      <div class="trow l">
+        <div><div class="tname">Local</div><div class="tmeta">127.0.0.1:4000 · <span class="no">no key</span></div></div>
+        <label class="f">Sonnet &amp; bigger <input value="claude-sonnet-4-6"></label>
+        <label class="f">Haiku <input value="claude-haiku-4-5-20251001"></label>
+        <div class="warn">Couldn't load models (LiteLLM unreachable at 127.0.0.1:4000). Type a model id.</div>
+      </div>
+    </div>
+    <datalist id="vm">
+      <option value="deepseek-ai/DeepSeek-V4-Pro"><option value="deepseek-ai/DeepSeek-V4.1-Flash"><option value="deepseek-ai/DeepSeek-V4.1-Flash-1017">
+      <option value="zai-org/GLM-5.2"><option value="zai-org/GLM-5.3"><option value="zai-org/GLM-5.3-fast"><option value="zai-org/GLM-5.3-Flash">
+      <option value="moonshotai/Kimi-K3"><option value="moonshotai/Kimi-K3-fast"><option value="MiniMaxAI/MiniMax-M3"><option value="qwen/qwen3.8-max">
+    </datalist>
+  </section>
+
+  <div class="cols">
+    <section class="new">
+      <h2>Rulebook</h2>
+      <p class="hint">Checked top to bottom; the first rule that decides wins.</p>
+      <ol class="rules">
+        <li><div><div class="rname">Tags in your message</div>
+          <div class="rdesc">#planning → <span class="to-a">Anthropic</span> · #local → <span class="to-l">Local</span> · #execution → <span class="to-v">Valar</span></div></div><span class="tg"></span></li>
+        <li><div><div class="rname">What the prompt is about</div>
+          <div class="chips"><span class="chip">planning → <span class="to-a">A</span></span><span class="chip">design &amp; review → <span class="to-a">A</span></span><span class="chip">coding → <span class="to-v">V</span></span><span class="chip">chit-chat → <span class="to-v">V</span></span></div>
+          <div class="cls">asks <select class="sel"><option>Valar</option><option>LiteLLM</option></select> model <select class="sel"><option>zai-org/GLM-5.3-Flash</option></select> · 70% sure or skip</div></div><span class="tg"></span></li>
+        <li><div><div class="rname">Model the request asked for</div>
+          <div class="rdesc">opus, fable → <span class="to-a">Anthropic</span> · sonnet, haiku, anything else → <span class="to-v">Valar</span></div></div><span class="tg"></span></li>
+      </ol>
+      <div class="otherwise">∗ Otherwise → <span class="seg"><b class="on">Anthropic</b><b>Valar</b><b>Local</b></span></div>
+    </section>
+    <section>
+      <h2>Departures</h2>
+      <p class="hint">Unchanged, except the dot is blue for Valar and the reason can read <code>tag</code>, <code>model: sonnet</code>, <code>Valar not configured · 502</code>.</p>
+    </section>
+  </div>
+
+  <section class="pair new">
+    <h2>Side by side</h2>
+    <p class="hint">Double 5% of turns. Pick which track each answer is compared with.</p>
+    <div class="strip">
+      <div class="srow" style="--c:var(--anth)"><span class="sw"></span>When Anthropic answers, compare with <select class="sel"><option>Valar</option><option>Local</option><option>off</option></select></div>
+      <div class="srow" style="--c:var(--val)"><span class="sw"></span>When Valar answers, compare with <select class="sel"><option>Anthropic</option><option>Local</option><option>off</option></select></div>
+      <div class="srow" style="--c:var(--loc)"><span class="sw"></span>When Local answers, compare with <select class="sel"><option>off</option><option>Anthropic</option><option>Valar</option></select></div>
+    </div>
+  </section>
+</div>
