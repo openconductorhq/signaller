@@ -252,3 +252,16 @@ class ListModelsRedirectTest(unittest.TestCase):
             self.assertEqual(auth, [])
         finally:
             a.shutdown(); b.shutdown(); a.server_close(); b.server_close()
+
+
+class HoistTolerantTest(unittest.TestCase):
+    def test_malformed_shapes(self):
+        from claude_router import hoist_inline_tools
+        good = {"type": "tool_definition", "definition": {"name": "g", "x": 1}}
+        req = {"tools": ["junk", {"name": "t"}], "messages": [{"role": "user", "content": [
+            {"type": "tool_addition", "tool": "junk"}, {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": "s"}},
+            {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": {"x": 1}}},
+            {"type": "tool_addition", "tool": good}]}]}
+        self.assertTrue(hoist_inline_tools(req))
+        self.assertEqual(req["tools"], ["junk", {"name": "t"}, {"name": "g", "x": 1}])
+        self.assertEqual(req["messages"], [])

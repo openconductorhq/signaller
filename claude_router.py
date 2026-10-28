@@ -96,19 +96,22 @@ def hoist_inline_tools(req: dict) -> bool:
     """Valar only: it 400s on Claude Code's inline-tools `tool_addition` content blocks ("type tool_addition,
     which the Messages API does not define"). Move each carried definition into top-level `tools` (a later
     same-name one replaces it), drop the blocks and any message they leave empty. True if anything changed."""
-    tools, changed = {t.get("name"): t for t in req.get("tools") or []}, False
+    old = req.get("tools") or []
+    rest = [t for t in old if not (isinstance(t, dict) and isinstance(t.get("name"), str))]  # kept as-is
+    tools, changed = {t["name"]: t for t in old if t not in rest}, False
     for m in req.get("messages") or []:
         c = m.get("content") if isinstance(m, dict) else None
         adds = [b for b in c if isinstance(b, dict) and b.get("type") == "tool_addition"] if isinstance(c, list) else []
         for b in adds:
-            t = b.get("tool") or {}
-            if t.get("type") == "tool_definition" and isinstance(t.get("definition"), dict):
-                tools[t["definition"].get("name")] = t["definition"]
+            t = b.get("tool")
+            d = t.get("definition") if isinstance(t, dict) and t.get("type") == "tool_definition" else None
+            if isinstance(d, dict) and isinstance(d.get("name"), str):
+                tools[d["name"]] = d
         if adds:
             changed, m["content"] = True, [b for b in c if b not in adds]
     if changed:
         req["messages"] = [m for m in req["messages"] if not (isinstance(m, dict) and m.get("content") == [])]
-        req["tools"] = list(tools.values())
+        req["tools"] = rest + list(tools.values())
     return changed
 
 
