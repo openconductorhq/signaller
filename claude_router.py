@@ -116,7 +116,7 @@ class App:
         os.makedirs(config_dir, mode=0o700, exist_ok=True)
         self.cfg, self.config_dir = cfg, config_dir
         self.routing, self.banner = load_console_config(os.path.join(config_dir, "console.json"))
-        self.classifier = Classifier(cfg.litellm_url, cfg.litellm_key)
+        self.classifier = Classifier({"valar": (cfg.valar_url, cfg.valar_key), "local": (cfg.litellm_url, cfg.litellm_key)})
         try:
             self.store = Store(os.path.join(config_dir, "stats.db"))
         except (OSError, sqlite3.Error) as e:  # broken stats must never cost Claude Code its router

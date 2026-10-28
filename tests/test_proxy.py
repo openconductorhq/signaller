@@ -105,7 +105,7 @@ class ProxyTest(unittest.TestCase):
         self.app = App(cfg, self.dir)
         self.app.routing = CLASSIFIER_OFF
         if classifier_url:
-            self.app.classifier = Classifier(classifier_url, "LK")
+            self.app.classifier = Classifier({"valar": (classifier_url, "VK"), "local": (classifier_url, "LK")})
         self.srv = make_server(cfg, self.app)
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.port = self.srv.server_address[1]
