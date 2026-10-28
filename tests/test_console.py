@@ -16,8 +16,8 @@ Fixture = type("Fixture", (unittest.TestCase,), {k: v for k, v in vars(test_prox
 
 
 class ConsoleTest(Fixture):
-    def req(self, method, path, body=None, origin="own", host=None, ):
-        h = {}
+    def req(self, method, path, body=None, origin="own", host=None, hdrs=None):
+        h = dict(hdrs or {})
         if origin == "own":
             origin = "http://127.0.0.1:%d" % self.port
         if origin:
@@ -181,6 +181,14 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.v.seen[0][:2], ("GET", "/v1/models"))
         self.assertEqual(self.v.seen[0][2]["Authorization"], "Bearer VK")
         self.assertNotIn(b"VK", d)
+
+    def test_models_sec_fetch_site(self):
+        self.v.models = b'{"data":[{"id":"a"}]}'
+        for site, want in (("cross-site", 403), ("same-site", 403), ("same-origin", 200), ("none", 200), (None, 200)):
+            n = len(self.v.seen)
+            r, _ = self.req("GET", "/ui/api/models?track=valar", hdrs={"Sec-Fetch-Site": site} if site else None)
+            self.assertEqual(r.status, want, site)
+            self.assertEqual(len(self.v.seen) - n, int(want == 200), site)
 
     def test_models_errors(self):
         self.assertEqual(self.js("GET", "/ui/api/models?track=anthropic")[0], 400)

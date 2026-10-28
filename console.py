@@ -186,7 +186,7 @@ def _handle(h, app):
     ok = {"http://127.0.0.1:%d" % port, "http://localhost:%d" % port, "http://[::1]:%d" % port}
     origin = h.headers.get("origin")
     if not LOOPBACK_HOST_RE.fullmatch(h.headers.get("host", "")) or \
-            (origin is not None and origin not in ok) or (h.command in ("PUT", "POST", "DELETE") and origin is None):
+            (origin is not None and origin not in ok) or h.headers.get("sec-fetch-site", "none") not in ("same-origin", "none") or (h.command in ("PUT", "POST", "DELETE") and origin is None):
         raise Err(403, "claude-router: forbidden origin/host")  # body left unread
     n = int(h.headers.get("content-length") or 0)
     if not 0 <= n <= MAX_BODY:
