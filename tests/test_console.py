@@ -226,8 +226,6 @@ class ConsoleTest(Fixture):
         self.assertIn('api("GET", "models?track="', self.req("GET", "/ui/app.js", origin=None)[1].decode())
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ListModelsRedirectTest(unittest.TestCase):
@@ -273,3 +271,7 @@ class HoistTolerantTest(unittest.TestCase):
         self.assertTrue(hoist_inline_tools(req))
         self.assertEqual(req["tools"], ["junk", {"name": "t"}, {"name": "g", "x": 1}])
         self.assertEqual(req["messages"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
