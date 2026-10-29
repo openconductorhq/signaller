@@ -4,7 +4,7 @@ import unittest
 from dataclasses import replace
 
 from claude_router import load_config
-from routing import (DEFAULT_CONFIG, ClassResult, Features, Rule, is_routed, config_from_json, config_to_json, route, tier_of, track_model)
+from routing import (DEFAULT_CONFIG, ClassResult, Features, Rule, is_routed, session_of, config_from_json, config_to_json, route, tier_of, track_model)
 
 
 def body(messages, model="claude-opus-5-5"):
@@ -381,3 +381,14 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SessionTests(unittest.TestCase):
+    def test_session_of(self):
+        meta = {"metadata": {"user_id": json.dumps({"session_id": "M"})}}
+        self.assertEqual(session_of({"x-claude-code-session-id": "H"}, meta), "H")
+        self.assertEqual(session_of({"X-Claude-Code-Session-Id": "H"}, None), "H")
+        self.assertEqual(session_of({}, meta), "M")
+        for req in (None, {}, [], {"metadata": 5}, {"metadata": {"user_id": "{bad"}},
+                    {"metadata": {"user_id": "[1]"}}, {"metadata": {"user_id": '{"session_id": 3}'}}):
+            self.assertIsNone(session_of({}, req))

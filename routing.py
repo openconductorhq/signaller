@@ -30,6 +30,20 @@ def latest_human_text(messages: list) -> str:
     return ""
 
 
+def session_of(headers, req) -> str | None:
+    """Claude Code session id: the header, else metadata.user_id's JSON. Never raises."""
+    try:
+        sid = headers.get("X-Claude-Code-Session-Id")  # http.client headers are case-insensitive
+        if not sid:
+            sid = {k.lower(): v for k, v in headers.items()}.get("x-claude-code-session-id")
+        if isinstance(sid, str) and sid:
+            return sid
+        sid = json.loads(req["metadata"]["user_id"])["session_id"]
+        return sid if isinstance(sid, str) and sid else None
+    except Exception:
+        return None
+
+
 def is_routed(method: str, path: str) -> bool:
     return method == "POST" and path.split("?", 1)[0] in ROUTED_PATHS
 

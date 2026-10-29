@@ -20,6 +20,7 @@ class AnswerCapture:
     def __init__(self, content_type: str, content_encoding: str = ""):
         self.sse = (content_type or "").startswith("text/event-stream")
         self.buf, self.text, self.tools, self.by_index, self.output_tokens = b"", [], [], {}, None
+        self.usage = dict.fromkeys(("in", "out", "cache_read", "cache_write"))
         self.size, self.error, self.zlib = 0, None, None
         enc = (content_encoding or "").strip().lower()
         if enc in ("gzip", "x-gzip", "deflate"):
@@ -53,8 +54,16 @@ class AnswerCapture:
             self.text.append(t[:TEXT_CAP - self.size])
             self.size += len(self.text[-1])
 
+    def _usage(self, u, keys=(("in", "input_tokens"), ("out", "output_tokens"),
+                              ("cache_read", "cache_read_input_tokens"), ("cache_write", "cache_creation_input_tokens"))):
+        for name, key in keys:
+            if isinstance(u.get(key), int):
+                self.usage[name] = u[key]
+
     def _event(self, e):
         k = e.get("type")
+        if k == "message_start":
+            self._usage(e["message"]["usage"])
         if k == "content_block_start" and e["content_block"].get("type") == "tool_use":
             self.by_index[e.get("index")] = tool = {"name": str(e["content_block"].get("name")), "input": []}
             self.tools.append(tool)
@@ -68,6 +77,7 @@ class AnswerCapture:
                     tool["input"].append(dl["partial_json"])
         elif k == "message_delta":
             self.output_tokens = e["usage"]["output_tokens"]
+            self._usage(e["usage"], (("out", "output_tokens"),))
 
     def result(self) -> dict:
         if not self.sse and self.buf:
@@ -79,10 +89,11 @@ class AnswerCapture:
                     elif b.get("type") == "tool_use":
                         self.tools.append({"name": str(b.get("name")), "input": [json.dumps(b.get("input"))]})
                 self.output_tokens = (obj.get("usage") or {}).get("output_tokens")
+                self._usage(obj["usage"])
             except Exception:
                 pass
         tokens = self.output_tokens if isinstance(self.output_tokens, int) else None
-        return {"error": self.error, "text": "".join(self.text), "output_tokens": tokens,
+        return {"error": self.error, "text": "".join(self.text), "output_tokens": tokens, "usage": dict(self.usage),
                 "tools": [{"name": t["name"], "input": "".join(t["input"])[:INPUT_CAP]} for t in self.tools]}
 
 
@@ -120,7 +131,7 @@ class Doubler:
                      "local": threading.BoundedSemaphore(1)}
         self.inflight = {"anthropic": 0, "valar": 0, "local": 0}
 
-    def turn_for(self, f, served_track: str, d) -> str | None:
+    def turn_for(self, f, served_track: str, d, session_id=None) -> str | None:
         if d.rate <= 0 or (d.tag and d.tag.lower() not in f.tags):
             return None
         now = time.time()
@@ -139,7 +150,7 @@ class Doubler:
                 return None
             if not e[3]:
                 e[3] = True
-                self.store.record_turn({"id": e[0], "ts": now, "preview": f.text[:120]})
+                self.store.record_turn({"id": e[0], "ts": now, "preview": f.text[:120], "session_id": session_id})
             return e[0]
 
     def pending_served(self, turn_id, request_id, step, served_track, shadow_track) -> PairHandle:

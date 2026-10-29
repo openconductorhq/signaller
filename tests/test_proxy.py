@@ -81,6 +81,11 @@ class FakeHandler(BaseHTTPRequestHandler):
             if self.server.die:
                 self.wfile.write(b"data: 0\n\n")
                 return
+            if b"USAGE" in body:
+                self.wfile.write(b'data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1,'
+                                 b'"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}\n\n'
+                                 b'data: {"type":"message_delta","delta":{},"usage":{"output_tokens":7}}\n\n')
+                return
             for i in range(3):
                 self.wfile.write(b"data: %d\n\n" % i)
                 self.wfile.flush()
@@ -277,6 +282,22 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(r.fp.readline(), b"data: 0\n")
         self.assertLess(time.time() - t, 0.25)
         c.close()
+
+    def test_session_and_usage_recorded(self):
+        b = body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "USAGE"}]}, stream=True)
+        self.post(b, {**HDRS, "X-Claude-Code-Session-Id": "S1"})
+        self.post(b)
+        self.a.error = self.v.error = self.l.error = True
+        s, data = self.post(b, {**HDRS, "X-Claude-Code-Session-Id": "S1"})
+        self.assertEqual(s, 529)
+        self.assertEqual(data, b'{"type":"error","error":{"type":"overloaded_error"}}')
+        self.logged(3)
+        self.app.store.close()
+        ok = sorted(self.app.store.departures(), key=lambda r: r["id"])
+        self.assertEqual([r["session_id"] for r in ok], ["S1", None, "S1"])
+        self.assertEqual([ok[0][k] for k in ("in_tok", "out_tok", "cache_read_tok", "cache_write_tok")], [10, 7, 5, 2])
+        self.assertEqual(ok[1]["in_tok"], 10)
+        self.assertEqual((ok[2]["status"], ok[2]["in_tok"], ok[2]["out_tok"]), (529, None, None))
 
     def test_upstream_error_passthrough(self):
         self.a.error = True

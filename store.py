@@ -14,16 +14,17 @@ from routing import DEFAULT_CONFIG, TRACKS, config_from_json, config_to_json
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,
   explanation TEXT, model_in TEXT, model_out TEXT, status INTEGER, ttfb_ms INTEGER, ms INTEGER,
-  stream INTEGER, preview TEXT, turn_id TEXT);
+  stream INTEGER, preview TEXT, turn_id TEXT, session_id TEXT, in_tok INTEGER, out_tok INTEGER,
+  cache_read_tok INTEGER, cache_write_tok INTEGER, window TEXT, cost REAL, api_cost REAL);
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
-CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY, ts REAL, preview TEXT, verdict TEXT);
+CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY, ts REAL, preview TEXT, verdict TEXT, session_id TEXT);
 CREATE TABLE IF NOT EXISTS pairs(id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT, request_id INTEGER,
-  step INTEGER, served_track TEXT, shadow_track TEXT, served TEXT, shadow TEXT);
+  step INTEGER, served_track TEXT, shadow_track TEXT, served TEXT, shadow TEXT, shadow_cost REAL);
 """
 COLS = {
-    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id",
-    "turns": "id ts preview verdict",
-    "pairs": "turn_id request_id step served_track shadow_track served shadow",
+    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok window cost api_cost",
+    "turns": "id ts preview verdict session_id",
+    "pairs": "turn_id request_id step served_track shadow_track served shadow shadow_cost",
 }
 INSERT = {t: "INSERT %sINTO %s(%s) VALUES(%s)" % ("OR IGNORE " if t == "turns" else "", t, ",".join(c.split()),
                                                   ",".join(":" + k for k in c.split())) for t, c in COLS.items()}
@@ -79,12 +80,25 @@ class Store:
         with self._conn() as c:
             c.execute("PRAGMA journal_mode=WAL")
             c.executescript(SCHEMA)
+            self._migrate(c)
+            c.execute("CREATE INDEX IF NOT EXISTS requests_sess_ts ON requests(session_id, ts)")  # after migrate: old dbs lack the column
             c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - RETAIN,))
             top = c.execute("SELECT MAX(id) FROM requests").fetchone()[0] or 0
         self._ids = itertools.count(top + 1)  # next() on itertools.count is atomic under the GIL
         self._q = queue.Queue(queue_max)
         self._t = threading.Thread(target=self._run, daemon=True)
         self._t.start()
+
+    @staticmethod
+    def _migrate(c):
+        """Old databases lack the newer columns; add them (CREATE TABLE IF NOT EXISTS doesn't)."""
+        for t, cols in COLS.items():
+            have = {r[1] for r in c.execute("PRAGMA table_info(%s)" % t)}
+            types = {"in_tok": "INTEGER", "out_tok": "INTEGER", "cache_read_tok": "INTEGER", "cache_write_tok": "INTEGER",
+                     "cost": "REAL", "api_cost": "REAL", "shadow_cost": "REAL", "id": "INTEGER", "ts": "REAL"}
+            for col in cols.split():
+                if col not in have:
+                    c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (t, col, types.get(col, "TEXT")))
 
     def _conn(self):
         c = sqlite3.connect(self.path, timeout=5)

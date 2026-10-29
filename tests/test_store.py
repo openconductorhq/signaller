@@ -141,3 +141,28 @@ def test_verdict_valar(tmp_path):
     s.close()
     assert s.set_verdict("t", "valar") and not s.set_verdict("t", "openai")
     assert s.stats(now)["tally"] == {"anthropic": 0, "valar": 1, "local": 0, "same": 0}
+
+
+def test_old_db_gets_columns(tmp_path):
+    import sqlite3
+    p = str(tmp_path / "old.db")
+    c = sqlite3.connect(p)
+    c.executescript("""CREATE TABLE requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,
+      explanation TEXT, model_in TEXT, model_out TEXT, status INTEGER, ttfb_ms INTEGER, ms INTEGER,
+      stream INTEGER, preview TEXT, turn_id TEXT);
+    CREATE TABLE turns(id TEXT PRIMARY KEY, ts REAL, preview TEXT, verdict TEXT);
+    CREATE TABLE pairs(id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT, request_id INTEGER,
+      step INTEGER, served_track TEXT, shadow_track TEXT, served TEXT, shadow TEXT);""")
+    c.execute("INSERT INTO requests(id, ts, track) VALUES(1, ?, 'valar')", (time.time(),))
+    c.execute("INSERT INTO turns(id, ts) VALUES('t', 1)")
+    c.commit(); c.close()
+    s = Store(p)
+    s.record_request(req(2, time.time(), session_id="S", in_tok=4))
+    s.close()
+    old = s.request(1)
+    assert old["track"] == "valar" and old["session_id"] is None and old["cost"] is None and old["window"] is None
+    assert s.request(2)["session_id"] == "S" and s.request(2)["in_tok"] == 4
+    c = sqlite3.connect(p)
+    assert "session_id" in [r[1] for r in c.execute("PRAGMA table_info(turns)")]
+    assert "shadow_cost" in [r[1] for r in c.execute("PRAGMA table_info(pairs)")]
+    c.close()

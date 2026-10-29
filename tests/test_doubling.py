@@ -100,7 +100,23 @@ class CaptureTest(unittest.TestCase):
         c.feed(JSON[:10])
         c.feed(JSON[10:])
         self.assertEqual(c.result(), {"error": None, "text": "Hi", "tools": [{"name": "Bash", "input": '{"command": "ls"}'}],
-                                      "output_tokens": 5})
+                                      "output_tokens": 5,
+                                      "usage": {"in": 3, "out": 5, "cache_read": None, "cache_write": None}})
+
+    def test_usage_sse_and_json(self):
+        want = {"in": 10, "out": 7, "cache_read": 5, "cache_write": 2}
+        u = {"input_tokens": 10, "cache_read_input_tokens": 5, "cache_creation_input_tokens": 2}
+        c = AnswerCapture("text/event-stream")
+        c.feed(sse({"type": "message_start", "message": {"usage": {**u, "output_tokens": 1}}},
+                   {"type": "message_delta", "delta": {}, "usage": {"output_tokens": 7}}))
+        self.assertEqual(c.result()["usage"], want)
+        c = AnswerCapture("application/json")
+        c.feed(json.dumps({"usage": {**u, "output_tokens": 7}}).encode())
+        self.assertEqual(c.result()["usage"], want)
+        for ct, junk in (("text/event-stream", b"data: {nope\n\n"), ("application/json", b"garbage"), ("", b"")):
+            c = AnswerCapture(ct)
+            c.feed(junk)
+            self.assertEqual(c.result()["usage"], dict.fromkeys(want))
 
     def test_capture_garbage_never_raises(self):
         for ct in ("text/event-stream", "application/json", ""):
