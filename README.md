@@ -111,6 +111,34 @@ the routing rules, and compares track answers side by side.
   Anthropic, two Valar and one local copy run at once; a step that finds its direction full is marked "skipped, busy".
   Judge pairs in Side by side; "Forget all pairs" deletes them.
 
+### Sessions and cost
+
+Chips at the top of the page filter by Claude Code session; the time control
+sets the span (last 15 min, last hour, whole session, or a range).
+
+- **Chips:** "All" means every session. Click chips to pick one or more; click
+  "All" to clear the pick. The picked sessions and the span are remembered in
+  the browser.
+- **Span:** the diagram, the cost cards and the rule counts follow both the
+  pick and the span. Departures and Side by side follow only the pick; they stay
+  live feeds and ignore the span.
+- **Labels:** a session is labeled `folder · branch`, read from Claude Code's
+  transcripts at `<claude dir>/projects/*/<session id>.jsonl` (`CLAUDE_CONFIG_DIR`
+  is respected). Only `cwd` and `gitBranch` are read. Subagents count toward
+  their parent session. Requests with no session id show as "unknown session".
+- **Cost:** Anthropic shows $0 on the subscription, plus "$X at API prices"
+  as an estimate. Valar is priced from its own `/v1/models` prices. Local is
+  $0. The savings card is an estimate (shown with "≈") because other models
+  count tokens differently. Side-by-side comparison requests count in cost but
+  not in savings.
+- **Valar completion window:** each Valar model slot (Fable, Opus, Sonnet,
+  Haiku) can run in Now, Priority or Standard. Priority costs 75% of Now and
+  Standard 50%, but they are slow: measured 2026-10-29 on Kimi-K3 with a tiny
+  streamed request, Now took about 2 s and Priority and Standard about 11-13 s.
+  So Now is the default. Flex isn't offered: it doesn't stream.
+- **Old history:** requests recorded before this release have no session or
+  cost.
+
 ### Rule language
 
 A rule is one or more lines: `when <condition> go anthropic|valar|local`. The first
@@ -160,6 +188,11 @@ In `~/.config/claude-router/` (override with `CLAUDE_ROUTER_CONFIG_DIR`), mode 0
 
 - `console.json`: the routing config. If it's unreadable at startup, the router
   uses defaults, keeps the bad file as `console.json.bad` and shows a banner.
+- `prices.json`: Anthropic API prices per tier (fable, opus, sonnet, haiku),
+  used for the "at API prices" estimates. Written with defaults on first run;
+  edit it to match current prices.
+- `models.json`: Valar's model list, now with each model's prices from
+  `/v1/models` (refreshed at startup and hourly).
 - `stats.db`: SQLite stats. It stores the first 120 characters of each message
   and the doubled answers (text and tool calls), locally. Never headers, keys
   or full bodies. Requests are pruned after 30 days; pairs and verdicts stay
