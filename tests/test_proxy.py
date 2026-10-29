@@ -105,6 +105,9 @@ HDRS = {"Authorization": "Bearer sk-ant-oat01-X", "anthropic-beta": "claude-code
 
 class ProxyTest(unittest.TestCase):
     def setUp(self):
+        nowait = mock.patch.object(claude_router, "RETRY_DELAYS", (0, 0, 0))  # down-upstream tests stay fast
+        nowait.start()
+        self.addCleanup(nowait.stop)
         self.err = io.StringIO()
         quiet = contextlib.redirect_stderr(self.err)
         quiet.__enter__()
@@ -515,6 +518,39 @@ class MainTest(unittest.TestCase):
         self.assertEqual(err.getvalue().count("\n"), 1)
         self.assertIn("claude-router: ", err.getvalue())
         self.assertNotIn("Traceback", err.getvalue())
+
+
+class RetryTest(unittest.TestCase):
+    def run_with(self, *outcomes):
+        calls = []
+        def fake(*a):
+            calls.append(a)
+            o = outcomes[len(calls) - 1]
+            if isinstance(o, BaseException):
+                raise o
+            return o
+        with mock.patch.object(claude_router, "_open_upstream", fake), \
+                mock.patch.object(claude_router, "RETRY_DELAYS", (0, 0, 0)):
+            try:
+                return claude_router.open_upstream(None, "valar", "POST", "/v1/messages", iter([("h", "v")]), b"{}"), calls
+            except Exception as e:
+                return e, calls
+
+    def test_connection_failure_retried_then_succeeds(self):
+        out, calls = self.run_with(ConnectionRefusedError(), ConnectionResetError(), ("conn", "resp"))
+        self.assertEqual(out, ("conn", "resp"))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[2][4], [("h", "v")])  # headers survive retries even when given as an iterator
+
+    def test_gives_up_after_three_retries(self):
+        out, calls = self.run_with(*[ConnectionRefusedError()] * 4)
+        self.assertIsInstance(out, ConnectionRefusedError)
+        self.assertEqual(len(calls), 4)
+
+    def test_timeout_not_retried(self):
+        out, calls = self.run_with(TimeoutError())
+        self.assertIsInstance(out, TimeoutError)
+        self.assertEqual(len(calls), 1)
 
 
 class UpstreamHeadersTest(unittest.TestCase):

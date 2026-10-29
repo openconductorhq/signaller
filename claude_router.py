@@ -117,7 +117,24 @@ def hoist_inline_tools(req: dict) -> bool:
     return changed
 
 
+RETRY_DELAYS = (0.5, 1.5, 3)  # seconds before each retry of a connection failure (~5 s of blips covered)
+
+
 def open_upstream(cfg: Config, track: str, method: str, path: str, headers, body: bytes):
+    """Like _open_upstream, retrying connection failures (DNS, refused, reset before a response).
+    Nothing has reached the client yet, so a retry is invisible to it. Timeouts are not retried: one already
+    waited UPSTREAM_TIMEOUT."""
+    headers = list(headers)  # may be a one-shot iterator
+    for delay in RETRY_DELAYS + (None,):
+        try:
+            return _open_upstream(cfg, track, method, path, headers, body)
+        except (OSError, http.client.HTTPException) as e:
+            if delay is None or isinstance(e, TimeoutError):
+                raise
+            time.sleep(delay)
+
+
+def _open_upstream(cfg: Config, track: str, method: str, path: str, headers, body: bytes):
     """Send the request as given to the track's base URL; returns (conn, resp). Raises OSError/HTTPException."""
     u = urlsplit(upstream(cfg, track)[1])
     Conn = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
