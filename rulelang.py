@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 
 FIELDS = {"text": "text", "tag": "tags", "tier": "word", "model": "text",
-          "tokens": "number", "subagent": "bool", "label": "word"}
+          "tokens": "number", "subagent": "bool", "servertool": "bool", "label": "word"}
 KEYWORDS = {"when", "go", "and", "or", "not", "is", "contains", "matches"}
 _TOK = re.compile(r'\s*(?:(?P<op>>=|<=|>|<)|(?P<par>[()])|(?P<word>#?[A-Za-z0-9_.-]+)|(?P<str>")|(?P<re>/))')
 MAX_TERMS = 200  # comparisons + nots per line; keeps evaluate's recursion far from Python's limit

@@ -182,6 +182,16 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.v.seen[0][2]["Authorization"], "Bearer VK")
         self.assertNotIn(b"VK", d)
 
+    def test_models_saved_list_when_upstream_down(self):
+        self.v.models = b'{"data":[{"id":"a"}]}'
+        self.js("GET", "/ui/api/models?track=valar")
+        self.app.cfg = replace(self.app.cfg, valar_url="http://127.0.0.1:1")
+        s, j = self.js("GET", "/ui/api/models?track=valar")
+        self.assertEqual((s, j["models"]), (200, ["a"]))
+        self.assertIn("Valar unreachable", j["stale"])
+        s, j = self.js("GET", "/ui/api/models?track=local")  # nothing saved for local yet
+        self.assertEqual(s, 502)
+
     def test_models_sec_fetch_site(self):
         self.v.models = b'{"data":[{"id":"a"}]}'
         for site, want in (("cross-site", 403), ("same-site", 403), ("same-origin", 200), ("none", 200), (None, 200)):

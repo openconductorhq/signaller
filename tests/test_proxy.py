@@ -17,7 +17,8 @@ from claude_router import App, Config, make_server, upstream_headers
 from classifier import Classifier
 from routing import DEFAULT_CONFIG
 
-MODELS = {"valar": {"sonnet": "VS", "haiku": "VH"}, "local": {"sonnet": "S", "haiku": "H"}}
+MODELS = {"valar": {"fable": "VS", "opus": "VS", "sonnet": "VS", "haiku": "VH"},
+          "local": {"fable": "S", "opus": "S", "sonnet": "S", "haiku": "H"}}
 BASE = replace(DEFAULT_CONFIG, models=MODELS)
 CLASSIFIER_OFF = replace(BASE, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in BASE.rules))
 

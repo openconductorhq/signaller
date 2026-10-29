@@ -141,12 +141,12 @@ class EngineTests(unittest.TestCase):
     def test_first_match_and_explanation(self):
         d = self.go(OFF, [user("#local")])
         self.assertEqual(d.reason, "rule:Tags in your message:2")
-        self.assertEqual([e["outcome"] for e in d.explanation], ["line 2 matched \u2192 local", "not reached", "not reached"])
+        self.assertEqual([e["outcome"] for e in d.explanation], ["no match", "line 2 matched \u2192 local", "not reached", "not reached"])
 
     def test_disabled_rule_skipped(self):
         d = self.go(rules_with(OFF, tags=False), [user("#local")])
         self.assertEqual((d.track, d.reason), ("anthropic", "rule:Model the request asked for:1"))
-        self.assertEqual(d.explanation[0]["outcome"], "switched off")
+        self.assertEqual(d.explanation[1]["outcome"], "switched off")
 
     def test_otherwise_track(self):
         cfg = replace(OFF, otherwise="local", rules=tuple(replace(r, enabled=False) for r in OFF.rules))
@@ -157,22 +157,22 @@ class EngineTests(unittest.TestCase):
     def test_classifier_decides_at_threshold(self):
         d = self.go(DEFAULT_CONFIG, model="claude-sonnet-5-5", classify=cls("planning", 0.7))
         self.assertEqual((d.track, d.reason), ("anthropic", "about:planning"))
-        self.assertEqual(d.explanation[1]["outcome"], "planning, 70% sure \u2192 anthropic")
+        self.assertEqual(d.explanation[2]["outcome"], "planning, 70% sure \u2192 anthropic")
         self.assertEqual(d.classified, ClassResult("planning", 0.7, ""))
 
     def test_classifier_below_threshold_passes(self):
         d = self.go(DEFAULT_CONFIG, model="claude-sonnet-5-5", classify=cls("planning", 0.69))
         self.assertEqual(d.track, "valar")
-        self.assertEqual(d.explanation[1]["outcome"], "planning, 69% sure, below 70%")
+        self.assertEqual(d.explanation[2]["outcome"], "planning, 69% sure, below 70%")
 
     def test_classifier_note_passes(self):
         d = self.go(DEFAULT_CONFIG, model="claude-sonnet-5-5", classify=cls(None, None, "timed out after 1.5 s"))
-        self.assertEqual(d.explanation[1]["outcome"], "timed out after 1.5 s")
+        self.assertEqual(d.explanation[2]["outcome"], "timed out after 1.5 s")
         self.assertEqual(d.reason, "rule:Model the request asked for:2")
 
     def test_classifier_skipped_on_opus(self):
         d = self.go(DEFAULT_CONFIG)
-        self.assertEqual(d.explanation[1]["outcome"], "skipped: main session (opus)")
+        self.assertEqual(d.explanation[2]["outcome"], "skipped: main session (opus)")
         self.assertIsNone(d.classified)
 
     def test_label_on_opus_never_classifies(self):
@@ -183,7 +183,7 @@ class EngineTests(unittest.TestCase):
 
     def test_classify_called_once_per_route(self):
         r = Rule("U", "dsl", True, "when label is coding go local", None)
-        cfg = replace(DEFAULT_CONFIG, rules=(r,) + DEFAULT_CONFIG.rules[1:])
+        cfg = replace(DEFAULT_CONFIG, rules=(r,) + DEFAULT_CONFIG.rules[2:])
         calls = []
         def c(f, s):
             calls.append(1)
@@ -240,14 +240,43 @@ class ThreeTrackTests(unittest.TestCase):
             d = route(DEFAULT_CONFIG, Features.from_body(body([user(t)], model)), cls(None, None))
             self.assertEqual((d.track, d.reason), (track, "rule:" + why), (model, t))
 
+    def test_servertool_goes_anthropic(self):
+        ws = {"model": "claude-sonnet-5-5", "messages": [user("Perform a web search for the query: x")],
+              "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}]}
+        f = Features.from_body(json.dumps(ws).encode())
+        self.assertIs(f.servertool, True)
+        d = route(DEFAULT_CONFIG, f, boom)
+        self.assertEqual((d.track, d.reason), ("anthropic", "rule:Tools only Anthropic can run"))
+        plain = {**ws, "tools": [{"name": "Bash", "input_schema": {}}, {"type": "custom", "name": "X", "input_schema": {}}]}
+        self.assertIs(Features.from_body(json.dumps(plain).encode()).servertool, False)
+
+    def test_servertool_beats_lever_unless_rule_off(self):
+        ws = {"model": "claude-opus-5-5", "messages": [user("q")], "tools": [{"type": "web_search_20250305", "name": "web_search"}]}
+        f = Features.from_body(json.dumps(ws).encode())
+        self.assertEqual(route(replace(DEFAULT_CONFIG, lever="valar"), f, boom).track, "anthropic")
+        off = rules_with(replace(DEFAULT_CONFIG, lever="valar"), servertool=False)
+        self.assertEqual(route(off, f, boom).track, "valar")
+        self.assertEqual(route(replace(DEFAULT_CONFIG, lever="valar"), Features.from_body(body([user("q")])), boom).track, "valar")
+
+    def test_old_config_gets_servertool_rule_on_top(self):
+        o = config_to_json(DEFAULT_CONFIG)
+        o["rules"] = o["rules"][1:]
+        self.assertEqual(config_from_json(o).rules, DEFAULT_CONFIG.rules)
+
     def test_classifier_skips_fable(self):
         d = route(DEFAULT_CONFIG, Features.from_body(body([user("hi")], "claude-fable-5-1")), boom)
-        self.assertEqual(d.explanation[1]["outcome"], "skipped: main session (fable)")
+        self.assertEqual(d.explanation[2]["outcome"], "skipped: main session (fable)")
 
     def test_track_model(self):
-        m = {"sonnet": "S", "haiku": "H"}
-        self.assertEqual([track_model(x, m) for x in ("claude-haiku-5", "claude-sonnet-5", "claude-opus-5", "claude-3-5-foo", "zai-org/GLM-5.3")],
-                         ["H", "S", "S", "S", "zai-org/GLM-5.3"])
+        m = {"fable": "F", "opus": "O", "sonnet": "S", "haiku": "H"}
+        self.assertEqual([track_model(x, m) for x in ("claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5",
+                                                      "claude-3-5-foo", "zai-org/GLM-5.3")],
+                         ["F", "O", "S", "H", "S", "zai-org/GLM-5.3"])
+
+    def test_models_without_fable_opus_serve_sonnet(self):
+        o = config_to_json(DEFAULT_CONFIG)
+        o["models"]["valar"] = {"sonnet": "S", "haiku": "H"}
+        self.assertEqual(config_from_json(o).models["valar"], {"fable": "S", "opus": "S", "sonnet": "S", "haiku": "H"})
 
     def test_v1_migrates(self):
         v1 = {"version": 1, "lever": "rules", "otherwise": "anthropic",
@@ -304,11 +333,11 @@ class ConfigJsonTests(unittest.TestCase):
             (j(lever="x"), "lever must be anthropic, rules, valar or local"),
             (j(classifier={**cl, "threshold": 1.5}), "classifier threshold must be 0\u20131"),
             (j(doubling={**config_to_json(DEFAULT_CONFIG)["doubling"], "rate": 2}), "doubling rate must be 0\u20131"),
-            (with_rules(rules + [{**rules[1], "name": "Second"}]), "there must be exactly one classifier rule"),
-            (with_rules(rules[1:]), "built-in rule 'tags' cannot be deleted"),
+            (with_rules(rules + [{**rules[2], "name": "Second"}]), "there must be exactly one classifier rule"),
+            (with_rules(rules[:1] + rules[2:]), "built-in rule 'tags' cannot be deleted"),
             (with_rules(rules + [{**rules[0], "name": rules[0]["name"], "builtin": None}]), "rule names must be unique"),
             (j(classifier={**cl, "labels": [{"name": "a", "description": "d", "track": "x"}]}), "label track must be anthropic, valar or local"),
-            (edit(0, text="when tag is plan go"), "rule 'Tags in your message': line 1, col 21: expected anthropic, valar or local"),
+            (edit(1, text="when tag is plan go"), "rule 'Tags in your message': line 1, col 21: expected anthropic, valar or local"),
         ]
         for bad in ("inf", 1e300, float("nan"), float("inf"), -1, 0.05, 31, True):
             cases.append((j(classifier={**cl, "timeout_s": bad}), "classifier time limit must be 0.1\u201330 s"))

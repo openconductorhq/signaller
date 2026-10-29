@@ -109,12 +109,32 @@ def api(h, app, method, path, query, body):
         if t not in ("valar", "local"):
             raise Err(400, "track must be valar or local")
         name, url, key = upstream(app.cfg, t)
-        if not key:
-            raise Err(502, "%s not configured" % name)
+        # models.json: the last list each upstream gave us, also hand-editable for an upstream that's down
+        path = os.path.join(app.config_dir, "models.json")
         try:
-            return {"models": list_models(url, key)}
-        except Exception as e:  # reason only: never headers, never the key
-            raise Err(502, "%s unreachable: %s" % (name, getattr(e, "reason", None) or type(e).__name__))
+            with open(path) as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            saved = {}
+        try:
+            if not key:
+                raise Err(502, "%s not configured" % name)
+            try:
+                ids = list_models(url, key)
+            except Exception as e:  # reason only: never headers, never the key
+                raise Err(502, "%s unreachable: %s" % (name, getattr(e, "reason", None) or type(e).__name__))
+        except Err as e:
+            if isinstance(saved.get(t), list) and saved[t]:
+                return {"models": [str(m) for m in saved[t]], "stale": e.body["error"]}
+            raise
+        if saved.get(t) != ids:
+            try:
+                with open(path + ".tmp", "w") as f:
+                    json.dump({**saved, t: ids}, f, indent=1)
+                os.replace(path + ".tmp", path)
+            except OSError:
+                pass  # no cache is fine; the live list still goes out
+        return {"models": ids}
     if path == "/ui/api/departures" and method == "GET":
         q = {k: int(v[0]) for k, v in query.items() if k in ("since", "before")}
         return st.departures(q.get("since"), q.get("before"), 200)

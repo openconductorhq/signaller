@@ -4,7 +4,7 @@ from rulelang import parse, evaluate, fields_used, RuleError
 
 
 def ev(src, **f):
-    defaults = dict(text="", tag=set(), tier="other", model="", tokens=0, subagent=False, label="none")
+    defaults = dict(text="", tag=set(), tier="other", model="", tokens=0, subagent=False, servertool=False, label="none")
     defaults.update(f)
     return [(evaluate(l.cond, defaults.__getitem__), l.track) for l in parse(src)]
 

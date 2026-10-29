@@ -173,19 +173,33 @@ function renderTracks() {
     row.querySelector(".turl").textContent = up.url;
     key.textContent = up.configured ? "key set" : "no key";
     key.className = "tkey " + (up.configured ? "ok" : "no");
-    for (const inp of row.querySelectorAll("input[data-m]")) inp.value = cfg.models[t][inp.dataset.m];
+    for (const old of row.querySelectorAll("[data-m]")) {
+      const m = old.dataset.m;
+      old.replaceWith(modelPick(t, cfg.models[t][m], { "data-m": m, "data-k": `m:${t}:${m}`,
+        "aria-label": `${NAME[t]} model for ${m}` },
+        (v) => save({ ...cfg, models: { ...cfg.models, [t]: { ...cfg.models[t], [m]: v } } }, $("trErr"))));
+    }
   }
+}
+const MODELS = {};  // track → model ids from its upstream, once loaded
+// A real dropdown once the track's models are in; a text box until then, or when the upstream can't be reached.
+function modelPick(t, value, attrs, onPick) {
+  const ids = MODELS[t];
+  if (!ids) return el("input", { ...attrs, value, spellcheck: "false", autocomplete: "off", onchange: (e) => onPick(e.target.value.trim()) });
+  return el("select", { ...attrs, onchange: (e) => onPick(e.target.value) },
+    (ids.includes(value) ? ids : [value, ...ids]).map((m) => el("option", { value: m, selected: m === value }, m)));
 }
 for (const row of document.querySelectorAll(".trow")) {
   const t = row.dataset.t;
-  for (const inp of row.querySelectorAll("input[data-m]")) {
-    inp.dataset.k = `m:${t}:${inp.dataset.m}`;
-    inp.setAttribute("aria-label", `${NAME[t]} model for ${inp.dataset.m === "haiku" ? "haiku" : "sonnet and bigger"}`);
-    inp.addEventListener("change", () => save({ ...cfg, models: { ...cfg.models, [t]: { ...cfg.models[t], [inp.dataset.m]: inp.value.trim() } } }, $("trErr")));
-  }
   // GET /ui/api/models?track=…: the router asks the upstream with the track's key; the key never reaches the page
   api("GET", "models?track=" + t, undefined, 15000).then((j) => {
-    $("dl-" + t).replaceChildren(...j.models.map((m) => el("option", { value: m })));
+    MODELS[t] = j.models;
+    renderConfig(true);
+    if (j.stale) {
+      const w = row.querySelector(".warn");
+      w.textContent = `${j.stale}. Showing the saved model list (models.json).`;
+      w.hidden = false;
+    }
   }, (e) => {
     const w = row.querySelector(".warn");
     w.textContent = `Couldn't load models (${e.message}). Type a model id.`;
@@ -196,6 +210,8 @@ for (const row of document.querySelectorAll(".trow")) {
 /* rulebook */
 const openCls = { v: false };
 const DEFAULT_TEXT = {
+  servertool: ["when servertool go anthropic",
+    () => ["web search, web fetch & other tools Anthropic runs itself → ", trk("anthropic")]],
   tags: ["when tag is planning go anthropic\nwhen tag is local go local\nwhen tag is execution go valar",
     () => [el("b", {}, "#planning"), " → ", trk("anthropic"), ", ", el("b", {}, "#local"), " → ", trk("local", 1), ", ", el("b", {}, "#execution"), " → ", trk("valar")]],
   tier: ["when tier is opus or tier is fable go anthropic\nwhen tier is sonnet or tier is haiku or tier is other go valar",
@@ -232,7 +248,7 @@ function classifierBits(r, i) {
       el("div", { class: "row" },
         el("label", {}, "Asks ", el("select", { "data-k": "cup", onchange: (e) => setCls({ upstream: e.target.value }) },
           ["valar", "local"].map((u) => el("option", { value: u, selected: c.upstream === u }, UP[u])))),
-        el("label", {}, "Model ", el("input", { value: c.model, list: "dl-" + c.upstream, "data-k": "cmodel", spellcheck: "false", onchange: (e) => setCls({ model: e.target.value.trim() }) })),
+        el("label", {}, "Model ", modelPick(c.upstream, c.model, { "data-k": "cmodel" }, (v) => setCls({ model: v }))),
         el("label", {}, "Time limit ", el("input", { type: "number", class: "narrow", min: 0.1, max: 30, step: 0.1, value: c.timeout_s, "data-k": "ctime",
           onchange: (e) => { const v = Number(e.target.value); if (v >= 0.1 && v <= 30) setCls({ timeout_s: v }); else renderConfig(true); } }), " s")),
       c.labels.map((l, j) => el("div", { class: "row" },
@@ -334,7 +350,7 @@ for (const sel of shadowSels) {
 
 /* ---------- rule editor ---------- */
 let ed = null, edSeq = 0, edTimer = null;
-const TOK = /("(?:\\.|[^"\\])*"?)|(\/(?:\\.|[^/\\])*\/?[ims]*)|\b(when|and|or|not|is|contains|matches|go)\b|\b(anthropic)\b|\b(valar)\b|\b(local)\b|\b(text|tag|tier|model|tokens|subagent|label)\b/gi;
+const TOK = /("(?:\\.|[^"\\])*"?)|(\/(?:\\.|[^/\\])*\/?[ims]*)|\b(when|and|or|not|is|contains|matches|go)\b|\b(anthropic)\b|\b(valar)\b|\b(local)\b|\b(text|tag|tier|model|tokens|subagent|servertool|label)\b/gi;
 const TOKCLS = [null, "st", "st", "kw", "an", "va", "lo", "fd"];
 function highlight() {
   const src = $("edText").value, out = [];

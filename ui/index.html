@@ -56,17 +56,19 @@
     <div class="tracks">
       <div class="trow v" data-t="valar">
         <div><div class="tname">Valar</div><div class="tmeta"><span class="turl"></span> · <span class="tkey"></span></div></div>
-        <label class="f">Sonnet &amp; bigger <input data-m="sonnet" list="dl-valar" spellcheck="false" autocomplete="off"></label>
-        <label class="f">Haiku <input data-m="haiku" list="dl-valar" spellcheck="false" autocomplete="off"></label>
+        <label class="f">Fable <input data-m="fable"></label>
+        <label class="f">Opus <input data-m="opus"></label>
+        <label class="f">Sonnet <input data-m="sonnet"></label>
+        <label class="f">Haiku <input data-m="haiku"></label>
         <p class="warn" role="status" hidden></p>
-        <datalist id="dl-valar"></datalist>
       </div>
       <div class="trow l" data-t="local">
         <div><div class="tname">Local</div><div class="tmeta"><span class="turl"></span> · <span class="tkey"></span></div></div>
-        <label class="f">Sonnet &amp; bigger <input data-m="sonnet" list="dl-local" spellcheck="false" autocomplete="off"></label>
-        <label class="f">Haiku <input data-m="haiku" list="dl-local" spellcheck="false" autocomplete="off"></label>
+        <label class="f">Fable <input data-m="fable"></label>
+        <label class="f">Opus <input data-m="opus"></label>
+        <label class="f">Sonnet <input data-m="sonnet"></label>
+        <label class="f">Haiku <input data-m="haiku"></label>
         <p class="warn" role="status" hidden></p>
-        <datalist id="dl-local"></datalist>
       </div>
     </div>
   </section>
@@ -104,6 +106,7 @@
             <div><code>label</code> what the classifier said</div>
             <div><code>tokens</code> rough request size (<code>100k</code> works)</div>
             <div><code>subagent</code> yes or no</div>
+            <div><code>servertool</code> uses a tool only Anthropic can run (web search…): yes or no</div>
             <div><b>Joining</b> <code>and</code> <code>or</code> <code>not</code> <code>( )</code></div>
             <div><b>Comparing</b> <code>is</code> <code>contains</code> <code>matches /re/i</code> <code>&gt;</code> <code>&lt;</code></div>
             <div><b>Ending</b> <code>go anthropic</code> / <code>go valar</code> / <code>go local</code></div>

@@ -39,16 +39,19 @@ def tier_of(model: str) -> str:
     return next((t for t in ("haiku", "sonnet", "opus", "fable") if t in m), "other")
 
 
+MODEL_TIERS = ("fable", "opus", "sonnet", "haiku")
+
+
 def track_model(model: str, m: dict) -> str:
     """The model id a non-Anthropic track serves for a request's model; non-claude ids pass through."""
     if not model.startswith("claude-"):
         return model
-    return m["haiku"] if "haiku" in model else m["sonnet"]
+    return m.get(tier_of(model), m["sonnet"])
 
 
 class Features:
-    def __init__(self, text, tags, model, tokens, subagent, turn_key):
-        self.text, self.tags, self.model, self.tokens = text[:TEXT_CAP], tags, model, tokens
+    def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False):
+        self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
         self.tier, self.subagent, self.turn_key = tier_of(model), subagent, turn_key
 
     @classmethod
@@ -64,10 +67,13 @@ class Features:
             first = sysm[0] if isinstance(sysm, list) and sysm else sysm
             first = first.get("text", "") if isinstance(first, dict) else first
             sub = isinstance(first, str) and "cc_is_subagent=true" in first
+            # a typed tool (web_search_20250305, web_fetch_…, code_execution_…) runs on Anthropic's side;
+            # other upstreams 400 on it. Claude Code sends these in their own small requests (WebSearch).
+            srv = any(isinstance(t, dict) and t.get("type") not in (None, "custom") for t in req.get("tools") or [])
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
             return None
         tags = frozenset(t.lower() for t in TAG_RE.findall(text))
-        return cls(text, tags, model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest())
+        return cls(text, tags, model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), srv)
 
     def get(self, name: str, label: Callable[[], str]):
         return label() if name == "label" else getattr(self, {"tag": "tags"}.get(name, name))
@@ -102,7 +108,7 @@ class Rule:
     kind: str  # "dsl" | "classifier"
     enabled: bool
     text: str
-    builtin: str | None = None  # "tags" | "classifier" | "tier" | None
+    builtin: str | None = None  # "servertool" | "tags" | "classifier" | "tier" | None
     lines: tuple = field(init=False, compare=True, default=())
 
     def __post_init__(self):
@@ -130,9 +136,12 @@ class RoutingConfig:
     models: dict  # {"valar"|"local": {"sonnet": id, "haiku": id}}
 
 
+SERVERTOOL_RULE = Rule("Tools only Anthropic can run", "dsl", True, "when servertool go anthropic", "servertool")
+
 DEFAULT_CONFIG = RoutingConfig(
     lever="rules", otherwise="anthropic",
     rules=(
+        SERVERTOOL_RULE,
         Rule("Tags in your message", "dsl", True, "when tag is planning go anthropic\nwhen tag is local go local\nwhen tag is execution go valar", "tags"),
         Rule("What the prompt is about", "classifier", True, "", "classifier"),
         Rule("Model the request asked for", "dsl", True,
@@ -146,8 +155,10 @@ DEFAULT_CONFIG = RoutingConfig(
         Label("chit-chat", "greetings, thanks, small talk", "valar"),
     ), "valar"),
     doubling=Doubling(0, "", {"anthropic": "valar", "valar": "anthropic", "local": None}),
-    models={"valar": {"sonnet": "zai-org/GLM-5.3", "haiku": "deepseek-ai/DeepSeek-V4.1-Flash-1017"},
-            "local": {"sonnet": "claude-sonnet-4-6", "haiku": "claude-haiku-4-5-20251001"}},
+    models={"valar": {"fable": "zai-org/GLM-5.3", "opus": "zai-org/GLM-5.3", "sonnet": "zai-org/GLM-5.3",
+                      "haiku": "deepseek-ai/DeepSeek-V4.1-Flash-1017"},
+            "local": {"fable": "claude-sonnet-4-6", "opus": "claude-sonnet-4-6", "sonnet": "claude-sonnet-4-6",
+                      "haiku": "claude-haiku-4-5-20251001"}},
 )
 
 
@@ -183,6 +194,8 @@ def config_from_json(obj: dict) -> RoutingConfig:
         otherwise = _track(obj["otherwise"], "otherwise")
         rules = tuple(Rule(r["name"], r["kind"], bool(r["enabled"]), r.get("text", ""), r.get("builtin"))
                       for r in obj["rules"])
+        if not any(r.builtin == "servertool" for r in rules):  # configs saved before it existed get it on top
+            rules = (SERVERTOOL_RULE,) + rules
         if any(r.kind not in ("dsl", "classifier") for r in rules):
             raise ValueError("rule kind must be dsl or classifier")
         for b in ("tags", "classifier", "tier"):
@@ -207,7 +220,8 @@ def config_from_json(obj: dict) -> RoutingConfig:
         dbl = Doubling(_unit(d["rate"], "doubling rate"), str(d["tag"]), {t: sh[t] for t in TRACKS})
         models = {}
         for t in ("valar", "local"):
-            models[t] = {k: obj["models"][t][k] for k in ("sonnet", "haiku")}
+            m = obj["models"][t]  # configs from before fable/opus had their own model: those served sonnet's
+            models[t] = {"fable": m["sonnet"], "opus": m["sonnet"], **{k: m[k] for k in m if k in MODEL_TIERS}, "haiku": m["haiku"]}
             if not all(isinstance(v, str) and v for v in models[t].values()):
                 raise ValueError(f"models.{t} must be non-empty text")
         return RoutingConfig(obj["lever"], otherwise, rules,
@@ -242,6 +256,10 @@ class Decision:
 
 
 def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, ClassifierSettings], ClassResult]) -> Decision:
+    st = next((r for r in cfg.rules if r.builtin == "servertool"), None)
+    if cfg.lever != "rules" and f.servertool and st and st.enabled and st.text.strip() == SERVERTOOL_RULE.text:
+        # the lever can't send these anywhere useful: only Anthropic runs its own tools
+        return Decision("anthropic", "rule:" + st.name, [{"rule": st.name, "outcome": "Anthropic-only tool, lever overridden → anthropic", "decided": True}])
     if cfg.lever != "rules":
         return Decision(cfg.lever, "lever", [{"rule": "Lever", "outcome": f"sending everything to {cfg.lever}", "decided": True}])
     cs = cfg.classifier
