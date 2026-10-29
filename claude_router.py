@@ -161,9 +161,10 @@ class App:
             return
         try:
             vp = parse_valar(console.fetch_models(self.cfg.valar_url, self.cfg.valar_key))
-            self.prices.set_valar(vp)
-            console.save_models(self.config_dir, valar_prices=vp)
-            self.store.reprice(self.prices)
+            if vp:  # a payload with no prices must not wipe good ones
+                self.prices.set_valar(vp)
+                console.save_models(self.config_dir, valar_prices=vp)
+                self.store.reprice(self.prices)
         except Exception as e:  # reason only: never headers, never the key
             print("valar prices not refreshed: %s" % (getattr(e, "reason", None) or type(e).__name__),
                   file=sys.stderr, flush=True)

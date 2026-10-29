@@ -357,6 +357,11 @@ class ProxyTest(unittest.TestCase):
         with open(os.path.join(self.dir, "models.json")) as f:
             saved = json.load(f)
         self.assertEqual(saved["valar_prices"], {"VS": {"asap": [1, 0.5, 2]}})
+        self.v.models = json.dumps({"data": [{"id": "VS", "pricing": []}]}).encode()
+        self.app.refresh_valar_prices()  # nothing priced: keep what we have
+        self.assertEqual(self.app.prices.valar, {"VS": {"asap": [1, 0.5, 2]}})
+        with open(os.path.join(self.dir, "models.json")) as f:
+            self.assertEqual(json.load(f)["valar_prices"], {"VS": {"asap": [1, 0.5, 2]}})
         self.app.cfg = replace(self.app.cfg, valar_url="http://127.0.0.1:1")
         self.app.refresh_valar_prices()  # failure is logged, never raised
         self.assertIn("valar prices", self.err.getvalue())

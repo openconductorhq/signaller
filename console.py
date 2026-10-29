@@ -183,8 +183,11 @@ def api(h, app, method, path, query, body):
         out, upd = {"models": ids}, {t: ids}
         if t == "valar":
             try:
-                upd["valar_prices"] = parse_valar(payload)
-                out["windows"] = windows_of(upd["valar_prices"])
+                vp = parse_valar(payload)
+                if vp:
+                    upd["valar_prices"] = vp
+                    app.prices.set_valar(vp)
+                out["windows"] = windows_of(vp)
             except Exception:
                 pass  # unparseable prices: ids still go out, every window stays offered
         try:

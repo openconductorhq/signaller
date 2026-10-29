@@ -210,6 +210,11 @@ def test_summary(tmp_path):
     assert span["total"] == 6 and span["tracks"]["local"]["comparisons"] == 0 and "big" not in span["rules"]
     assert s.summary([], 0, now + 1, now)["total"] == 0
     assert s.first_ts(["sb"]) == now - 50
+    s2 = Store(str(tmp_path / "s.db"))  # an unpriced valar row with tokens and an api_cost is not a saving
+    s2.record_request(req(8, now - 10, "valar", 200, reason="default", session_id="sb", cost=None, api_cost=9.0, in_tok=5, out_tok=5))
+    m2 = s2.summary(None, 0, now + 1, now)
+    assert m2["savings"] == m["savings"] and m2["saved_would"] == m["saved_would"] == 1.5
+    s2.close()
 
 
 def test_list_sessions_and_filtered_reads(tmp_path):

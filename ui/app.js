@@ -210,7 +210,7 @@ function renderMoney(m, sfx) {
   $("mV").textContent = [io(v), v.unpriced > 0 && "partly unpriced", v.comparisons > 0 && `incl. ${usd(v.comparisons)} comparisons`].filter(Boolean).join(" · ");
   $("mL").textContent = io(t.local);
   $("nS").textContent = "≈ " + usd(m.savings);
-  $("mS").textContent = `Valar + local would have cost ${usd(v.api_cost + t.local.api_cost)}`;
+  $("mS").textContent = `Valar + local would have cost ${usd(m.saved_would)}`;
 }
 // "decided N of M" under each rule and Otherwise, for the picked sessions and span
 function renderCounts(m) {

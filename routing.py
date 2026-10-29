@@ -30,16 +30,21 @@ def latest_human_text(messages: list) -> str:
     return ""
 
 
+def _sid_ok(sid) -> bool:
+    """The id becomes a filename and a filter token: plain slug only, and not the null bucket's name."""
+    return isinstance(sid, str) and sid != "unknown" and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid) is not None
+
+
 def session_of(headers, req) -> str | None:
     """Claude Code session id: the header, else metadata.user_id's JSON. Never raises."""
     try:
         sid = headers.get("X-Claude-Code-Session-Id")  # http.client headers are case-insensitive
         if not sid:
             sid = {k.lower(): v for k, v in headers.items()}.get("x-claude-code-session-id")
-        if isinstance(sid, str) and sid:
+        if _sid_ok(sid):
             return sid
         sid = json.loads(req["metadata"]["user_id"])["session_id"]
-        return sid if isinstance(sid, str) and sid else None
+        return sid if _sid_ok(sid) else None
     except Exception:
         return None
 

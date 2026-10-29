@@ -407,6 +407,12 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(session_of({"x-claude-code-session-id": "H"}, meta), "H")
         self.assertEqual(session_of({"X-Claude-Code-Session-Id": "H"}, None), "H")
         self.assertEqual(session_of({}, meta), "M")
+        for bad in ("/abs/path/x", "../x", "a,b", "unknown", "x" * 129, "a b"):
+            self.assertIsNone(session_of({"X-Claude-Code-Session-Id": bad}, None))
+            self.assertIsNone(session_of({}, {"metadata": {"user_id": json.dumps({"session_id": bad})}}))
+        u = "0b7e1c52-9d3a-4f6e-8a21-5c4d3e2f1a0b"
+        self.assertEqual(session_of({"X-Claude-Code-Session-Id": u}, None), u)
+        self.assertEqual(session_of({"X-Claude-Code-Session-Id": "../x"}, {"metadata": {"user_id": json.dumps({"session_id": "M"})}}), "M")
         for req in (None, {}, [], {"metadata": 5}, {"metadata": {"user_id": "{bad"}},
                     {"metadata": {"user_id": "[1]"}}, {"metadata": {"user_id": '{"session_id": 3}'}}):
             self.assertIsNone(session_of({}, req))

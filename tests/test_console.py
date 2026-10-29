@@ -186,6 +186,7 @@ class ConsoleTest(Fixture):
             saved = json.load(f)
         self.assertEqual(saved["valar"], ["a", "b"])
         self.assertEqual(saved["valar_prices"], {"b": {"standard": [1, 0.1, 5], "asap": [2, 0.2, 9]}})
+        self.assertEqual(self.app.prices.valar, saved["valar_prices"])
         self.assertEqual(self.v.seen[0][:2], ("GET", "/v1/models"))
         self.assertEqual(self.v.seen[0][2]["Authorization"], "Bearer VK")
         self.assertNotIn(b"VK", d)
