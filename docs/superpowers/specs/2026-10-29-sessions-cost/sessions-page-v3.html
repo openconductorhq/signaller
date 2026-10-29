@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sessions mockup</title>
+<link rel="stylesheet" href="../../../../ui/app.css">
+<style>
+  .sess{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:14px 0 0}
+  .sess .lbl{font-size:11.5px;color:var(--muted);margin-right:4px}
+  .sc{font-size:12.5px;border-radius:7px;padding:5px 10px;background:#fff;border:1px solid var(--line);font-family:var(--mono)}
+  .sc small{color:var(--muted);font-family:"IBM Plex Sans",sans-serif;margin-left:6px}
+  .sc.on{background:var(--ink);color:#fff;border-color:var(--ink)}.sc.on small{color:#C9D3D8}
+  .sc.all{font-family:inherit;font-weight:600}
+  .money{display:grid;grid-template-columns:repeat(3,1fr) 1.3fr;gap:10px;margin-top:4px}
+  .mcell{background:#fff;border-radius:10px;padding:10px 14px;border-left:5px solid var(--c)}
+  .mcell.a{--c:var(--anth)}.mcell.v{--c:var(--val)}.mcell.l{--c:var(--loc)}.mcell.s{--c:var(--shadow);background:var(--ink);color:#fff}
+  .mcell .k{font-size:11.5px;color:var(--muted)}.mcell.s .k{color:#C9D3D8}
+  .mcell .n{font-family:var(--cond);font-size:28px;font-weight:600;line-height:1.1}
+  .mcell .t{font-size:11.5px;color:var(--muted);font-family:var(--mono)}.mcell.s .t{color:#C9D3D8}
+  /* new: which rulebook am I looking at */
+  .scope{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--well);border-radius:9px;padding:7px 10px;margin:0 0 10px;font-size:12.5px}
+  .scope b{font-family:var(--cond);font-size:16px;font-weight:600}
+  .scope .mini{margin-left:auto}
+  /* new: session tag on departures */
+  .stag{font-family:var(--mono);font-size:11px;color:var(--muted);background:var(--well);border-radius:4px;padding:1px 5px;margin-right:6px}
+  .dephead{grid-template-columns:58px 10px minmax(0,1fr) auto}
+  .note{border:2px dashed var(--shadow);border-radius:10px;padding:8px 12px;margin:10px 0;font-size:12.5px;color:var(--shadow);background:#fff}
+</style>
+</head>
+<body>
+<main class="sb">
+  <header class="top">
+    <h1>claude-router</h1>
+    <span class="who">127.0.0.1:8787 · up 14h</span>
+    <div class="frame">
+      <button class="lever a" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
+      <button class="lever r" aria-checked="true"><b>Rules</b><small>follow the rulebook</small></button>
+      <button class="lever v" aria-checked="false"><b>Valar</b><small>everything, ignore rules</small></button>
+      <button class="lever l" aria-checked="false"><b>Local</b><small>everything, ignore rules</small></button>
+    </div>
+  </header>
+  <div class="sess">
+    <span class="lbl">Showing</span>
+    <span class="sc all">All 4 sessions</span>
+    <span class="sc on">claude-router · master<small>10:17</small></span>
+    <span class="sc on">cityos · feat/geo<small>09:02</small></span>
+    <span class="sc">blog · main<small>08:40</small></span>
+    <span class="sc">scratch<small>07:55</small></span>
+  </div>
+
+  <div class="yard">
+    <svg viewBox="0 0 1000 250">
+      <path class="trk rail" d="M30 125 H430"/>
+      <path class="trk anth" d="M430 125 C520 125 540 40 640 40 H960"/>
+      <path class="trk val" d="M430 125 H960"/>
+      <path class="trk loc" d="M430 125 C520 125 540 210 640 210 H960"/>
+      <text x="30" y="105" class="branch">Claude Code · 2 sessions</text>
+      <text x="30" y="155" class="branch mut">6 req/min</text>
+      <circle cx="300" cy="125" r="6" style="fill:var(--val)"/>
+      <circle cx="720" cy="40" r="6" style="fill:var(--anth)"/>
+      <circle cx="820" cy="125" r="6" style="fill:var(--val)"/>
+      <circle cx="430" cy="125" r="11" class="junction"/>
+      <text x="402" y="160" class="branch mut">rulebook</text>
+      <text x="660" y="26" class="branch">Anthropic</text>
+      <text x="660" y="111" class="branch">Valar<tspan class="mut"> · moonshotai/Kimi-K3</tspan></text>
+      <text x="660" y="238" class="branch">Local<tspan class="mut"> · claude-sonnet-4-6</tspan></text>
+      <text x="960" y="28" class="big anthf" text-anchor="end">31%</text>
+      <text x="960" y="111" class="big valf" text-anchor="end">64%</text>
+      <text x="960" y="200" class="big locf" text-anchor="end">5%</text>
+      <text x="960" y="152" class="branch mut" text-anchor="end">share of the last hour</text>
+    </svg>
+  </div>
+  <div class="money">
+    <div class="mcell a"><div class="k">Anthropic · subscription</div><div class="n">$0</div><div class="t">$14.80 at API prices · 2.1M in / 48k out</div></div>
+    <div class="mcell v"><div class="k">Valar</div><div class="n">$1.92</div><div class="t">4.3M in / 110k out</div></div>
+    <div class="mcell l"><div class="k">Local</div><div class="n">$0</div><div class="t">0.3M in / 9k out</div></div>
+    <div class="mcell s"><div class="k">Saved vs all on Anthropic</div><div class="n">$27.40</div><div class="t">Valar + local would have cost $29.32</div></div>
+  </div>
+
+  <section id="tracks" style="margin-top:22px">
+    <h2>Tracks</h2>
+    <p class="hint">Which model serves Claude Code's requests on each track. Anthropic always gets Claude Code's own model.</p>
+    <div class="tracks">
+      <div class="trow v">
+        <div><div class="tname">Valar</div><div class="tmeta">api.valarhq.ai · <span class="ok">key set</span></div></div>
+        <label class="f">Fable <select><option>moonshotai/Kimi-K3</option></select></label>
+        <label class="f">Opus <select><option>moonshotai/Kimi-K3</option></select></label>
+        <label class="f">Sonnet <select><option>moonshotai/Kimi-K3</option></select></label>
+        <label class="f">Haiku <select><option>zai-org/GLM-5.3</option></select></label>
+      </div>
+      <div class="trow l">
+        <div><div class="tname">Local</div><div class="tmeta">127.0.0.1:4000 · <span class="ok">key set</span></div></div>
+        <label class="f">Fable <select><option>claude-sonnet-4-6</option></select></label>
+        <label class="f">Opus <select><option>claude-sonnet-4-6</option></select></label>
+        <label class="f">Sonnet <select><option>claude-sonnet-4-6</option></select></label>
+        <label class="f">Haiku <select><option>claude-haiku-4-5-20251001</option></select></label>
+      </div>
+    </div>
+  </section>
+
+  <div class="cols">
+    <section id="rulebook">
+      <h2>Rulebook</h2>
+      <p class="hint">Checked top to bottom; the first rule that decides wins. Drag to reorder (or Alt+↑/↓). Changes apply to the next request.</p>
+      <div class="scope"><span>Rules for</span><b>all sessions</b><span>· both picked sessions use these</span><button class="mini">give picked sessions their own rules…</button></div>
+      <ol class="rules">
+        <li><span class="num">1</span><div class="rbody"><div class="rname">Tags in your message</div>
+          <div class="rdesc"><b>#planning</b> → <span class="to-a">Anthropic</span>, <b>#local</b> → <span class="to-l">Local</span>, <b>#execution</b> → <span class="to-v">Valar</span></div>
+          <div class="hint" style="margin:3px 0 0">decided 14 of 352 shown requests</div></div><button class="tg" aria-pressed="true"></button></li>
+        <li><span class="num">2</span><div class="rbody"><div class="rname">Model the request asked for</div>
+          <div class="rdesc">opus &amp; fable → <span class="to-a">Anthropic</span>, sonnet, haiku &amp; anything else → <span class="to-v">Valar</span></div>
+          <div class="hint" style="margin:3px 0 0">decided 301 of 352</div></div><button class="tg" aria-pressed="true"></button></li>
+        <li><span class="num">3</span><div class="rbody"><div class="rname">Classifier</div>
+          <div class="chips"><span class="chip">coding → <span class="to-v">Valar</span></span><span class="chip">chit-chat → <span class="to-v">Valar</span></span></div>
+          <div class="hint" style="margin:3px 0 0">decided 20 of 352</div></div><button class="tg" aria-pressed="true"></button></li>
+      </ol>
+      <div class="otherwise"><span class="onum">∗</span><span class="rname">Otherwise</span> → <span class="seg"><button aria-pressed="true" data-v="anthropic">Anthropic</button><button aria-pressed="false" data-v="valar">Valar</button><button aria-pressed="false" data-v="local">Local</button></span>
+        <span class="hint" style="margin:0 0 0 auto">17 of 352</span></div>
+      <button class="btn">+ Add rule</button>
+    </section>
+
+    <section class="board">
+      <h2>Departures</h2>
+      <p class="hint">Every request from the 2 picked sessions, newest first. Open one to see which rule decided.</p>
+      <div class="deps">
+        <div class="dep"><div class="dephead"><time>10:24:12</time><span class="sw v"></span><span class="what"><span class="stag">claude-router</span>add the cost cards under the yard</span><span class="why">Model the request asked for</span></div></div>
+        <div class="dep"><div class="dephead"><time>10:24:03</time><span class="sw a"></span><span class="what"><span class="stag">claude-router</span>add the cost cards under the yard</span><span class="why">Model the request asked for</span></div></div>
+        <div class="dep open"><div class="dephead"><time>10:23:41</time><span class="sw v"></span><span class="what"><span class="stag">cityos</span>#execution run the geo migration and fix failing tests</span><span class="why">Tags in your message</span></div>
+          <div class="explain"><ol><li><b>Tags in your message: #execution → Valar</b></li></ol>
+            <div class="facts">session cityos · feat/geo · zai-org/GLM-5.3 · 41k in / 1.2k out · <b>$0.026</b> (would be $0.24 on Anthropic) · 2.1 s</div></div></div>
+        <div class="dep"><div class="dephead"><time>10:23:30</time><span class="sw l"></span><span class="what"><span class="stag">cityos</span>#local summarise the diff</span><span class="why">Tags in your message</span></div></div>
+        <div class="dep"><div class="dephead"><time>10:22:58</time><span class="sw v"></span><span class="what"><span class="stag">claude-router</span>thanks!</span><span class="why">Classifier</span></div></div>
+        <div class="dep"><div class="dephead"><time>10:22:40</time><span class="sw a"></span><span class="what"><span class="stag">cityos</span>plan the tenant geo rollout</span><span class="why">Otherwise</span></div></div>
+      </div>
+    </section>
+  </div>
+
+  <section class="pair">
+    <div class="pairhead"><h2>Side by side</h2><span class="hint">9 doubled turns from the 2 picked sessions · you preferred Valar 4, Anthropic 3, same 2</span></div>
+    <div class="strip">
+      <label class="sfld">Double <input type="range" value="20"> <input type="number" class="num3" value="20">% of turns</label>
+      <label class="sfld">only with tag <span class="hash">#</span><input class="tagin" placeholder="any"></label>
+      <div class="shadows">
+        <label class="srow"><span class="sw a"></span>When Anthropic answers, compare with <select><option>Valar</option></select></label>
+        <label class="srow"><span class="sw v"></span>When Valar answers, compare with <select><option>Anthropic</option></select></label>
+        <label class="srow"><span class="sw l"></span>When Local answers, compare with <select><option>off</option></select></label>
+      </div>
+    </div>
+    <div class="turnhead"><span class="q"><span class="stag">cityos</span>plan the tenant geo rollout</span>
+      <span class="nav"><button>‹</button> 3 of 9 <button>›</button></span></div>
+    <div class="twin">
+      <div class="ans a"><div class="meta"><span class="tn">Anthropic</span><span>claude-opus-5-5 · 6.2 s · $0.31 at API prices</span><span class="served">served</span></div>
+        <p class="atext">Three phases: 1) add the geo column behind a flag, backfill from the tenant table; 2) dual-read for a week with a mismatch alert; 3) flip reads, drop the old path…</p></div>
+      <div class="ans v"><div class="meta"><span class="tn">Valar</span><span>moonshotai/Kimi-K3 · 4.8 s · $0.04</span></div>
+        <p class="atext">Plan: migrate schema first (nullable geo), backfill in batches of 5k, then switch the API to read geo with fallback, and remove fallback after verification…</p></div>
+    </div>
+    <div class="verdict"><span>Which was better?</span><button>Anthropic</button><button aria-pressed="true">Valar</button><button>Same</button><span class="tally">this turn's verdict counts for cityos</span></div>
+  </section>
+
+  <div class="note">New bits in this mockup: the session chips, cost cards, the grey “Rules for …” line on the rulebook, the “decided N of 352” counts per rule (for the picked sessions), the session tag on each departure, and tokens + cost in an opened departure.</div>
+</main>
+</body>
+</html>

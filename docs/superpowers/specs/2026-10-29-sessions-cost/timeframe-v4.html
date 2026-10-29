@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timeframe mockup</title>
+<link rel="stylesheet" href="../../../../ui/app.css">
+<style>
+  .pick{border:2px dashed transparent;border-radius:14px;padding:6px;margin:0 -8px 30px;cursor:pointer}
+  .pick.selected{border-color:var(--shadow)}
+  .vlabel{font-family:var(--cond);font-size:15px;font-weight:600;color:var(--shadow);letter-spacing:.4px;text-transform:uppercase;margin:0 0 4px}
+  .vsub{font-size:12.5px;color:var(--muted);margin:0 0 10px}
+  .sess{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:14px 0 0}
+  .sess .lbl{font-size:11.5px;color:var(--muted);margin-right:4px}
+  .sc{font-size:12.5px;border-radius:7px;padding:5px 10px;background:#fff;border:1px solid var(--line);font-family:var(--mono)}
+  .sc small{color:var(--muted);font-family:"IBM Plex Sans",sans-serif;margin-left:6px}
+  .sc.on{background:var(--ink);color:#fff;border-color:var(--ink)}.sc.on small{color:#C9D3D8}
+  .sc.all{font-family:inherit;font-weight:600}
+  .money{display:grid;grid-template-columns:repeat(3,1fr) 1.3fr;gap:10px;margin-top:4px}
+  .mcell{background:#fff;border-radius:10px;padding:10px 14px;border-left:5px solid var(--c)}
+  .mcell.a{--c:var(--anth)}.mcell.v{--c:var(--val)}.mcell.l{--c:var(--loc)}.mcell.s{--c:var(--shadow);background:var(--ink);color:#fff}
+  .mcell .k{font-size:11.5px;color:var(--muted)}.mcell.s .k{color:#C9D3D8}
+  .mcell .n{font-family:var(--cond);font-size:28px;font-weight:600;line-height:1.1}
+  .mcell .t{font-size:11.5px;color:var(--muted);font-family:var(--mono)}.mcell.s .t{color:#C9D3D8}
+  /* new: timeframe control, same look as the Otherwise segmented control */
+  .tf{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12.5px;color:var(--muted)}
+  .tf .seg button[aria-pressed=true]{color:var(--ink)}
+  .tf .custom{border:1px solid var(--off);background:#fff;border-radius:6px;padding:3px 8px;font-family:var(--mono);font-size:12px;color:var(--ink)}
+  .tfrow{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0}
+  .mhead{display:flex;justify-content:space-between;align-items:center;margin:14px 0 6px;flex-wrap:wrap;gap:8px}
+  .mhead h2{margin:0}
+</style>
+</head>
+<body>
+<main class="sb">
+  <p class="hint" style="font-size:14px;color:var(--ink)"><b>One time control, or one each?</b> Click the one you prefer. Made-up numbers.</p>
+
+  <!-- ======================= A: one shared control ======================= -->
+  <div class="pick" data-choice="a" onclick="toggleSelect(this)">
+    <p class="vlabel">A · one time control for the diagram and the cost</p>
+    <p class="vsub">Sits with the session chips. Shown set to “1 hour”; the diagram and all cost cards follow it.</p>
+    <header class="top">
+      <h1>claude-router</h1>
+      <span class="who">127.0.0.1:8787 · up 14h</span>
+      <div class="frame">
+        <button class="lever a" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
+        <button class="lever r" aria-checked="true"><b>Rules</b><small>follow the rulebook</small></button>
+        <button class="lever v" aria-checked="false"><b>Valar</b><small>everything, ignore rules</small></button>
+        <button class="lever l" aria-checked="false"><b>Local</b><small>everything, ignore rules</small></button>
+      </div>
+    </header>
+    <div class="tfrow">
+      <div class="sess" style="margin:0">
+        <span class="lbl">Showing</span>
+        <span class="sc all">All 4 sessions</span>
+        <span class="sc on">claude-router · master<small>10:17</small></span>
+        <span class="sc on">cityos · feat/geo<small>09:02</small></span>
+        <span class="sc">blog · main<small>08:40</small></span>
+        <span class="sc">scratch<small>07:55</small></span>
+      </div>
+      <div class="tf"><span>over</span>
+        <span class="seg"><button aria-pressed="false">15 min</button><button aria-pressed="true">1 hour</button><button aria-pressed="false">24 h</button><button aria-pressed="false">Whole session</button><button aria-pressed="false">Custom…</button></span>
+      </div>
+    </div>
+    <div class="yard">
+      <svg viewBox="0 0 1000 250">
+        <path class="trk rail" d="M30 125 H430"/>
+        <path class="trk anth" d="M430 125 C520 125 540 40 640 40 H960"/>
+        <path class="trk val" d="M430 125 H960"/>
+        <path class="trk loc" d="M430 125 C520 125 540 210 640 210 H960"/>
+        <text x="30" y="105" class="branch">Claude Code · 2 sessions</text>
+        <text x="30" y="155" class="branch mut">6 req/min</text>
+        <circle cx="300" cy="125" r="6" style="fill:var(--val)"/>
+        <circle cx="720" cy="40" r="6" style="fill:var(--anth)"/>
+        <circle cx="430" cy="125" r="11" class="junction"/>
+        <text x="402" y="160" class="branch mut">rulebook</text>
+        <text x="660" y="26" class="branch">Anthropic</text>
+        <text x="660" y="111" class="branch">Valar<tspan class="mut"> · moonshotai/Kimi-K3</tspan></text>
+        <text x="660" y="238" class="branch">Local<tspan class="mut"> · claude-sonnet-4-6</tspan></text>
+        <text x="960" y="28" class="big anthf" text-anchor="end">27%</text>
+        <text x="960" y="111" class="big valf" text-anchor="end">70%</text>
+        <text x="960" y="200" class="big locf" text-anchor="end">3%</text>
+        <text x="960" y="152" class="branch mut" text-anchor="end">share of the last hour</text>
+      </svg>
+    </div>
+    <div class="money">
+      <div class="mcell a"><div class="k">Anthropic · subscription · last hour</div><div class="n">$0</div><div class="t">$3.10 at API prices · 0.4M in / 9k out</div></div>
+      <div class="mcell v"><div class="k">Valar · last hour</div><div class="n">$0.46</div><div class="t">1.1M in / 26k out</div></div>
+      <div class="mcell l"><div class="k">Local · last hour</div><div class="n">$0</div><div class="t">0.05M in / 1k out</div></div>
+      <div class="mcell s"><div class="k">Saved vs all on Anthropic · last hour</div><div class="n">$6.85</div><div class="t">Valar + local would have cost $7.31</div></div>
+    </div>
+  </div>
+
+  <!-- ======================= B: one control each ======================= -->
+  <div class="pick" data-choice="b" onclick="toggleSelect(this)">
+    <p class="vlabel">B · separate controls: diagram and cost each have their own</p>
+    <p class="vsub">Diagram defaults to 1 hour, cost to “Whole session”. Watch the last 15 minutes live while the cost still shows the whole session.</p>
+    <header class="top">
+      <h1>claude-router</h1>
+      <span class="who">127.0.0.1:8787 · up 14h</span>
+      <div class="frame">
+        <button class="lever a" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
+        <button class="lever r" aria-checked="true"><b>Rules</b><small>follow the rulebook</small></button>
+        <button class="lever v" aria-checked="false"><b>Valar</b><small>everything, ignore rules</small></button>
+        <button class="lever l" aria-checked="false"><b>Local</b><small>everything, ignore rules</small></button>
+      </div>
+    </header>
+    <div class="sess">
+      <span class="lbl">Showing</span>
+      <span class="sc all">All 4 sessions</span>
+      <span class="sc on">claude-router · master<small>10:17</small></span>
+      <span class="sc on">cityos · feat/geo<small>09:02</small></span>
+      <span class="sc">blog · main<small>08:40</small></span>
+      <span class="sc">scratch<small>07:55</small></span>
+    </div>
+    <div class="mhead" style="margin-bottom:0"><h2>Live</h2>
+      <div class="tf"><span>over</span>
+        <span class="seg"><button aria-pressed="true">15 min</button><button aria-pressed="false">1 hour</button><button aria-pressed="false">24 h</button><button aria-pressed="false">Whole session</button><button aria-pressed="false">Custom…</button></span>
+      </div>
+    </div>
+    <div class="yard">
+      <svg viewBox="0 0 1000 250">
+        <path class="trk rail" d="M30 125 H430"/>
+        <path class="trk anth" d="M430 125 C520 125 540 40 640 40 H960"/>
+        <path class="trk val" d="M430 125 H960"/>
+        <path class="trk loc" d="M430 125 C520 125 540 210 640 210 H960"/>
+        <text x="30" y="105" class="branch">Claude Code · 2 sessions</text>
+        <text x="30" y="155" class="branch mut">6 req/min</text>
+        <circle cx="300" cy="125" r="6" style="fill:var(--val)"/>
+        <circle cx="820" cy="125" r="6" style="fill:var(--val)"/>
+        <circle cx="430" cy="125" r="11" class="junction"/>
+        <text x="402" y="160" class="branch mut">rulebook</text>
+        <text x="660" y="26" class="branch">Anthropic</text>
+        <text x="660" y="111" class="branch">Valar<tspan class="mut"> · moonshotai/Kimi-K3</tspan></text>
+        <text x="660" y="238" class="branch">Local<tspan class="mut"> · claude-sonnet-4-6</tspan></text>
+        <text x="960" y="28" class="big anthf" text-anchor="end">22%</text>
+        <text x="960" y="111" class="big valf" text-anchor="end">78%</text>
+        <text x="960" y="200" class="big locf" text-anchor="end">0%</text>
+        <text x="960" y="152" class="branch mut" text-anchor="end">share of the last 15 min</text>
+      </svg>
+    </div>
+    <div class="mhead"><h2>Cost</h2>
+      <div class="tf"><span>over</span>
+        <span class="seg"><button aria-pressed="false">15 min</button><button aria-pressed="false">1 hour</button><button aria-pressed="false">24 h</button><button aria-pressed="true">Whole session</button><button aria-pressed="false">Custom…</button></span>
+      </div>
+    </div>
+    <div class="money">
+      <div class="mcell a"><div class="k">Anthropic · subscription</div><div class="n">$0</div><div class="t">$14.80 at API prices · 2.1M in / 48k out</div></div>
+      <div class="mcell v"><div class="k">Valar</div><div class="n">$1.92</div><div class="t">4.3M in / 110k out</div></div>
+      <div class="mcell l"><div class="k">Local</div><div class="n">$0</div><div class="t">0.3M in / 9k out</div></div>
+      <div class="mcell s"><div class="k">Saved vs all on Anthropic</div><div class="n">$27.40</div><div class="t">Valar + local would have cost $29.32</div></div>
+    </div>
+  </div>
+
+  <div class="mockup-note hint" style="border:2px dashed var(--shadow);border-radius:10px;padding:8px 12px;color:var(--shadow);background:#fff">
+    “Custom…” opens a from / to picker (date + time). “Whole session” = from the earliest picked session's first request until now.
+  </div>
+</main>
+</body>
+</html>
