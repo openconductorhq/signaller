@@ -2,12 +2,14 @@
 import json
 import os
 import re
+import tempfile
 import time
 import urllib.request
 from dataclasses import replace
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from routing import TRACKS, ClassResult, Rule, config_from_json, config_to_json, route
+from prices import parse_valar
+from routing import TRACKS, WINDOWS, ClassResult, Rule, config_from_json, config_to_json, route
 from rulelang import RuleError, parse
 
 UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui")
@@ -78,11 +80,45 @@ def preview(app, body):
             "since_restart": True, "count": len(app.recent)}
 
 
-def list_models(url, key, timeout=5):
+def fetch_models(url, key, timeout=5):
+    """The upstream's raw /v1/models payload."""
     req = urllib.request.Request(url + "/v1/models", headers={"Authorization": "Bearer " + key})
     nored = urllib.request.build_opener(type("NoRedirect", (urllib.request.HTTPRedirectHandler,), {"redirect_request": lambda *a: None}))
     with nored.open(req, timeout=timeout) as r:  # a redirect would re-send the key elsewhere
-        return sorted(m["id"] for m in json.load(r)["data"])
+        return json.load(r)
+
+
+def list_models(url, key, timeout=5):
+    return sorted(m["id"] for m in fetch_models(url, key, timeout)["data"])
+
+
+def read_models(config_dir):
+    """models.json: the last list each upstream gave us (+ valar_prices), also hand-editable for an upstream that's down."""
+    try:
+        with open(os.path.join(config_dir, "models.json")) as f:
+            saved = json.load(f)
+        return saved if isinstance(saved, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_models(config_dir, **updates):
+    # ponytail: read-merge-write; a concurrent save can lose the other's keys until the next refresh rewrites them
+    saved = read_models(config_dir)
+    if all(saved.get(k) == v for k, v in updates.items()):
+        return
+    fd, tmp = tempfile.mkstemp(dir=config_dir)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump({**saved, **updates}, f, indent=1)
+        os.replace(tmp, os.path.join(config_dir, "models.json"))
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
+def windows_of(valar_prices):
+    return {m: [w for w in WINDOWS if w in p] for m, p in valar_prices.items() if isinstance(p, dict)}
 
 
 def state(app):
@@ -109,32 +145,34 @@ def api(h, app, method, path, query, body):
         if t not in ("valar", "local"):
             raise Err(400, "track must be valar or local")
         name, url, key = upstream(app.cfg, t)
-        # models.json: the last list each upstream gave us, also hand-editable for an upstream that's down
-        path = os.path.join(app.config_dir, "models.json")
-        try:
-            with open(path) as f:
-                saved = json.load(f)
-        except (OSError, ValueError):
-            saved = {}
+        saved = read_models(app.config_dir)
         try:
             if not key:
                 raise Err(502, "%s not configured" % name)
             try:
-                ids = list_models(url, key)
+                payload = fetch_models(url, key)
+                ids = sorted(m["id"] for m in payload["data"])
             except Exception as e:  # reason only: never headers, never the key
                 raise Err(502, "%s unreachable: %s" % (name, getattr(e, "reason", None) or type(e).__name__))
         except Err as e:
             if isinstance(saved.get(t), list) and saved[t]:
-                return {"models": [str(m) for m in saved[t]], "stale": e.body["error"]}
+                out = {"models": [str(m) for m in saved[t]], "stale": e.body["error"]}
+                if t == "valar" and isinstance(saved.get("valar_prices"), dict):
+                    out["windows"] = windows_of(saved["valar_prices"])
+                return out
             raise
-        if saved.get(t) != ids:
+        out, upd = {"models": ids}, {t: ids}
+        if t == "valar":
             try:
-                with open(path + ".tmp", "w") as f:
-                    json.dump({**saved, t: ids}, f, indent=1)
-                os.replace(path + ".tmp", path)
-            except OSError:
-                pass  # no cache is fine; the live list still goes out
-        return {"models": ids}
+                upd["valar_prices"] = parse_valar(payload)
+                out["windows"] = windows_of(upd["valar_prices"])
+            except Exception:
+                pass  # unparseable prices: ids still go out, every window stays offered
+        try:
+            save_models(app.config_dir, **upd)
+        except OSError:
+            pass  # no cache is fine; the live list still goes out
+        return out
     if path == "/ui/api/departures" and method == "GET":
         q = {k: int(v[0]) for k, v in query.items() if k in ("since", "before")}
         return st.departures(q.get("since"), q.get("before"), 200)

@@ -249,6 +249,24 @@ class Store:
         finally:
             c.close()
 
+    def reprice(self, prices):
+        """Fill `cost` on Valar rows recorded before their model's price was known; returns rows updated."""
+        rows = self._all("SELECT id, model_out, window, in_tok, out_tok, cache_read_tok, cache_write_tok FROM requests "
+                         "WHERE track='valar' AND cost IS NULL AND COALESCE(in_tok, out_tok, cache_read_tok, cache_write_tok) IS NOT NULL")
+        upd = []
+        for r in rows:
+            u = {"in": r["in_tok"], "out": r["out_tok"], "cache_read": r["cache_read_tok"], "cache_write": r["cache_write_tok"]}
+            c = prices.cost("valar", r["model_out"], r["window"], u)
+            if c is not None:
+                upd.append((c, r["id"]))
+        c = self._conn()
+        try:
+            with c:
+                c.executemany("UPDATE requests SET cost=? WHERE id=?", upd)
+        finally:
+            c.close()
+        return len(upd)
+
 
 class NullStore:
     """Stats off (stats.db unusable): same interface, writes dropped, reads empty."""
@@ -270,6 +288,7 @@ class NullStore:
     def turn(self, turn_id): return None
     def set_verdict(self, turn_id, verdict): return False
     def forget_pairs(self): pass
+    def reprice(self, prices): return 0
 
     def stats(self, now):
         return {"anthropic_pct": 0, "valar_pct": 0, "local_pct": 0, "last_hour_total": 0, "per_minute": 0, "errors_last_hour": 0,

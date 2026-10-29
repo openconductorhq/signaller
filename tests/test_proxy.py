@@ -317,6 +317,50 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(ok[1]["in_tok"], 10)
         self.assertEqual((ok[2]["status"], ok[2]["in_tok"], ok[2]["out_tok"]), (529, None, None))
 
+    def test_cost_recorded_and_repriced(self):
+        b = body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "USAGE"}]}, stream=True)
+        self.post(b)  # Valar, no prices loaded yet
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        self.post(b)
+        self.logged(2)
+        self.app.store.close()
+        v, a = sorted(self.app.store.departures(), key=lambda r: r["id"])
+        api = (10 * 2 + 7 * 10 + 5 * 0.2 + 2 * 2.5) / 1e6  # sonnet row
+        self.assertIsNone(v["cost"])
+        self.assertAlmostEqual(v["api_cost"], api)
+        self.assertEqual(a["cost"], 0.0)
+        self.assertAlmostEqual(a["api_cost"], api)
+        self.app.prices.set_valar({"VS": {"asap": [1.0, 0.5, 2.0]}})
+        self.assertEqual(self.app.store.reprice(self.app.prices), 1)
+        self.assertAlmostEqual(self.app.store.request(v["id"])["cost"], (10 + 5 * 0.5 + 7 * 2) / 1e6)
+        self.assertEqual(self.app.store.reprice(self.app.prices), 0)
+
+    def test_valar_cost_at_record_time(self):
+        self.app.prices.set_valar({"VS": {"asap": [1.0, 0.5, 2.0]}})
+        self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "USAGE"}]}, stream=True))
+        self.logged()
+        self.app.store.close()
+        r = self.app.store.departures()[0]
+        self.assertAlmostEqual(r["cost"], (10 + 5 * 0.5 + 7 * 2) / 1e6)
+        self.assertGreater(r["api_cost"], 0)
+
+    def test_refresh_valar_prices(self):
+        self.v.models = json.dumps({"data": [{"id": "VS", "pricing": [
+            {"tier": "realtime", "input_per_1m_tokens": 1, "cached_input_per_1m_tokens": 0.5, "output_per_1m_tokens": 2}]},
+            {"id": "valar-auto-balanced", "pricing": []}]}).encode()
+        self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "USAGE"}]}, stream=True))
+        self.logged()
+        self.app.store.close()
+        self.app.refresh_valar_prices()
+        self.assertEqual(self.v.seen[-1][:2], ("GET", "/v1/models"))
+        self.assertAlmostEqual(self.app.store.departures()[0]["cost"], (10 + 5 * 0.5 + 7 * 2) / 1e6)
+        with open(os.path.join(self.dir, "models.json")) as f:
+            saved = json.load(f)
+        self.assertEqual(saved["valar_prices"], {"VS": {"asap": [1, 0.5, 2]}})
+        self.app.cfg = replace(self.app.cfg, valar_url="http://127.0.0.1:1")
+        self.app.refresh_valar_prices()  # failure is logged, never raised
+        self.assertIn("valar prices", self.err.getvalue())
+
     def test_upstream_error_passthrough(self):
         self.a.error = True
         s, data = self.post(body_for("claude-opus-5-5"))

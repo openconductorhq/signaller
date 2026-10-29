@@ -111,7 +111,7 @@ class PairHandle:
             if len(self.sides) < 2:
                 return
         self.store.record_pair({**self.row, "served": json.dumps(self.sides["served"]),
-                                "shadow": json.dumps(self.sides["shadow"])})
+                                "shadow": json.dumps(self.sides["shadow"]), "shadow_cost": self.sides["shadow"].get("cost")})
 
     def finish(self, served: dict) -> None:
         self._side("served", served)
@@ -121,8 +121,8 @@ class PairHandle:
 
 
 class Doubler:
-    def __init__(self, store, open_upstream, rng: random.Random | None = None):
-        self.store, self.open_upstream, self.rng = store, open_upstream, rng or random.Random()
+    def __init__(self, store, open_upstream, rng: random.Random | None = None, prices=None):
+        self.store, self.open_upstream, self.rng, self.prices = store, open_upstream, rng or random.Random(), prices
         self.lock = threading.Lock()
         self.turns = {}  # turn_key -> [turn_id | None, last_seen, steps, recorded]
         self.by_id = {}  # turn_id -> same entry
@@ -194,6 +194,7 @@ class Doubler:
         from claude_router import HOP, hoist_inline_tools, upstream, upstream_headers  # late: claude_router imports this module
         from routing import track_model, track_window
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
+        model_out, window = None, None
         try:
             req = json.loads(body)
             req["stream"] = False
@@ -208,9 +209,11 @@ class Doubler:
                     hoist_inline_tools(req)
                 headers = upstream_headers(headers, key)
                 if track == "valar" and windows:
-                    headers.append(("X-Valar-Completion-Window", track_window(model_in, windows["valar"])))
+                    out["window"] = window = track_window(model_in, windows["valar"])
+                    headers.append(("X-Valar-Completion-Window", window))
             else:
                 headers = [(k, v) for k, v in headers if k.lower() not in HOP]
+            model_out = str(req.get("model", ""))
             conn, resp = self.open_upstream(cfg, track, method, path, headers, json.dumps(req).encode())
             out["ttfb_ms"], out["status"] = int((time.time() - t0) * 1000), resp.status
             cap = AnswerCapture(resp.getheader("content-type", ""), resp.getheader("content-encoding", ""))
@@ -223,6 +226,10 @@ class Doubler:
             self._release(track)
         out["ms"] = int((time.time() - t0) * 1000)
         res = cap.result() if cap else {"text": "", "tools": [], "output_tokens": None}
+        try:
+            out["cost"] = self.prices.cost(track, model_out, window, res.get("usage") or {}) if self.prices else None
+        except Exception:
+            out["cost"] = None
         h.shadow({**res, **out, "error": out["error"] or res.get("error")})
 
     def active(self) -> dict:

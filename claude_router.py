@@ -21,6 +21,7 @@ from sessions import SessionDirectory, claude_dir
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
+from prices import Prices, parse_valar
 from routing import session_of, Features, RoutingConfig, is_routed, route as decide_route, track_model, track_window
 from store import NullStore, Store, load_console_config, save_console_config
 
@@ -150,8 +151,29 @@ class App:
         self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
         self.started = time.time()
         self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
-        self.doubler = Doubler(self.store, open_upstream)
+        self.prices = Prices(config_dir)
+        self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
         self._rlock = threading.Lock()
+
+    def refresh_valar_prices(self) -> None:
+        """Fetch Valar's prices, keep them in memory and models.json, and price rows that were waiting. Never raises."""
+        if not self.cfg.valar_key:
+            return
+        try:
+            vp = parse_valar(console.fetch_models(self.cfg.valar_url, self.cfg.valar_key))
+            self.prices.set_valar(vp)
+            console.save_models(self.config_dir, valar_prices=vp)
+            self.store.reprice(self.prices)
+        except Exception as e:  # reason only: never headers, never the key
+            print("valar prices not refreshed: %s" % (getattr(e, "reason", None) or type(e).__name__),
+                  file=sys.stderr, flush=True)
+
+    def start_price_refresh(self, every: float = 3600) -> None:
+        def loop():
+            while True:
+                self.refresh_valar_prices()
+                time.sleep(every)
+        threading.Thread(target=loop, daemon=True).start()
 
     def set_routing(self, new: RoutingConfig) -> None:
         with self._rlock:  # file and memory must agree under concurrent PUTs
@@ -299,6 +321,10 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 except Exception:
                     res = {}
                 usage = res.get("usage") or {}
+                try:  # pricing never fails the request: unknown → nulls
+                    cost, api_cost = app.prices.cost(route, out_model, window, usage), app.prices.api_cost(model, usage)
+                except Exception:
+                    cost = api_cost = None
                 if pair:
                     res = res or {"text": "", "tools": [], "output_tokens": None}
                     pair.finish({**res, "status": status, "ttfb_ms": ttfb, "ms": ms,
@@ -309,7 +335,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         "model_in": model, "model_out": out_model, "status": status, "ttfb_ms": ttfb if ttfb is not None else ms,
                         "ms": ms, "stream": int(stream), "preview": f.text[:120], "turn_id": turn_id,
                         "session_id": sid, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
-                        "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"), "window": window})
+                        "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"), "window": window,
+                        "cost": cost, "api_cost": api_cost})
                     app.recent.append((f, d, rid))
                 shown_reason = '"%s"' % reason if re.search(r"\s", reason) else reason
                 print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s shadow=%s" % (
@@ -338,6 +365,7 @@ def main() -> None:
         print("claude-router: config dir unusable: %s" % e, file=sys.stderr)
         sys.exit(2)
     srv = make_server(cfg, app)
+    app.start_price_refresh()
     print("listening on %s:%d; anthropic=%s valar=%s (%s) litellm=%s (%s)" % (
         cfg.listen_host, cfg.listen_port, cfg.anthropic_url, cfg.valar_url, "key set" if cfg.valar_key else "no key",
         cfg.litellm_url, "key set" if cfg.litellm_key else "no key"), file=sys.stderr, flush=True)

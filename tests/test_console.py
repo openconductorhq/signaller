@@ -175,9 +175,17 @@ class ConsoleTest(Fixture):
             self.assertTrue(r.getheader("Content-Type").startswith(ctype), path)
 
     def test_models_endpoint(self):
-        self.v.models = b'{"data":[{"id":"b"},{"id":"a"}]}'
+        self.v.models = json.dumps({"data": [{"id": "b", "pricing": [
+            {"tier": "standard", "input_per_1m_tokens": 1, "cached_input_per_1m_tokens": 0.1, "output_per_1m_tokens": 5},
+            {"tier": "realtime", "input_per_1m_tokens": 2, "cached_input_per_1m_tokens": 0.2, "output_per_1m_tokens": 9},
+            {"tier": "flex", "input_per_1m_tokens": 1, "cached_input_per_1m_tokens": 0.1, "output_per_1m_tokens": 5}]},
+            {"id": "a", "pricing": []}]}).encode()
         r, d = self.req("GET", "/ui/api/models?track=valar")
-        self.assertEqual((r.status, json.loads(d)), (200, {"models": ["a", "b"]}))
+        self.assertEqual((r.status, json.loads(d)), (200, {"models": ["a", "b"], "windows": {"b": ["asap", "standard"]}}))
+        with open(os.path.join(self.dir, "models.json")) as f:
+            saved = json.load(f)
+        self.assertEqual(saved["valar"], ["a", "b"])
+        self.assertEqual(saved["valar_prices"], {"b": {"standard": [1, 0.1, 5], "asap": [2, 0.2, 9]}})
         self.assertEqual(self.v.seen[0][:2], ("GET", "/v1/models"))
         self.assertEqual(self.v.seen[0][2]["Authorization"], "Bearer VK")
         self.assertNotIn(b"VK", d)

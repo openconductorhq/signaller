@@ -323,6 +323,17 @@ class DoublingTest(unittest.TestCase):
         self.pairs(1)
         self.assertEqual(self.v.seen[0][1].get_all("X-Valar-Completion-Window"), ["priority"])
 
+    def test_shadow_usage_and_cost_on_pair(self):
+        w = {"valar": {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}}
+        self.app.routing = replace(self.app.routing, windows=w)
+        self.app.prices.set_valar({"VS": {"priority": [1.0, 0.5, 2.0]}})
+        self.post(msg("priced turn", "claude-opus-5-5"))
+        r = self.pairs(1)[0]
+        self.assertEqual(r["shadow"]["window"], "priority")
+        self.assertEqual(r["shadow"]["usage"], {"in": 3, "out": 5, "cache_read": None, "cache_write": None})
+        self.assertAlmostEqual(r["shadow"]["cost"], (3 + 5 * 2) / 1e6)
+        self.assertAlmostEqual(r["shadow_cost"], r["shadow"]["cost"])
+
     def test_shadow_valar_not_configured_on_pair(self):
         self.srv.shutdown()
         self.srv.server_close()
