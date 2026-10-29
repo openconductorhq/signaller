@@ -37,6 +37,17 @@ const fmtUp = (s) => s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m" : s 
 const isErr = (status) => status === 0 || status >= 500;
 const tierOf = (m) => { m = (m || "").toLowerCase(); return m.includes("haiku") ? "haiku" : m.includes("sonnet") ? "sonnet" : m.includes("opus") ? "opus" : "other"; };
 
+const hm = (ts) => { const d = new Date(ts * 1000); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const usd = (v) => "$" + (!v ? "0" : v < 0.1 ? v.toFixed(3) : v.toFixed(2));
+const tok = (n) => !n ? "0" : n >= 1e5 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+// What a request cost, for a departure or a side-by-side card; null when there's nothing to say.
+function priced(track, cost, api) {
+  if (track === "anthropic") return api != null ? usd(api) + " at API prices" : null;
+  if (cost == null) return track === "valar" ? "unpriced" : null;
+  return usd(cost) + (api != null ? ` (would be ${usd(api)} on Anthropic)` : "");
+}
+
 function showErr(node, msg) { node.textContent = msg; node.hidden = !msg; }
 
 // Re-rendering replaces nodes; put focus back on the control with the same data-k.
@@ -49,22 +60,108 @@ function keepFocus(fn) {
   }
 }
 
+/* ---------- what's shown: picked sessions + time span ---------- */
+const SPANS = { "15m": "last 15 min", "1h": "last hour", "24h": "last 24 h", whole: "whole session", custom: null };
+const VIEW_KEY = "claude-router.view";
+let view = { pick: [], span: "1h", from: "", to: "" }, sessions = null, moreOpen = false, viewGen = 0;
+try { Object.assign(view, JSON.parse(localStorage.getItem(VIEW_KEY)) || {}); } catch (_) { /* no storage: defaults */ }
+if (!Array.isArray(view.pick) || !(view.span in SPANS)) view = { pick: [], span: "1h", from: "", to: "" };
+const saveView = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); } catch (_) { /* no storage */ } };
+const toTs = (v) => { const t = new Date(v).getTime(); return isNaN(t) ? null : t / 1000; };
+const toLocal = (ts) => { const d = new Date(ts * 1000); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
+const sessQ = () => view.pick.length ? "sessions=" + encodeURIComponent(view.pick.join(",")) : "";
+function spanQ() {
+  const now = Date.now() / 1000;
+  if (view.span === "15m") return "from=" + (now - 900);
+  if (view.span === "24h") return "from=" + (now - 86400);
+  if (view.span === "whole") return "from=session";
+  if (view.span === "custom") {
+    const f = toTs(view.from), t = toTs(view.to);
+    return [f != null && "from=" + f, t != null && "to=" + t].filter(Boolean).join("&");
+  }
+  return "";  // 1 hour: the server's default
+}
+const qs = (...parts) => { const q = parts.filter(Boolean).join("&"); return q ? "?" + q : ""; };
+function spanText() {
+  if (view.span !== "custom") return SPANS[view.span];
+  const f = toTs(view.from), t = toTs(view.to);
+  return `${f != null ? hm(f) : "start"}–${t != null ? hm(t) : "now"}`;
+}
+const shortLabel = (id) => {
+  const s = sessions && sessions.find((x) => x.id === (id || "unknown"));
+  return s ? s.label.split(" · ")[0] : id ? id.slice(0, 8) : "unknown session";
+};
+const fullLabel = (id) => { const s = sessions && sessions.find((x) => x.id === (id || "unknown")); return s ? s.label : id || "unknown session"; };
+
+async function loadSessions() {
+  sessions = await api("GET", "sessions?from=0");
+  const keep = view.pick.filter((id) => sessions.some((x) => x.id === id));  // forget sessions that aged out
+  if (keep.length !== view.pick.length) { view.pick = keep; saveView(); viewChanged(true); }
+  renderSess();
+}
+function renderSess() {
+  const all = sessions || [], picked = new Set(view.pick);
+  const shown = moreOpen ? all : all.filter((x, i) => i < 8 || picked.has(x.id));
+  const chip = (attrs, ...kids) => el("button", { type: "button", class: "sc", ...attrs }, ...kids);
+  keepFocus(() => $("sess").replaceChildren(el("span", { class: "lbl" }, "Showing"),
+    chip({ class: "sc all", "aria-pressed": String(!picked.size), "data-k": "sc:all", onclick: () => setPick([]) }, `All ${plural(all.length, "session")}`),
+    ...shown.map((x) => chip({ "aria-pressed": String(picked.has(x.id)), "data-k": "sc:" + x.id, title: x.id,
+      onclick: () => setPick(picked.has(x.id) ? view.pick.filter((y) => y !== x.id) : [...view.pick, x.id]) },
+      x.label, el("small", {}, x.last_ts ? hm(x.last_ts) : ""))),
+    all.length > shown.length || moreOpen && all.length > 8 ? chip({ class: "sc more", "data-k": "sc:more", "aria-expanded": String(moreOpen),
+      onclick: () => { moreOpen = !moreOpen; renderSess(); } }, moreOpen ? "fewer" : `+ ${all.length - shown.length} more`) : ""));
+}
+function setPick(ids) { view.pick = ids; saveView(); renderSess(); viewChanged(true); }
+// A new pick restarts departures and side by side; a new span only changes the yard and the cost cards.
+function viewChanged(pickToo) {
+  viewGen++;
+  if (pickToo) {
+    $("deps").replaceChildren();
+    lastId = 0; minId = null; firstLoad = true; $("older").hidden = true;
+    turns = []; curTurn = null; turnData = null; turnKey = ""; ticks = 0;
+    const n = view.pick.length;
+    $("depFrom").textContent = n ? `Every request from the ${n === 1 ? "picked session" : n + " picked sessions"}` : "Every request";
+  }
+  busy = false;  // the reply in flight is for the old view; it's dropped by viewGen
+  tick();
+}
+function renderSpan() {
+  for (const b of $("span").children) { b.setAttribute("aria-pressed", String(b.dataset.v === view.span)); b.dataset.k = "span:" + b.dataset.v; }
+  $("custom").hidden = view.span !== "custom";
+  $("cFrom").value = view.from; $("cTo").value = view.to;
+}
+for (const b of $("span").children) b.addEventListener("click", () => {
+  if (b.dataset.v === view.span) return;
+  view.span = b.dataset.v;
+  if (view.span === "custom" && !view.from) { const now = Date.now() / 1000; view.from = toLocal(now - 3600); view.to = toLocal(now); }
+  saveView(); renderSpan(); viewChanged(false);
+});
+for (const id of ["cFrom", "cTo"]) $(id).addEventListener("change", () => {
+  view[id === "cFrom" ? "from" : "to"] = $(id).value; saveView(); viewChanged(false);
+});
+
 /* ---------- state + polling ---------- */
 let S = null, cfg = null, rendered = "", saving = 0, ticks = 0, busy = false;
 
 async function tick() {
   if (busy || document.hidden) return;
   busy = true;
+  const gen = viewGen;
   try {
-    const [st, deps] = await Promise.all([api("GET", "state"), api("GET", "departures" + (lastId ? "?since=" + Math.max(0, lastId - OVERLAP) : ""))]);
+    const [st, deps] = await Promise.all([api("GET", "state" + qs(sessQ(), spanQ())),
+      api("GET", "departures" + qs(sessQ(), lastId && "since=" + Math.max(0, lastId - OVERLAP)))]);
+    if (gen !== viewGen) return;
     $("offline").hidden = true;
     applyState(st);
     addDeps(deps);
-    if (ticks++ % 5 === 0) await loadTurns().catch((e) => showErr($("dblErr"), "Couldn't load doubled turns: " + e.message));
+    if (ticks++ % 5 === 0) {
+      await loadTurns().catch((e) => showErr($("dblErr"), "Couldn't load doubled turns: " + e.message));
+      if (ticks > 1) loadSessions().catch(() => {});  // ponytail: list refreshes every 5 s; new sessions show up then
+    }
   } catch (e) {
-    $("offline").hidden = false;
+    if (gen === viewGen) $("offline").hidden = false;
   } finally {
-    busy = false;
+    if (gen === viewGen) busy = false;
   }
 }
 
@@ -76,23 +173,44 @@ function applyState(st) {
   $("who").textContent = `${st.listen} · up ${fmtUp(st.uptime_s)}`;
   $("errs").hidden = !s.errors_last_hour;
   $("errs").textContent = `${s.errors_last_hour} error${s.errors_last_hour === 1 ? "" : "s"} in the last hour`;
-  const none = !s.last_hour_total;
-  $("pctA").textContent = none ? "–" : s.anthropic_pct + "%";
-  $("pctV").textContent = none ? "–" : s.valar_pct + "%";
-  $("pctL").textContent = none ? "–" : s.local_pct + "%";
-  $("yard").setAttribute("aria-label", none ? "Live traffic: no requests in the last hour"
-    : `Live traffic: ${s.anthropic_pct}% Anthropic, ${s.valar_pct}% Valar, ${s.local_pct}% local in the last hour`);
-  const pm = s.per_minute;
+  const m = st.summary, tr = m.tracks, none = !m.total, span = spanText();
+  $("pctA").textContent = none ? "–" : tr.anthropic.pct + "%";
+  $("pctV").textContent = none ? "–" : tr.valar.pct + "%";
+  $("pctL").textContent = none ? "–" : tr.local.pct + "%";
+  $("share").textContent = (view.span === "custom" ? "share of " : "share of the ") + span;
+  $("cc").textContent = view.pick.length ? "Claude Code · " + plural(view.pick.length, "session") : "Claude Code";
+  $("yard").setAttribute("aria-label", none ? `Live traffic: no requests in the ${span}`
+    : `Live traffic: ${tr.anthropic.pct}% Anthropic, ${tr.valar.pct}% Valar, ${tr.local.pct}% local in the ${span}`);
+  renderMoney(m, view.span === "whole" ? "" : " · " + span);
+  renderCounts(m);
+  const pm = m.per_minute;
   $("rpm").textContent = `${pm < 10 && pm % 1 ? pm.toFixed(1) : Math.round(pm)} req/min`;
   const hint = st.upstreams.anthropic_model_hint;
   $("modelA").textContent = hint && hint !== "Anthropic" ? " · " + hint : "";
-  $("dblCount").textContent = `${s.doubled_turns_today} doubled turn${s.doubled_turns_today === 1 ? "" : "s"} today · you've judged ${s.judged_today}`;
+  if (!view.pick.length) $("dblCount").textContent = `${s.doubled_turns_today} doubled turn${s.doubled_turns_today === 1 ? "" : "s"} today · you've judged ${s.judged_today}`;
   const t = $("tally");
   if (t) t.textContent = tallyText();
   // don't clobber a field the user is typing in, or an optimistic edit in flight
   const f = document.activeElement;
   const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }
+}
+
+function renderMoney(m, sfx) {
+  const t = m.tracks, io = (x) => `${tok(x.in)} in / ${tok(x.out)} out`, v = t.valar;
+  for (const e of document.querySelectorAll("#money .sfx")) e.textContent = sfx;
+  $("mA").textContent = `${usd(t.anthropic.api_cost)} at API prices · ${io(t.anthropic)}`;
+  $("nV").textContent = usd(v.cost + v.comparisons);
+  $("mV").textContent = [io(v), v.unpriced > 0 && "partly unpriced", v.comparisons > 0 && `incl. ${usd(v.comparisons)} comparisons`].filter(Boolean).join(" · ");
+  $("mL").textContent = io(t.local);
+  $("nS").textContent = "≈ " + usd(m.savings);
+  $("mS").textContent = `Valar + local would have cost ${usd(v.api_cost + t.local.api_cost)}`;
+}
+// "decided N of M" under each rule and Otherwise, for the picked sessions and span
+function renderCounts(m) {
+  m = m || (S && S.summary);
+  if (!m) return;
+  for (const e of document.querySelectorAll(".dec")) e.textContent = m.total ? `decided ${m.rules[e.dataset.r] || 0} of ${m.total}` : "";
 }
 
 /* ---------- config editing ---------- */
@@ -311,6 +429,7 @@ function ruleItem(r, i) {
       el("div", { class: "rname" }, r.name, risky(r) && el("span", { class: "badge", title: "A line sends requests to Valar or local without checking tier or subagent, so it can move your main (opus) conversation." }, "Can send your main session off Anthropic")),
       describe(r),
       r.kind === "classifier" ? classifierBits(r, i) : null,
+      el("div", { class: "hint dec", "data-r": r.kind === "classifier" ? "classifier" : r.name }),
       el("div", { class: "racts" }, acts)),
     el("button", { type: "button", class: "tg", "aria-pressed": String(r.enabled), "aria-label": "Rule on: " + r.name, "data-k": "tg:" + r.name,
       onclick: () => save(withRules(cfg.rules.map((x, k) => (k === i ? { ...x, enabled: !x.enabled } : x))), $("rbErr")) }));
@@ -332,7 +451,7 @@ function ruleItem(r, i) {
   li.addEventListener("drop", (e) => { e.preventDefault(); li.classList.remove("over"); if (dragFrom != null) move(dragFrom, i); });
   return li;
 }
-const renderRules = () => $("rules").replaceChildren(...cfg.rules.map(ruleItem));
+const renderRules = () => { $("rules").replaceChildren(...cfg.rules.map(ruleItem)); renderCounts(); };
 
 function renderOtherwise() {
   for (const b of $("otherwise").children) {
@@ -497,7 +616,7 @@ function depRow(r) {
   const head = el("div", { class: "dephead", role: "button", tabindex: 0, "aria-expanded": "false", "data-k": "dep:" + r.id },
     el("time", { datetime: new Date(r.ts * 1000).toISOString() }, hms(r.ts)),
     el("span", { class: "sw " + c, role: "img", "aria-label": err ? "error" : NAME[r.track] }),
-    el("span", { class: "what" }, r.preview || "(no text)"),
+    el("span", { class: "what" }, el("span", { class: "stag" }, shortLabel(r.session_id)), r.preview || "(no text)"),
     el("span", { class: "why" + (err ? " x" : "") }, why(r), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄")));
   const row = el("div", { class: "dep", "data-id": r.id }, head), toggle = () => toggleDep(row, head, r);
   head.addEventListener("click", toggle);
@@ -525,6 +644,9 @@ function explain(d) {
   const out = [el("ol", {}, ex.map((it) => el("li", {}, it.rule, " — ",
     it.outcome === "not reached" ? el("s", {}, it.outcome) : it.decided ? el("b", {}, it.outcome) : it.outcome)))];
   out.push(el("div", { class: "facts" }, `${d.model_in} → ${d.model_out} · status ${d.status || "none"} · first byte ${fmtMs(d.ttfb_ms)} · total ${fmtMs(d.ms)}`));
+  const money = priced(d.track, d.cost, d.api_cost);
+  out.push(el("div", { class: "facts" }, ["session " + fullLabel(d.session_id), d.model_out,
+    d.in_tok != null && `${tok(d.in_tok)} in / ${tok(d.out_tok)} out`].filter(Boolean).join(" · "), money && [" · ", el("b", {}, money)]));
   if (d.turn_id) {
     let s = null;
     try { s = d.shadow ? JSON.parse(d.shadow.shadow) : null; } catch (_) { /* unreadable pair */ }
@@ -567,7 +689,7 @@ function addDeps(rows) {
 }
 $("older").addEventListener("click", async () => {
   try {
-    const rows = await api("GET", "departures?before=" + minId);
+    const rows = await api("GET", "departures" + qs(sessQ(), "before=" + minId));
     $("deps").append(...rows.map((r) => { const n = depRow(r); n.classList.add("older"); return n; }));
     if (rows.length) minId = rows[rows.length - 1].id;
     $("older").hidden = rows.length < 200;
@@ -604,7 +726,9 @@ function run(track, cls) {
 /* ---------- side by side ---------- */
 let turns = [], curTurn = null, turnData = null, stepIdx = 0, turnKey = "";
 async function loadTurns() {
-  turns = await api("GET", "turns");
+  turns = await api("GET", "turns" + qs(sessQ()));
+  const n = view.pick.length, real = turns.filter((t) => t.ts);
+  if (n) $("dblCount").textContent = `${plural(real.length, "doubled turn")} from the ${n === 1 ? "picked session" : n + " picked sessions"} · you've judged ${real.filter((t) => t.verdict).length}`;
   if (curTurn && !turns.some((t) => t.id === curTurn)) turns.unshift({ id: curTurn });
   if (!curTurn && turns.length) curTurn = turns[0].id;
   await loadTurn();
@@ -631,14 +755,30 @@ async function showTurn(id) {
   await loadTurns();
   $("pair").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" });
 }
-const tallyText = () => { const t = S ? S.stats.tally : {}; return "So far: " + [...TRACKS, "same"].map((k) => `${k === "same" ? "same" : NAME[k]} ${t[k] || 0}`).join(" · "); };
+// Picked sessions: count the verdicts on their turns (side by side ignores the time span).
+// ponytail: the turns list holds the newest 100, so older verdicts drop out of a picked tally.
+function tally() {
+  if (!view.pick.length) return S ? S.stats.tally : {};
+  const t = {};
+  for (const x of turns) if (x.verdict) t[x.verdict] = (t[x.verdict] || 0) + 1;
+  return t;
+}
+const tallyText = () => { const t = tally(); return "So far: " + [...TRACKS, "same"].map((k) => `${k === "same" ? "same" : NAME[k]} ${t[k] || 0}`).join(" · "); };
 
+const REQ = {};  // request id → its row, for the served side's cost (the pair stores only the shadow's)
+function servedRow(id) {
+  if (!(id in REQ)) { REQ[id] = null; api("GET", "requests/" + id).then((r) => { REQ[id] = r; renderTurn(); }, () => {}); }
+  return REQ[id];
+}
 function card(track, step) {
   const served = step.served_track === track;
   let s = {};
   try { s = JSON.parse(served ? step.served : step.shadow) || {}; } catch (_) { s.error = "unreadable"; }
+  const r = served ? servedRow(step.request_id) : null;
+  const money = served ? r && priced(track, r.cost, r.api_cost) : priced(track, s.cost, null);
   const meta = el("div", { class: "meta" }, el("span", { class: "tn" }, NAME[track]), el("span", {}, fmtMs(s.ms)),
-    s.output_tokens != null && el("span", {}, s.output_tokens + " tokens"), served && el("span", { class: "served" }, "sent to Claude Code"));
+    s.output_tokens != null && el("span", {}, s.output_tokens + " tokens"), money && el("span", {}, money),
+    served && el("span", { class: "served" }, "sent to Claude Code"));
   const body = [];
   if (s.skipped === "busy") body.push(el("p", { class: "state" }, "skipped, busy: this track was already full with other work"));
   else if (s.skipped) body.push(el("p", { class: "state x" }, "skipped: " + s.skipped));
@@ -671,7 +811,7 @@ function renderTurn() {
     const verdicts = [...pairT.map((t) => [t, NAME[t]]), ["same", "About the same"]];
     box.replaceChildren(
       el("div", { class: "turnhead" },
-        el("span", { class: "q", title: d.preview }, `“${d.preview || "(no text)"}”`),
+        el("span", { class: "q", title: d.preview }, el("span", { class: "stag" }, shortLabel(d.session_id)), `“${d.preview || "(no text)"}”`),
         d.ts && el("span", { class: "hint" }, hms(d.ts)),
         el("span", { class: "nav", role: "group", "aria-label": "Steps" },
           nav("‹", "sprev", stepIdx <= 0, () => { stepIdx--; renderTurn(); }),
@@ -716,6 +856,10 @@ async function forget() {
 }
 
 /* ---------- go ---------- */
-setInterval(tick, 1000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
-tick();
+renderSpan();
+// sessions first, so the first departures already carry their labels
+loadSessions().catch(() => {}).finally(() => {
+  viewChanged(true);  // also sets the departures hint for a remembered pick
+  setInterval(tick, 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+});

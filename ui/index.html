@@ -25,6 +25,14 @@
   <p id="leverErr" class="err" role="alert" hidden></p>
   <p id="localWarn" class="warnline" role="status" hidden>Conversations that run on Valar or local may fail when you switch back. Start a new session afterwards if they do. <button type="button" class="linkish" id="localWarnX">OK</button></p>
 
+  <div class="tfrow">
+    <div class="sess" id="sess" role="group" aria-label="Sessions shown"><span class="lbl">Showing</span></div>
+    <div class="tf"><span>over</span>
+      <span class="seg" id="span" role="group" aria-label="Time span"><button type="button" data-v="15m">15 min</button><button type="button" data-v="1h">1 hour</button><button type="button" data-v="24h">24 h</button><button type="button" data-v="whole">Whole session</button><button type="button" data-v="custom">Custom…</button></span>
+      <span id="custom" class="custom" hidden><input type="datetime-local" id="cFrom" aria-label="From"> – <input type="datetime-local" id="cTo" aria-label="To"></span>
+    </div>
+  </div>
+
   <div class="yard">
     <svg id="yard" viewBox="0 0 1000 250" role="img" aria-label="Live traffic">
       <path class="trk rail" d="M30 125 H430"/>
@@ -34,7 +42,7 @@
       <path id="pathA" class="ghost" d="M30 125 H430 C520 125 540 40 640 40 H960"/>
       <path id="pathV" class="ghost" d="M30 125 H960"/>
       <path id="pathL" class="ghost" d="M30 125 H430 C520 125 540 210 640 210 H960"/>
-      <text x="30" y="105" class="branch">Claude Code</text>
+      <text x="30" y="105" class="branch" id="cc">Claude Code</text>
       <text x="30" y="155" class="branch mut" id="rpm">– req/min</text>
       <g id="dots"></g>
       <circle cx="430" cy="125" r="11" class="junction"/>
@@ -45,8 +53,14 @@
       <text x="960" y="28" class="big anthf" text-anchor="end" id="pctA">–</text>
       <text x="960" y="111" class="big valf" text-anchor="end" id="pctV">–</text>
       <text x="960" y="200" class="big locf" text-anchor="end" id="pctL">–</text>
-      <text x="960" y="152" class="branch mut share" text-anchor="end">share of the last hour</text>
+      <text x="960" y="152" class="branch mut share" text-anchor="end" id="share">share of the last hour</text>
     </svg>
+  </div>
+  <div class="money" id="money">
+    <div class="mcell a"><div class="k">Anthropic · subscription<span class="sfx"></span></div><div class="n">$0</div><div class="t" id="mA"></div></div>
+    <div class="mcell v"><div class="k">Valar<span class="sfx"></span></div><div class="n" id="nV">–</div><div class="t" id="mV"></div></div>
+    <div class="mcell l"><div class="k">Local<span class="sfx"></span></div><div class="n">$0</div><div class="t" id="mL"></div></div>
+    <div class="mcell s"><div class="k">Saved vs all on Anthropic<span class="sfx"></span></div><div class="n" id="nS">–</div><div class="t" id="mS"></div></div>
   </div>
 
   <section id="tracks" aria-labelledby="trH">
@@ -77,11 +91,12 @@
     <section id="rulebook" aria-labelledby="rbH">
       <h2 id="rbH">Rulebook</h2>
       <p class="hint">Checked top to bottom; the first rule that decides wins. Drag to reorder (or Alt+↑/↓). Changes apply to the next request.</p>
+      <p class="scope">Rules for <b>all sessions</b></p>
       <p id="leverNote" class="levernote" hidden></p>
       <p id="rbErr" class="err" role="alert" hidden></p>
       <div id="rbBody">
         <ol class="rules" id="rules"></ol>
-        <div class="otherwise"><span class="onum">∗</span><span class="rname">Otherwise</span> → <span class="seg" role="group" aria-label="Otherwise track" id="otherwise"><button type="button" data-v="anthropic">Anthropic</button><button type="button" data-v="valar">Valar</button><button type="button" data-v="local">Local</button></span></div>
+        <div class="otherwise"><span class="onum">∗</span><span class="rname">Otherwise</span> → <span class="seg" role="group" aria-label="Otherwise track" id="otherwise"><button type="button" data-v="anthropic">Anthropic</button><button type="button" data-v="valar">Valar</button><button type="button" data-v="local">Local</button></span><span class="hint dec" data-r="otherwise"></span></div>
         <button type="button" class="btn" id="addRule">+ Add rule</button>
       </div>
       <div id="editor" class="editor" hidden>
@@ -118,7 +133,7 @@
 
     <section class="board" aria-labelledby="depH">
       <h2 id="depH">Departures</h2>
-      <p class="hint">Every request, newest first. Open one to see which rule decided.</p>
+      <p class="hint"><span id="depFrom">Every request</span>, newest first. Open one to see which rule decided.</p>
       <div id="deps" class="deps"></div>
       <p id="depEmpty" class="hint empty">No requests yet. Point Claude Code at the router and they'll show up here.</p>
       <button type="button" class="btn" id="older" hidden>Load older</button>
