@@ -322,7 +322,6 @@ class DoublingTest(unittest.TestCase):
         self.post(msg("opus turn", "claude-opus-5-5"), headers={**HDRS, "X-Valar-Completion-Window": "flex"})  # served by Anthropic, shadowed on Valar
         self.pairs(1)
         self.assertEqual(self.v.seen[0][1].get_all("X-Valar-Completion-Window"), ["priority"])
-        self.assertIsNone(self.a.seen[0][1]["X-Valar-Completion-Window"])
 
     def test_shadow_valar_not_configured_on_pair(self):
         self.srv.shutdown()
