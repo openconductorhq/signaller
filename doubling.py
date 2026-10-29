@@ -164,7 +164,7 @@ class Doubler:
             h = self.pending[request_id] = PairHandle(self.store, turn_id, request_id, step, served_track, shadow_track)
         return h
 
-    def start_shadow(self, turn_id, request_id, f, served_track, method, path, headers, body, cfg, models) -> str:
+    def start_shadow(self, turn_id, request_id, f, served_track, method, path, headers, body, cfg, models, windows=None) -> str:
         """Starts the shadow in a daemon thread; returns its track, or "busy" when that direction is full."""
         with self.lock:
             h = self.pending.pop(request_id)  # pending_served always comes first
@@ -177,7 +177,7 @@ class Doubler:
             self.inflight[track] += 1
         headers = list(headers)  # credentials stay in memory only, in this thread
         try:
-            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, cfg, models), daemon=True).start()
+            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, cfg, models, windows), daemon=True).start()
         except Exception as e:  # e.g. can't start new thread: give the slot back, the served request goes on
             self._release(track)
             h.shadow({"skipped": "error", "status": None, "ttfb_ms": None, "ms": None, "error": type(e).__name__,
@@ -190,9 +190,9 @@ class Doubler:
             self.inflight[track] -= 1
         self.caps[track].release()
 
-    def _run(self, h, track, method, path, headers, body, cfg, models):
+    def _run(self, h, track, method, path, headers, body, cfg, models, windows=None):
         from claude_router import HOP, hoist_inline_tools, upstream, upstream_headers  # late: claude_router imports this module
-        from routing import track_model
+        from routing import track_model, track_window
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
         try:
             req = json.loads(body)
@@ -202,10 +202,13 @@ class Doubler:
             if track != "anthropic":
                 if not key:
                     raise NotConfigured("%s not configured" % name)
-                req["model"] = track_model(str(req.get("model", "")), models[track])
+                model_in = str(req.get("model", ""))
+                req["model"] = track_model(model_in, models[track])
                 if track == "valar":
                     hoist_inline_tools(req)
                 headers = upstream_headers(headers, key)
+                if track == "valar" and windows:
+                    headers.append(("X-Valar-Completion-Window", track_window(model_in, windows["valar"])))
             else:
                 headers = [(k, v) for k, v in headers if k.lower() not in HOP]
             conn, resp = self.open_upstream(cfg, track, method, path, headers, json.dumps(req).encode())

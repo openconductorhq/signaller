@@ -177,10 +177,24 @@ function renderTracks() {
       const m = old.dataset.m;
       old.replaceWith(modelPick(t, cfg.models[t][m], { "data-m": m, "data-k": `m:${t}:${m}`,
         "aria-label": `${NAME[t]} model for ${m}` },
-        (v) => save({ ...cfg, models: { ...cfg.models, [t]: { ...cfg.models[t], [m]: v } } }, $("trErr"))));
+        (v) => save({ ...cfg, models: { ...cfg.models, [t]: { ...cfg.models[t], [m]: v } },
+          // a model without the slot's window falls back to Now
+          windows: { valar: { ...cfg.windows.valar, [m]: windowsFor(v).includes(cfg.windows.valar[m]) ? cfg.windows.valar[m] : "asap" } } }, $("trErr"))));
+      if (t === "valar") {
+        const lab = row.querySelector(`[data-m="${m}"]`).parentElement;
+        for (const x of lab.querySelectorAll(".seg")) x.remove();
+        lab.append(el("span", { class: "seg win", role: "group", "aria-label": `Valar completion window for ${m}` },
+          windowsFor(cfg.models.valar[m]).map((w) => el("button", { type: "button", "data-k": `w:${m}:${w}`,
+            "aria-pressed": String(cfg.windows.valar[m] === w),
+            onclick: () => cfg.windows.valar[m] !== w && save({ ...cfg, windows: { valar: { ...cfg.windows.valar, [m]: w } } }, $("trErr")) },
+            WIN[w]))));
+      }
     }
   }
 }
+const WIN = { asap: "Now", priority: "Priority", standard: "Standard" };
+const WINDOWS = {};  // model id → completion windows it has a price for (absent until the models response says: all)
+const windowsFor = (id) => WINDOWS[id] ? Object.keys(WIN).filter((w) => WINDOWS[id].includes(w)) : Object.keys(WIN);
 const MODELS = {};  // track → model ids from its upstream, once loaded
 // A real dropdown once the track's models are in; a text box until then, or when the upstream can't be reached.
 function modelPick(t, value, attrs, onPick) {
@@ -194,6 +208,7 @@ for (const row of document.querySelectorAll(".trow")) {
   // GET /ui/api/models?track=…: the router asks the upstream with the track's key; the key never reaches the page
   api("GET", "models?track=" + t, undefined, 15000).then((j) => {
     MODELS[t] = j.models;
+    Object.assign(WINDOWS, j.windows);
     renderConfig(true);
     if (j.stale) {
       const w = row.querySelector(".warn");

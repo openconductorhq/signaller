@@ -167,6 +167,24 @@ class ProxyTest(unittest.TestCase):
         self.post(body_for("claude-haiku-4-5"))
         self.assertEqual(json.loads(self.v.seen[1][3])["model"], "VH")
 
+    def test_valar_window_header_and_row(self):
+        w = {"valar": {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}}
+        self.app.routing = replace(CLASSIFIER_OFF, windows=w)
+        self.post(body_for("claude-sonnet-5-5"))
+        self.assertEqual(self.v.seen[0][2]["X-Valar-Completion-Window"], "standard")
+        self.post(body_for("claude-haiku-4-5"))
+        self.assertEqual(self.v.seen[1][2]["X-Valar-Completion-Window"], "asap")
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        self.post(body_for("claude-sonnet-5-5"))
+        self.app.routing = replace(self.app.routing, lever="local")
+        self.post(body_for("claude-sonnet-5-5"))
+        self.assertIsNone(self.a.seen[0][2]["X-Valar-Completion-Window"])
+        self.assertIsNone(self.l.seen[0][2]["X-Valar-Completion-Window"])
+        self.logged(4)
+        self.app.store.close()
+        rows = sorted(self.app.store.departures(), key=lambda r: r["id"])
+        self.assertEqual([r["window"] for r in rows], ["standard", "asap", None, None])
+
     def test_valar_streams(self):
         c = HTTPConnection("127.0.0.1", self.port, timeout=5)
         t = time.time()

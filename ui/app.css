@@ -113,6 +113,7 @@ ol.rules>li.moved{background:#fff}
 .onum{width:28px;font-family:var(--cond);font-size:22px;color:var(--muted);line-height:1}
 .seg{display:inline-flex;background:var(--well);border-radius:7px;padding:3px;gap:3px}
 .seg button{border:0;background:none;border-radius:5px;padding:3px 10px;cursor:pointer;font-weight:600;font-size:13px}
+.seg.win{justify-self:start;padding:2px;gap:2px}.seg.win button{padding:1px 7px;font-size:11.5px;color:var(--muted)}.seg.win button[aria-pressed=true]{color:var(--val)}
 .seg button[aria-pressed=true]{background:#fff;box-shadow:0 1px 2px #0002}
 .seg button[data-v=anthropic][aria-pressed=true]{color:var(--anth)}.seg button[data-v=valar][aria-pressed=true]{color:var(--val)}.seg button[data-v=local][aria-pressed=true]{color:var(--loc)}
 .btn{border:1px solid var(--off);background:#fff;border-radius:7px;padding:6px 12px;cursor:pointer;margin-top:10px;font-size:13px}

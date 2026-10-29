@@ -63,6 +63,14 @@ def track_model(model: str, m: dict) -> str:
     return m.get(tier_of(model), m["sonnet"])
 
 
+WINDOWS = ("asap", "priority", "standard")  # Valar completion windows; flex rejects streaming, batch is async: never sent
+
+
+def track_window(model: str, windows: dict) -> str:
+    """The Valar completion window for a request's model (same slot lookup as track_model)."""
+    return windows.get(tier_of(model), windows["sonnet"]) if model.startswith("claude-") else windows["sonnet"]
+
+
 class Features:
     def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False):
         self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
@@ -148,6 +156,7 @@ class RoutingConfig:
     classifier: ClassifierSettings
     doubling: Doubling
     models: dict  # {"valar"|"local": {"sonnet": id, "haiku": id}}
+    windows: dict = field(default_factory=lambda: {"valar": {t: "asap" for t in MODEL_TIERS}})
 
 
 SERVERTOOL_RULE = Rule("Tools only Anthropic can run", "dsl", True, "when servertool go anthropic", "servertool")
@@ -238,10 +247,14 @@ def config_from_json(obj: dict) -> RoutingConfig:
             models[t] = {"fable": m["sonnet"], "opus": m["sonnet"], **{k: m[k] for k in m if k in MODEL_TIERS}, "haiku": m["haiku"]}
             if not all(isinstance(v, str) and v for v in models[t].values()):
                 raise ValueError(f"models.{t} must be non-empty text")
+        w = {**{t: "asap" for t in MODEL_TIERS}, **(obj.get("windows") or {}).get("valar", {})}
+        for t in MODEL_TIERS:
+            if w[t] not in WINDOWS:
+                raise ValueError(f"windows.valar.{t} must be asap, priority or standard")
         return RoutingConfig(obj["lever"], otherwise, rules,
                              ClassifierSettings(str(c["model"]), thr,
                                                 float(_num(c["timeout_s"], 0.1, 30, "classifier time limit must be 0.1–30 s")), labels,
-                                                c["upstream"]), dbl, models)
+                                                c["upstream"]), dbl, models, {"valar": {t: w[t] for t in MODEL_TIERS}})
     except (KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"bad config: {e!r}") from None
 
@@ -258,6 +271,7 @@ def config_to_json(cfg: RoutingConfig) -> dict:
         "doubling": {"rate": cfg.doubling.rate, "tag": cfg.doubling.tag,
                      "shadow": dict(cfg.doubling.shadow)},
         "models": {t: dict(m) for t, m in cfg.models.items()},
+        "windows": {t: dict(m) for t, m in cfg.windows.items()},
     }
 
 

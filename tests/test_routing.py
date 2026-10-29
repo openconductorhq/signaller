@@ -4,7 +4,7 @@ import unittest
 from dataclasses import replace
 
 from claude_router import load_config
-from routing import (DEFAULT_CONFIG, ClassResult, Features, Rule, is_routed, session_of, config_from_json, config_to_json, route, tier_of, track_model)
+from routing import (DEFAULT_CONFIG, ClassResult, Features, Rule, is_routed, session_of, config_from_json, config_to_json, route, tier_of, track_model, track_window)
 
 
 def body(messages, model="claude-opus-5-5"):
@@ -291,6 +291,24 @@ class ThreeTrackTests(unittest.TestCase):
         self.assertEqual(c.doubling.shadow, {"anthropic": None, "local": "anthropic", "valar": None})
         self.assertEqual(c.rules, DEFAULT_CONFIG.rules)
         self.assertEqual(config_to_json(c)["version"], 2)
+
+    def test_windows(self):
+        o = config_to_json(DEFAULT_CONFIG)
+        self.assertEqual(o["windows"], {"valar": {"fable": "asap", "opus": "asap", "sonnet": "asap", "haiku": "asap"}})
+        del o["windows"]
+        self.assertEqual(config_from_json(o), DEFAULT_CONFIG)
+        o["windows"] = {"valar": {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}}
+        self.assertEqual(config_from_json(json.loads(json.dumps(o))).windows, o["windows"])
+        self.assertEqual(config_to_json(config_from_json(o))["windows"], o["windows"])
+        for bad in ("flex", "batch", None):
+            o["windows"]["valar"]["haiku"] = bad
+            with self.assertRaisesRegex(ValueError, "windows.valar.haiku must be asap, priority or standard"):
+                config_from_json(o)
+
+    def test_track_window(self):
+        w = {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}
+        self.assertEqual([track_window(x, w) for x in ("claude-opus-5", "claude-sonnet-5", "claude-3-5-foo", "zai-org/GLM-5.3")],
+                         ["priority", "standard", "standard", "standard"])
 
     def test_v2_roundtrip(self):
         self.assertEqual(config_from_json(config_to_json(DEFAULT_CONFIG)), DEFAULT_CONFIG)
