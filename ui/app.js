@@ -65,7 +65,8 @@ const SPANS = { "15m": "last 15 min", "1h": "last hour", "24h": "last 24 h", who
 const VIEW_KEY = "claude-router.view";
 let view = { pick: [], span: "1h", from: "", to: "" }, sessions = null, moreOpen = false, viewGen = 0;
 try { Object.assign(view, JSON.parse(localStorage.getItem(VIEW_KEY)) || {}); } catch (_) { /* no storage: defaults */ }
-if (!Array.isArray(view.pick) || !(view.span in SPANS)) view = { pick: [], span: "1h", from: "", to: "" };
+if (!Array.isArray(view.pick) || !Object.hasOwn(SPANS, view.span)) view = { pick: [], span: "1h", from: "", to: "" };
+view.pick = view.pick.filter((x) => typeof x === "string");
 const saveView = () => { try { localStorage.setItem(VIEW_KEY, JSON.stringify(view)); } catch (_) { /* no storage */ } };
 const toTs = (v) => { const t = new Date(v).getTime(); return isNaN(t) ? null : t / 1000; };
 const toLocal = (ts) => { const d = new Date(ts * 1000); return new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); };
@@ -93,9 +94,14 @@ const shortLabel = (id) => {
 };
 const fullLabel = (id) => { const s = sessions && sessions.find((x) => x.id === (id || "unknown")); return s ? s.label : id || "unknown session"; };
 
+let sessSeq = 0;
+// The chips: sessions with a request in the span, newest activity first ("Whole session" = all kept history).
 async function loadSessions() {
-  sessions = await api("GET", "sessions?from=0");
-  const keep = view.pick.filter((id) => sessions.some((x) => x.id === id));  // forget sessions that aged out
+  const seq = ++sessSeq;
+  const list = await api("GET", "sessions" + qs(view.span === "whole" ? "from=0" : spanQ()));
+  if (seq !== sessSeq) return;  // the span changed meanwhile
+  sessions = list;
+  const keep = view.pick.filter((id) => sessions.some((x) => x.id === id));  // picked sessions outside the span drop silently
   if (keep.length !== view.pick.length) { view.pick = keep; saveView(); viewChanged(true); }
   renderSess();
 }
@@ -134,10 +140,10 @@ for (const b of $("span").children) b.addEventListener("click", () => {
   if (b.dataset.v === view.span) return;
   view.span = b.dataset.v;
   if (view.span === "custom" && !view.from) { const now = Date.now() / 1000; view.from = toLocal(now - 3600); view.to = toLocal(now); }
-  saveView(); renderSpan(); viewChanged(false);
+  saveView(); renderSpan(); viewChanged(false); loadSessions().catch(() => {});
 });
 for (const id of ["cFrom", "cTo"]) $(id).addEventListener("change", () => {
-  view[id === "cFrom" ? "from" : "to"] = $(id).value; saveView(); viewChanged(false);
+  view[id === "cFrom" ? "from" : "to"] = $(id).value; saveView(); viewChanged(false); loadSessions().catch(() => {});
 });
 
 /* ---------- state + polling ---------- */
@@ -210,7 +216,7 @@ function renderMoney(m, sfx) {
 function renderCounts(m) {
   m = m || (S && S.summary);
   if (!m) return;
-  for (const e of document.querySelectorAll(".dec")) e.textContent = m.total ? `decided ${m.rules[e.dataset.r] || 0} of ${m.total}` : "";
+  for (const e of document.querySelectorAll(".dec")) e.textContent = m.total ? `decided ${Object.hasOwn(m.rules, e.dataset.r) ? m.rules[e.dataset.r] : 0} of ${m.total}` : "";
 }
 
 /* ---------- config editing ---------- */
@@ -688,13 +694,15 @@ function addDeps(rows) {
   if (!wasFirst) animate([...rows].reverse());
 }
 $("older").addEventListener("click", async () => {
+  const g = viewGen;
   try {
     const rows = await api("GET", "departures" + qs(sessQ(), "before=" + minId));
+    if (g !== viewGen) return;  // the pick changed: these rows belong to the old list
     $("deps").append(...rows.map((r) => { const n = depRow(r); n.classList.add("older"); return n; }));
     if (rows.length) minId = rows[rows.length - 1].id;
     $("older").hidden = rows.length < 200;
   } catch (e) {
-    $("offline").hidden = false;
+    if (g === viewGen) $("offline").hidden = false;
   }
 });
 
@@ -725,8 +733,11 @@ function run(track, cls) {
 
 /* ---------- side by side ---------- */
 let turns = [], curTurn = null, turnData = null, stepIdx = 0, turnKey = "";
+// Every await below re-checks viewGen: a reply for the previous pick must not land in the new one.
 async function loadTurns() {
-  turns = await api("GET", "turns" + qs(sessQ()));
+  const g = viewGen, list = await api("GET", "turns" + qs(sessQ()));
+  if (g !== viewGen) return;
+  turns = list;
   const n = view.pick.length, real = turns.filter((t) => t.ts);
   if (n) $("dblCount").textContent = `${plural(real.length, "doubled turn")} from the ${n === 1 ? "picked session" : n + " picked sessions"} · you've judged ${real.filter((t) => t.verdict).length}`;
   if (curTurn && !turns.some((t) => t.id === curTurn)) turns.unshift({ id: curTurn });
@@ -735,15 +746,20 @@ async function loadTurns() {
 }
 async function loadTurn() {
   if (!curTurn) { turnData = null; turnKey = ""; return renderTurn(); }
+  const g = viewGen;
   let d;
   try { d = await api("GET", "turns/" + encodeURIComponent(curTurn)); } catch (e) {
+    if (g !== viewGen) return;
     if (e.status !== 404) throw e;
     turns = turns.filter((t) => t.id !== curTurn);
     curTurn = turns.length ? turns[0].id : null;
     return loadTurn();
   }
+  if (g !== viewGen) return;
   const key = JSON.stringify(d);
   if (key === turnKey) return;
+  const ids = new Set((d.steps || []).map((x) => x.request_id));
+  for (const id of REQ.keys()) if (!ids.has(id)) REQ.delete(id);  // keep only the shown turn's rows
   if (!turnData || turnData.id !== d.id) stepIdx = 0;
   turnData = d;
   turnKey = key;
@@ -752,7 +768,9 @@ async function loadTurn() {
 async function showTurn(id) {
   curTurn = id;
   turnKey = "";
+  const g = viewGen;
   await loadTurns();
+  if (g !== viewGen) return;
   $("pair").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" });
 }
 // Picked sessions: count the verdicts on their turns (side by side ignores the time span).
@@ -765,10 +783,17 @@ function tally() {
 }
 const tallyText = () => { const t = tally(); return "So far: " + [...TRACKS, "same"].map((k) => `${k === "same" ? "same" : NAME[k]} ${t[k] || 0}`).join(" · "); };
 
-const REQ = {};  // request id → its row, for the served side's cost (the pair stores only the shadow's)
+// request id → its row, for the served side's cost (the pair stores only the shadow's); null while loading.
+// A pair can be written before its request row, so a failed fetch isn't cached: it's retried a few seconds later.
+// A fetched row is final (rows are written once, when the request ends), so its cost, even null, is kept.
+const REQ = new Map();
 function servedRow(id) {
-  if (!(id in REQ)) { REQ[id] = null; api("GET", "requests/" + id).then((r) => { REQ[id] = r; renderTurn(); }, () => {}); }
-  return REQ[id];
+  if (!REQ.has(id)) {
+    REQ.set(id, null);
+    api("GET", "requests/" + id).then((r) => { if (REQ.has(id)) { REQ.set(id, r); renderTurn(); } },
+      () => setTimeout(() => { if (REQ.get(id) === null) { REQ.delete(id); renderTurn(); } }, 3000));
+  }
+  return REQ.get(id);
 }
 function card(track, step) {
   const served = step.served_track === track;
