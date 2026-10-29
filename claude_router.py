@@ -82,7 +82,7 @@ def upstream_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple
     out = []
     for k, v in headers:
         lk = k.lower()
-        if lk in HOP or lk in ("authorization", "x-api-key"):
+        if lk in HOP or lk in ("authorization", "x-api-key", "x-valar-completion-window"):  # the router owns the window
             continue
         if lk == "anthropic-beta":
             v = ",".join(b for b in (x.strip() for x in v.split(",")) if b and b != OAUTH_BETA)

@@ -170,8 +170,8 @@ class ProxyTest(unittest.TestCase):
     def test_valar_window_header_and_row(self):
         w = {"valar": {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}}
         self.app.routing = replace(CLASSIFIER_OFF, windows=w)
-        self.post(body_for("claude-sonnet-5-5"))
-        self.assertEqual(self.v.seen[0][2]["X-Valar-Completion-Window"], "standard")
+        self.post(body_for("claude-sonnet-5-5"), {**HDRS, "X-Valar-Completion-Window": "flex"})
+        self.assertEqual(self.v.seen[0][2].get_all("X-Valar-Completion-Window"), ["standard"])
         self.post(body_for("claude-haiku-4-5"))
         self.assertEqual(self.v.seen[1][2]["X-Valar-Completion-Window"], "asap")
         self.app.routing = replace(self.app.routing, lever="anthropic")
