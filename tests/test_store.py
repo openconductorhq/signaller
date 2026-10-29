@@ -179,6 +179,7 @@ def seeded(tmp_path):
         (4, now - 40, "valar", "default", "sb", None, None, None, None, 200),
         (5, now - 30, "anthropic", "passthrough", None, None, None, None, None, 0),
         (6, now - 20, "anthropic", "lever", "sa", 0.0, 2.0, 1, 1, 200),
+        (7, now - 15, "valar", "passthrough", "sb", None, None, 4, 2, 200),  # has tokens, no price
     ]
     for i, ts, t, rs, sid, c, ac, ti, to, st in rows:
         s.record_request(req(i, ts, t, st, reason=rs, session_id=sid, cost=c, api_cost=ac, in_tok=ti, out_tok=to))
@@ -193,10 +194,10 @@ def seeded(tmp_path):
 def test_summary(tmp_path):
     s, now = seeded(tmp_path)
     m = s.summary(None, 0, now + 1, now)
-    assert m["total"] == 6 and m["errors"] == 2 and m["per_minute"] == 5 / 5
+    assert m["total"] == 7 and m["errors"] == 2 and m["per_minute"] == 6 / 5
     a, v, l = (m["tracks"][t] for t in ("anthropic", "valar", "local"))
-    assert (a["n"], a["pct"], v["n"], v["pct"], l["pct"]) == (3, 50, 2, 33, 17)
-    assert (v["cost"], v["api_cost"], v["unpriced"], v["in"], v["out"]) == (0.25, 1.0, 1, 100, 50)
+    assert (a["n"], a["pct"], v["n"], v["pct"], l["pct"]) == (3, 43, 3, 43, 14)
+    assert (v["cost"], v["api_cost"], v["unpriced"], v["in"], v["out"]) == (0.25, 1.0, 1, 104, 52)  # unpriced: row 7 only; tokenless row 4 is not counted
     assert (a["comparisons"], l["comparisons"], v["comparisons"]) == (0.75, 0.5, 0)
     assert m["savings"] == 0.75 + 0.5  # valar 1.0-.25 + local .5; anthropic and comparisons excluded
     assert m["rules"] == {"big": 1, "a:b": 1, "classifier": 1, "otherwise": 1, "lever": 1}
@@ -204,9 +205,9 @@ def test_summary(tmp_path):
     sa = s.summary(["sa"], 0, now + 1, now)
     assert sa["total"] == 3 and sa["savings"] == 0.75 and sa["tracks"]["local"]["n"] == 0 and sa["tally"]["valar"] == 1
     assert s.summary(["unknown"], 0, now + 1, now)["total"] == 1
-    assert s.summary(["sb", "unknown"], 0, now + 1, now)["total"] == 3
+    assert s.summary(["sb", "unknown"], 0, now + 1, now)["total"] == 4
     span = s.summary(None, now - 3600, now + 1, now)  # drops request 1 and its comparison
-    assert span["total"] == 5 and span["tracks"]["local"]["comparisons"] == 0 and "big" not in span["rules"]
+    assert span["total"] == 6 and span["tracks"]["local"]["comparisons"] == 0 and "big" not in span["rules"]
     assert s.summary([], 0, now + 1, now)["total"] == 0
     assert s.first_ts(["sb"]) == now - 50
 
@@ -214,9 +215,9 @@ def test_summary(tmp_path):
 def test_list_sessions_and_filtered_reads(tmp_path):
     s, now = seeded(tmp_path)
     got = s.list_sessions(0, now + 1)
-    assert [(x["id"], x["label"], x["n"]) for x in got] == [("sa", "alpha · main", 3), ("unknown", "unknown session", 1), ("sb", "sb", 2)]
-    assert [x["id"] for x in s.list_sessions(now - 3600, now + 1)][0] == "sa"
-    assert [r["id"] for r in s.departures(sessions=["sb"])] == [4, 3]
+    assert [(x["id"], x["label"], x["n"]) for x in got] == [("sb", "sb", 3), ("sa", "alpha · main", 3), ("unknown", "unknown session", 1)]
+    assert [x["id"] for x in s.list_sessions(now - 3600, now + 1)][0] == "sb"
+    assert [r["id"] for r in s.departures(sessions=["sb"])] == [7, 4, 3]
     assert [r["id"] for r in s.departures(sessions=["unknown"])] == [5]
     assert [t["id"] for t in s.turns(sessions=["sb"])] == ["t2"]
     assert len(s.turns()) == 2

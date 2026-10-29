@@ -246,7 +246,7 @@ class Store:
         span = [t0, t1]
         by = {r["track"]: r for r in self._all(
             "SELECT track, COUNT(*) n, COALESCE(SUM(in_tok),0) i, COALESCE(SUM(out_tok),0) o, COALESCE(SUM(cost),0) cost, "
-            "COALESCE(SUM(api_cost),0) api, SUM(cost IS NULL) nocost FROM requests WHERE %s AND ts BETWEEN ? AND ? GROUP BY track" % sc,
+            "COALESCE(SUM(api_cost),0) api, SUM(cost IS NULL AND COALESCE(in_tok, out_tok, cache_read_tok, cache_write_tok) IS NOT NULL) nocost FROM requests WHERE %s AND ts BETWEEN ? AND ? GROUP BY track" % sc,
             sa + span)}
         comp = {r["shadow_track"]: r["c"] for r in self._all(
             "SELECT p.shadow_track, COALESCE(SUM(p.shadow_cost),0) c FROM pairs p JOIN requests r ON r.id=p.request_id "
