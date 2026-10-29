@@ -243,7 +243,20 @@ class ConsoleTest(Fixture):
         self.assertIn('id="tracks"', page)
         self.assertIn('api("GET", "models?track="', self.req("GET", "/ui/app.js", origin=None)[1].decode())
 
-
+    def test_filters(self):
+        now = time.time()
+        self.app.store.record_request({"id": 900, "ts": now - 10, "track": "valar", "status": 200, "session_id": "zz", "reason": "default"})
+        self.app.store.close()
+        self.app.store.__init__(self.app.store.path)
+        self.assertEqual(self.js("GET", "/ui/api/state?sessions=zz")[1]["summary"]["total"], 1)
+        self.assertEqual(self.js("GET", "/ui/api/state?sessions=zz&from=session")[1]["summary"]["tracks"]["valar"]["n"], 1)
+        self.assertEqual(self.js("GET", "/ui/api/state?sessions=zz&from=%f&to=%f" % (now - 5, now))[1]["summary"]["total"], 0)
+        self.assertIn("stats", self.js("GET", "/ui/api/state")[1])
+        self.assertEqual([x["id"] for x in self.js("GET", "/ui/api/sessions?from=session")[1]][:1], ["zz"])
+        self.assertEqual([r["id"] for r in self.js("GET", "/ui/api/departures?sessions=zz")[1]], [900])
+        for p in ("/ui/api/state?from=abc", "/ui/api/state?to=x", "/ui/api/sessions?from=abc"):
+            s, j = self.js("GET", p)
+            self.assertEqual((s, j["error"]), (400, "from/to must be numbers or 'session'"))
 
 
 class ListModelsRedirectTest(unittest.TestCase):

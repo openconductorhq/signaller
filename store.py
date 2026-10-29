@@ -3,12 +3,14 @@ import itertools
 import json
 import os
 import queue
+import re
 import sqlite3
 import sys
 import tempfile
 import threading
 import time
 
+import sessions as sess
 from routing import DEFAULT_CONFIG, TRACKS, config_from_json, config_to_json
 
 SCHEMA = """
@@ -179,13 +181,23 @@ class Store:
         finally:
             c.close()
 
-    def departures(self, since_id=None, before_id=None, limit=200):
-        w, a = [], []
+    @staticmethod
+    def _sess(sessions, col="session_id"):
+        """SQL clause + args for a session filter; None = all, "unknown" = NULL session."""
+        if sessions is None:
+            return "1", []
+        ids = [x for x in sessions if x != "unknown"]
+        parts = (["%s IN (%s)" % (col, ",".join("?" * len(ids)))] if ids else []) + (["%s IS NULL" % col] if "unknown" in sessions else [])
+        return "(%s)" % " OR ".join(parts) if parts else "0", ids
+
+    def departures(self, since_id=None, before_id=None, limit=200, sessions=None):
+        sc, sa = self._sess(sessions)
+        w, a = [sc], sa
         if since_id is not None:
             w.append("id > ?"); a.append(since_id)
         if before_id is not None:
             w.append("id < ?"); a.append(before_id)
-        return self._all("SELECT * FROM requests%s ORDER BY id DESC LIMIT ?" % (" WHERE " + " AND ".join(w) if w else ""),
+        return self._all("SELECT * FROM requests%s ORDER BY id DESC LIMIT ?" % (" WHERE " + " AND ".join(w)),
                          a + [limit])
 
     def request(self, id):
@@ -219,9 +231,63 @@ class Store:
         finally:
             c.close()
 
-    def turns(self, unjudged_first=True, limit=100):
+    def turns(self, unjudged_first=True, limit=100, sessions=None):
         order = "(verdict IS NOT NULL), " if unjudged_first else ""
-        return self._all("SELECT * FROM turns ORDER BY %sts DESC LIMIT ?" % order, (limit,))
+        sc, sa = self._sess(sessions)
+        return self._all("SELECT * FROM turns WHERE %s ORDER BY %sts DESC LIMIT ?" % (sc, order), sa + [limit])
+
+    def first_ts(self, sessions):
+        """Whole-session start: oldest request of the picked sessions (all: oldest kept)."""
+        sc, sa = self._sess(sessions)
+        return self._all("SELECT COALESCE(MIN(ts), 0) t FROM requests WHERE %s" % sc, sa)[0]["t"]
+
+    def summary(self, sessions, t0, t1, now):
+        sc, sa = self._sess(sessions)
+        span = [t0, t1]
+        by = {r["track"]: r for r in self._all(
+            "SELECT track, COUNT(*) n, COALESCE(SUM(in_tok),0) i, COALESCE(SUM(out_tok),0) o, COALESCE(SUM(cost),0) cost, "
+            "COALESCE(SUM(api_cost),0) api, SUM(cost IS NULL) nocost FROM requests WHERE %s AND ts BETWEEN ? AND ? GROUP BY track" % sc,
+            sa + span)}
+        comp = {r["shadow_track"]: r["c"] for r in self._all(
+            "SELECT p.shadow_track, COALESCE(SUM(p.shadow_cost),0) c FROM pairs p JOIN requests r ON r.id=p.request_id "
+            "WHERE %s AND r.ts BETWEEN ? AND ? GROUP BY p.shadow_track" % self._sess(sessions, "r.session_id")[0], sa + span)}
+        total = sum(r["n"] for r in by.values())
+        z = {"n": 0, "i": 0, "o": 0, "cost": 0, "api": 0, "nocost": 0}
+        tracks = {}
+        for t in TRACKS:
+            r = by.get(t, z)
+            tracks[t] = {"n": r["n"], "pct": round(100 * r["n"] / total) if total else 0, "in": r["i"], "out": r["o"],
+                         "cost": r["cost"], "api_cost": r["api"], "unpriced": r["nocost"] if t == "valar" else 0,
+                         "comparisons": comp.get(t, 0)}
+        rules = {}
+        for r in self._all("SELECT reason, COUNT(*) n FROM requests "
+                           "WHERE %s AND ts BETWEEN ? AND ? GROUP BY reason" % sc, sa + span):
+            k = r["reason"] or ""
+            k = re.sub(r":\d+$", "", k[5:]) if k.startswith("rule:") else "classifier" if k.startswith("about:") else \
+                {"default": "otherwise", "lever": "lever"}.get(k)
+            if k:
+                rules[k] = rules.get(k, 0) + r["n"]
+        errors = self._all("SELECT COUNT(*) n FROM requests WHERE %s AND ts BETWEEN ? AND ? AND (status >= 500 OR status = 0)" % sc, sa + span)[0]["n"]
+        recent = self._all("SELECT COUNT(*) n FROM requests WHERE %s AND ts BETWEEN ? AND ?" % sc, sa + [max(t0, now - 300), t1])[0]["n"]
+        tally = {"anthropic": 0, "valar": 0, "local": 0, "same": 0}
+        for r in self._all("SELECT verdict, COUNT(*) n FROM turns WHERE %s AND ts BETWEEN ? AND ? AND verdict IS NOT NULL GROUP BY verdict"
+                           % self._sess(sessions)[0], sa + span):
+            tally[r["verdict"]] = r["n"]
+        savings = sum(tracks[t]["api_cost"] - tracks[t]["cost"] for t in ("valar", "local"))
+        return {"total": total, "per_minute": recent / 5, "tracks": tracks, "savings": savings, "rules": rules,
+                "errors": errors, "tally": tally}
+
+    def list_sessions(self, t0, t1):
+        rows = self._all(
+            "SELECT r.session_id id, s.cwd, s.branch, s.first_ts, s.last_ts, COUNT(*) n, MAX(r.ts) last FROM requests r "
+            "LEFT JOIN sessions s ON s.id=r.session_id WHERE r.ts BETWEEN ? AND ? GROUP BY r.session_id ORDER BY last DESC", (t0, t1))
+        out = []
+        for r in rows:
+            r.pop("last")
+            r["label"] = sess.label(r["id"], r["cwd"], r["branch"])
+            r["id"] = r["id"] or "unknown"
+            out.append(r)
+        return out
 
     def turn(self, turn_id):
         r = self._all("SELECT * FROM turns WHERE id=?", (turn_id,))
@@ -285,6 +351,12 @@ class NullStore:
     def request(self, id): return None
     def pair_for_request(self, request_id): return None
     def turns(self, *a, **k): return []
+    def list_sessions(self, *a, **k): return []
+    def first_ts(self, *a): return 0
+    def summary(self, *a, **k):
+        t = {"n": 0, "pct": 0, "in": 0, "out": 0, "cost": 0, "api_cost": 0, "unpriced": 0, "comparisons": 0}
+        return {"total": 0, "per_minute": 0, "tracks": {k: dict(t) for k in TRACKS}, "savings": 0, "rules": {}, "errors": 0,
+                "tally": {"anthropic": 0, "valar": 0, "local": 0, "same": 0}}
     def turn(self, turn_id): return None
     def set_verdict(self, turn_id, verdict): return False
     def forget_pairs(self): pass

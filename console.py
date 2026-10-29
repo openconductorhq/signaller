@@ -121,14 +121,33 @@ def windows_of(valar_prices):
     return {m: [w for w in WINDOWS if w in p] for m, p in valar_prices.items() if isinstance(p, dict)}
 
 
-def state(app):
+def filt(query):
+    """(sessions|None, t0, t1) from ?sessions=a,b&from=<ts|session>&to=<ts>; 'session' = from the picked sessions' first request."""
+    now = time.time()
+    ids = [x for x in (query.get("sessions") or [""])[0].split(",") if x] or None
+    try:
+        f, t = (query.get(k, [None])[0] for k in ("from", "to"))
+        t1 = float(t) if t is not None else now
+        t0 = float(f) if f not in (None, "session") else None
+        if t0 is None and f is None:
+            t0 = now - 3600
+    except ValueError:
+        raise Err(400, "from/to must be numbers or 'session'")
+    return ids, t0, t1
+
+
+def state(app, query=None):
     from claude_router import upstream
+    ids, t0, t1 = filt(query or {})
+    if t0 is None:  # whole session
+        t0 = app.store.first_ts(ids)
     def up(t):
         _, url, key = upstream(app.cfg, t)
         return {"url": urlsplit(url).netloc, "configured": bool(key)}
     hint = next((f.model for f, d, rid in reversed(list(app.recent)) if f.tier == "opus"), "Anthropic")
     c = app.cfg
-    return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()), "banner": app.banner,
+    return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()),
+            "summary": app.store.summary(ids, t0, t1, time.time()), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
             "upstreams": {"anthropic_model_hint": hint, "valar": up("valar"), "local": up("local")},
@@ -138,7 +157,7 @@ def state(app):
 def api(h, app, method, path, query, body):
     st = app.store
     if path == "/ui/api/state" and method == "GET":
-        return state(app)
+        return state(app, query)
     if path == "/ui/api/models" and method == "GET":
         from claude_router import upstream
         t = (query.get("track") or [""])[0]
@@ -175,7 +194,10 @@ def api(h, app, method, path, query, body):
         return out
     if path == "/ui/api/departures" and method == "GET":
         q = {k: int(v[0]) for k, v in query.items() if k in ("since", "before")}
-        return st.departures(q.get("since"), q.get("before"), 200)
+        return st.departures(q.get("since"), q.get("before"), 200, filt(query)[0])
+    if path == "/ui/api/sessions" and method == "GET":
+        ids, t0, t1 = filt(query)
+        return st.list_sessions(t0 if t0 is not None else st.first_ts(None), t1)
     m = re.fullmatch(r"/ui/api/requests/(\d+)", path)
     if m and method == "GET":
         r = st.request(int(m[1]))
@@ -198,7 +220,7 @@ def api(h, app, method, path, query, body):
     if path == "/ui/api/preview" and method == "POST":
         return preview(app, body)
     if path == "/ui/api/turns" and method == "GET":
-        return st.turns(unjudged_first=True)
+        return st.turns(unjudged_first=True, sessions=filt(query)[0])
     if path == "/ui/api/pairs" and method == "DELETE":
         st.forget_pairs()
         return {"ok": True}
