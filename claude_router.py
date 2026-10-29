@@ -17,6 +17,7 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
 import console
+from sessions import SessionDirectory, claude_dir
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
@@ -148,6 +149,7 @@ class App:
             self.banner = " ".join(filter(None, [self.banner, "Stats are off: %s." % e]))
         self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
         self.started = time.time()
+        self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
         self.doubler = Doubler(self.store, open_upstream)
         self._rlock = threading.Lock()
 
@@ -213,6 +215,11 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             rec = f is not None and self.path.split("?", 1)[0] == "/v1/messages"
             sid = session_of(self.headers, req) if rec else None
             rid = app.store.next_id() if rec else None
+            if rec and sid:
+                try:
+                    app.sessions.note(sid, t0)
+                except Exception:
+                    pass
             pair, cap, shadow, turn_id = None, None, "-", None
             try:  # a doubling fault must never change the served request
                 turn_id = app.doubler.turn_for(f, route, routing.doubling, sid) if rec and app.doubler else None

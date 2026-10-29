@@ -20,6 +20,7 @@ CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
 CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY, ts REAL, preview TEXT, verdict TEXT, session_id TEXT);
 CREATE TABLE IF NOT EXISTS pairs(id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT, request_id INTEGER,
   step INTEGER, served_track TEXT, shadow_track TEXT, served TEXT, shadow TEXT, shadow_cost REAL);
+CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT, branch TEXT, first_ts REAL, last_ts REAL);
 """
 COLS = {
     "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok window cost api_cost",
@@ -28,6 +29,9 @@ COLS = {
 }
 INSERT = {t: "INSERT %sINTO %s(%s) VALUES(%s)" % ("OR IGNORE " if t == "turns" else "", t, ",".join(c.split()),
                                                   ",".join(":" + k for k in c.split())) for t, c in COLS.items()}
+UPSERT_SESSION = """INSERT INTO sessions(id,cwd,branch,first_ts,last_ts) VALUES(:id,:cwd,:branch,:ts,:ts)
+  ON CONFLICT(id) DO UPDATE SET first_ts=MIN(first_ts,excluded.first_ts), last_ts=MAX(last_ts,excluded.last_ts),
+  cwd=COALESCE(excluded.cwd,cwd), branch=COALESCE(excluded.branch,branch)"""
 RETAIN = 30 * 86400
 
 
@@ -83,6 +87,7 @@ class Store:
             self._migrate(c)
             c.execute("CREATE INDEX IF NOT EXISTS requests_sess_ts ON requests(session_id, ts)")  # after migrate: old dbs lack the column
             c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - RETAIN,))
+            c.execute("DELETE FROM sessions WHERE last_ts < ?", (time.time() - RETAIN,))
             top = c.execute("SELECT MAX(id) FROM requests").fetchone()[0] or 0
         self._ids = itertools.count(top + 1)  # next() on itertools.count is atomic under the GIL
         self._q = queue.Queue(queue_max)
@@ -118,6 +123,9 @@ class Store:
     def record_pair(self, row): self._put(("pairs", row))
     def record_turn(self, row): self._put(("turns", row))
 
+    def touch_session(self, id, ts, cwd=None, branch=None):
+        self._put(("sessions", {"id": id, "ts": ts, "cwd": cwd, "branch": branch}))
+
     def close(self):
         self._q.put(None)  # blocking: flush must not be dropped
         self._t.join()
@@ -152,8 +160,12 @@ class Store:
     def _write(self, c, items, last_prune):
         with c:
             for t, row in items:
-                c.execute(INSERT[t], {k: row.get(k) for k in COLS[t].split()})
+                if t == "sessions":
+                    c.execute(UPSERT_SESSION, row)
+                else:
+                    c.execute(INSERT[t], {k: row.get(k) for k in COLS[t].split()})
             if time.time() - last_prune > 3600:
+                c.execute("DELETE FROM sessions WHERE last_ts < ?", (time.time() - RETAIN,))
                 c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - RETAIN,))
 
     def _drop(self):
@@ -249,6 +261,7 @@ class NullStore:
     def record_request(self, row): self._drop()
     def record_pair(self, row): self._drop()
     def record_turn(self, row): self._drop()
+    def touch_session(self, *a, **k): pass
     def close(self): pass
     def departures(self, *a, **k): return []
     def request(self, id): return None
