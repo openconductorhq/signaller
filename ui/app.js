@@ -785,14 +785,22 @@ const tallyText = () => { const t = tally(); return "So far: " + [...TRACKS, "sa
 
 // request id → its row, for the served side's cost (the pair stores only the shadow's); null while loading.
 // A pair can be written before its request row, so a failed fetch isn't cached: it's retried a few seconds later.
-// A fetched row is final (rows are written once, when the request ends), so its cost, even null, is kept.
+// A Valar row without a cost may get one from the hourly reprice: it's kept but fetched again a minute later
+// (one timer per fetched row; it stops once the turn leaves the screen, which prunes the entry).
 const REQ = new Map();
+function fetchRow(id, prev) {
+  api("GET", "requests/" + id).then((r) => {
+    if (REQ.get(id) !== prev) return;  // pruned or replaced meanwhile
+    REQ.set(id, r);
+    renderTurn();
+    if (r.track === "valar" && r.cost == null) setTimeout(() => { if (REQ.get(id) === r) fetchRow(id, r); }, 60000);
+  }, () => {
+    if (prev) return setTimeout(() => { if (REQ.get(id) === prev) fetchRow(id, prev); }, 60000);  // keep what we have
+    setTimeout(() => { if (REQ.get(id) === null) { REQ.delete(id); renderTurn(); } }, 3000);
+  });
+}
 function servedRow(id) {
-  if (!REQ.has(id)) {
-    REQ.set(id, null);
-    api("GET", "requests/" + id).then((r) => { if (REQ.has(id)) { REQ.set(id, r); renderTurn(); } },
-      () => setTimeout(() => { if (REQ.get(id) === null) { REQ.delete(id); renderTurn(); } }, 3000));
-  }
+  if (!REQ.has(id)) { REQ.set(id, null); fetchRow(id, null); }
   return REQ.get(id);
 }
 function card(track, step) {
