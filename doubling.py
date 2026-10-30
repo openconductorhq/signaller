@@ -54,9 +54,12 @@ class AnswerCapture:
             self.text.append(t[:TEXT_CAP - self.size])
             self.size += len(self.text[-1])
 
-    def _usage(self, u, keys=(("in", "input_tokens"), ("out", "output_tokens"),
-                              ("cache_read", "cache_read_input_tokens"), ("cache_write", "cache_creation_input_tokens"))):
-        for name, key in keys:
+    def _usage(self, u):
+        """Later events win. Valar models disagree on where the real counts go: Kimi sends zeros in message_start,
+        DeepSeek sends the cache-inclusive total there; both send the final split in message_delta. GLM sends
+        everything in message_start and only output_tokens in message_delta."""
+        for name, key in (("in", "input_tokens"), ("out", "output_tokens"),
+                          ("cache_read", "cache_read_input_tokens"), ("cache_write", "cache_creation_input_tokens")):
             if isinstance(u.get(key), int):
                 self.usage[name] = u[key]
 
@@ -77,7 +80,7 @@ class AnswerCapture:
                     tool["input"].append(dl["partial_json"])
         elif k == "message_delta":
             self.output_tokens = e["usage"]["output_tokens"]
-            self._usage(e["usage"], (("out", "output_tokens"),))
+            self._usage(e["usage"])
 
     def result(self) -> dict:
         if not self.sse and self.buf:

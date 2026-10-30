@@ -111,6 +111,19 @@ class CaptureTest(unittest.TestCase):
         c.feed(sse({"type": "message_start", "message": {"usage": {**u, "output_tokens": 1}}},
                    {"type": "message_delta", "delta": {}, "usage": {"output_tokens": 7}}))
         self.assertEqual(c.result()["usage"], want)
+        # real Valar streams (2026-10-29): the final split arrives in message_delta
+        kimi = ({"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                {"input_tokens": 1, "output_tokens": 16, "cache_read_input_tokens": 3039, "cache_creation_input_tokens": 0})
+        deepseek = ({"input_tokens": 3039, "output_tokens": 0},  # cache-inclusive total
+                    {"input_tokens": 95, "output_tokens": 16, "cache_read_input_tokens": 2944, "cache_creation_input_tokens": 0})
+        glm = ({"input_tokens": 13, "output_tokens": 0, "cache_read_input_tokens": 3008}, {"output_tokens": 3})
+        for start, delta, w in ((*kimi, {"in": 1, "out": 16, "cache_read": 3039, "cache_write": 0}),
+                                (*deepseek, {"in": 95, "out": 16, "cache_read": 2944, "cache_write": 0}),
+                                (*glm, {"in": 13, "out": 3, "cache_read": 3008, "cache_write": None})):
+            c = AnswerCapture("text/event-stream")
+            c.feed(sse({"type": "message_start", "message": {"usage": start}},
+                       {"type": "message_delta", "delta": {}, "usage": delta}))
+            self.assertEqual(c.result()["usage"], w, start)
         c = AnswerCapture("application/json")
         c.feed(json.dumps({"usage": {**u, "output_tokens": 7}}).encode())
         self.assertEqual(c.result()["usage"], want)
