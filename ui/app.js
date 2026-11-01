@@ -191,8 +191,6 @@ function applyState(st) {
   renderCounts(m);
   const pm = m.per_minute;
   $("rpm").textContent = `${pm < 10 && pm % 1 ? pm.toFixed(1) : Math.round(pm)} req/min`;
-  const hint = st.upstreams.anthropic_model_hint;
-  $("modelA").textContent = hint && hint !== "Anthropic" ? " · " + hint : "";
   if (!view.pick.length) $("dblCount").textContent = `${s.doubled_turns_today} doubled turn${s.doubled_turns_today === 1 ? "" : "s"} today · you've judged ${s.judged_today}`;
   const t = $("tally");
   if (t) t.textContent = tallyText();
@@ -287,11 +285,9 @@ $("localWarnX").addEventListener("click", () => { $("localWarn").hidden = true; 
 
 /* tracks: yard labels + the models panel */
 function renderTracks() {
-  const hint = S && S.upstreams.anthropic_model_hint;
-  $("modelA").textContent = hint && hint !== "Anthropic" ? " · " + hint : "";
   for (const t of ["valar", "local"]) {
     const up = S ? S.upstreams[t] : { url: "", configured: true }, L = C[t].toUpperCase();
-    $("model" + L).textContent = up.configured ? " · " + cfg.models[t].sonnet : ` · not configured: no ${KEY[t]}`;
+    $("model" + L).textContent = up.configured ? "" : ` · not configured: no ${KEY[t]}`;
     $("trk" + L).classList.toggle("off", !up.configured);
     $("pct" + L).classList.toggle("off", !up.configured);
     const row = document.querySelector(`.trow[data-t="${t}"]`), key = row.querySelector(".tkey");

@@ -144,13 +144,12 @@ def state(app, query=None):
     def up(t):
         _, url, key = upstream(app.cfg, t)
         return {"url": urlsplit(url).netloc, "configured": bool(key)}
-    hint = next((f.model for f, d, rid in reversed(list(app.recent)) if f.tier == "opus"), "Anthropic")
     c = app.cfg
     return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()),
             "summary": app.store.summary(ids, t0, t1, time.time()), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
-            "upstreams": {"anthropic_model_hint": hint, "valar": up("valar"), "local": up("local")},
+            "upstreams": {"valar": up("valar"), "local": up("local")},
             "recent_count": len(app.recent)}
 
 
