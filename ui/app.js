@@ -205,7 +205,8 @@ function applyState(st) {
 function renderMoney(m, sfx) {
   const t = m.tracks, io = (x) => `${tok(x.in)} in / ${tok(x.out)} out`, v = t.valar;
   for (const e of document.querySelectorAll("#money .sfx")) e.textContent = sfx;
-  $("mA").textContent = `${usd(t.anthropic.api_cost)} at API prices · ${io(t.anthropic)}`;
+  $("nA").textContent = usd(t.anthropic.api_cost);
+  $("mA").textContent = io(t.anthropic);
   $("nV").textContent = usd(v.cost + v.comparisons);
   $("mV").textContent = [io(v), v.unpriced > 0 && "partly unpriced", v.comparisons > 0 && `incl. ${usd(v.comparisons)} comparisons`].filter(Boolean).join(" · ");
   $("mL").textContent = io(t.local);

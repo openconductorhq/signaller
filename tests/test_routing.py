@@ -215,6 +215,16 @@ class EngineTests(unittest.TestCase):
         raw = json.dumps({"model": "m", "system": "cc_is_subagent=true", "messages": []}).encode()
         self.assertIs(Features.from_body(raw).subagent, True)
 
+    def test_main_thread_vs_subagent_rule(self):
+        # first system block as captured from Claude Code 2.1.316 (main thread, then a haiku subagent)
+        main = "x-anthropic-billing-header: cc_version=2.1.316.f82; cc_entrypoint=sdk-cli;"
+        sub = "x-anthropic-billing-header: cc_version=2.1.316.69c; cc_entrypoint=sdk-cli; cc_is_subagent=true;"
+        rule = Rule("Main thread stays home", "dsl", True, "when not subagent go anthropic\nwhen subagent go local")
+        cfg = replace(OFF, rules=(rule,))
+        for first, track in ((main, "anthropic"), (sub, "local")):
+            raw = json.dumps({"model": "claude-haiku-5-5", "system": [{"type": "text", "text": first}], "messages": [user("hi")]}).encode()
+            self.assertEqual(route(cfg, Features.from_body(raw), boom).track, track)
+
 
 INTENT = [
     ("claude-opus-5-5", "hi", "anthropic", "Model the request asked for:1"),

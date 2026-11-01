@@ -159,8 +159,8 @@ sets the span (last 15 min, last hour, whole session, or a range).
   transcripts at `<claude dir>/projects/*/<session id>.jsonl` (`CLAUDE_CONFIG_DIR`
   is respected). Only `cwd` and `gitBranch` are read. Subagents count toward
   their parent session. Requests with no session id show as "unknown session".
-- **Cost:** Anthropic shows $0 on the subscription, plus "$X at API prices"
-  as an estimate. Valar is priced from its own `/v1/models` prices. Local is
+- **Cost:** Anthropic shows what the traffic would cost at API prices, even on
+  a flat plan. Valar is priced from its own `/v1/models` prices. Local is
   $0. The savings card is an estimate (shown with "≈") because other models
   count tokens differently. Side-by-side comparison requests count in cost but
   not in savings.
