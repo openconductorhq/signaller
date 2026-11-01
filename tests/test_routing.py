@@ -249,6 +249,9 @@ class ThreeTrackTests(unittest.TestCase):
         self.assertEqual((d.track, d.reason), ("anthropic", "rule:Tools only Anthropic can run"))
         plain = {**ws, "tools": [{"name": "Bash", "input_schema": {}}, {"type": "custom", "name": "X", "input_schema": {}}]}
         self.assertIs(Features.from_body(json.dumps(plain).encode()).servertool, False)
+        check = {"model": "claude-sonnet-5", "messages": [user('<transcript>\n{"user":"hi"}\n</transcript>')]}
+        self.assertIs(Features.from_body(json.dumps(check).encode()).servertool, True)
+        self.assertEqual(route(replace(DEFAULT_CONFIG, lever="valar"), Features.from_body(json.dumps(check).encode()), boom).track, "anthropic")
 
     def test_servertool_beats_lever_unless_rule_off(self):
         ws = {"model": "claude-opus-5-5", "messages": [user("q")], "tools": [{"type": "web_search_20250305", "name": "web_search"}]}

@@ -124,7 +124,9 @@ def open_upstream(cfg: Config, track: str, method: str, path: str, headers, body
     """Like _open_upstream, retrying connection failures (DNS, refused, reset before a response).
     Nothing has reached the client yet, so a retry is invisible to it. Timeouts are not retried: one already
     waited UPSTREAM_TIMEOUT."""
-    headers = list(headers)  # may be a one-shot iterator
+    # uncompressed answers: the token capture can read any of them (Anthropic picks br/zstd when offered), and a
+    # mid-stream error event appended to a gzip body would break the client's decoder (ZlibError)
+    headers = [(k, v) for k, v in headers if k.lower() != "accept-encoding"]
     for delay in RETRY_DELAYS + (None,):
         try:
             return _open_upstream(cfg, track, method, path, headers, body)
@@ -351,7 +353,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     app.store.record_request({
                         "id": rid, "ts": t0, "track": route, "reason": d.reason, "explanation": json.dumps(d.explanation),
                         "model_in": model, "model_out": out_model, "status": status, "ttfb_ms": ttfb if ttfb is not None else ms,
-                        "ms": ms, "stream": int(stream), "preview": f.text[:120], "turn_id": turn_id,
+                        "ms": ms, "stream": int(stream), "preview": f.text[:120], "prompt": f.prompt, "turn_id": turn_id,
                         "session_id": sid, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
                         "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"), "window": window,
                         "cost": cost, "api_cost": api_cost})

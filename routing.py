@@ -79,6 +79,7 @@ def track_window(model: str, windows: dict) -> str:
 class Features:
     def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False):
         self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
+        self.prompt = text  # uncapped, for the Traffic view
         self.tier, self.subagent, self.turn_key = tier_of(model), subagent, turn_key
 
     @classmethod
@@ -97,6 +98,8 @@ class Features:
             # a typed tool (web_search_20250305, web_fetch_…, code_execution_…) runs on Anthropic's side;
             # other upstreams 400 on it. Claude Code sends these in their own small requests (WebSearch).
             srv = any(isinstance(t, dict) and t.get("type") not in (None, "custom") for t in req.get("tools") or [])
+            # Claude Code's own check of the whole conversation (auto-mode permissions): keep it on Anthropic too
+            srv = srv or text.startswith("<transcript>")
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
             return None
         tags = frozenset(t.lower() for t in TAG_RE.findall(text))

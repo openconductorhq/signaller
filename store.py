@@ -8,6 +8,9 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import zlib
+from collections import deque
+from hashlib import sha256
 import time
 
 import sessions as sess
@@ -17,15 +20,17 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,
   explanation TEXT, model_in TEXT, model_out TEXT, status INTEGER, ttfb_ms INTEGER, ms INTEGER,
   stream INTEGER, preview TEXT, turn_id TEXT, session_id TEXT, in_tok INTEGER, out_tok INTEGER,
-  cache_read_tok INTEGER, cache_write_tok INTEGER, window TEXT, cost REAL, api_cost REAL);
+  cache_read_tok INTEGER, cache_write_tok INTEGER, window TEXT, cost REAL, api_cost REAL, prompt_hash TEXT);
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
 CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY, ts REAL, preview TEXT, verdict TEXT, session_id TEXT);
 CREATE TABLE IF NOT EXISTS pairs(id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT, request_id INTEGER,
   step INTEGER, served_track TEXT, shadow_track TEXT, served TEXT, shadow TEXT, shadow_cost REAL);
+CREATE TABLE IF NOT EXISTS prompts(hash TEXT PRIMARY KEY, base TEXT, head INTEGER, tail INTEGER, body BLOB, depth INTEGER);
+CREATE INDEX IF NOT EXISTS prompts_base ON prompts(base);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT, branch TEXT, first_ts REAL, last_ts REAL);
 """
 COLS = {
-    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok window cost api_cost",
+    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok window cost api_cost prompt_hash",
     "turns": "id ts preview verdict session_id",
     "pairs": "turn_id request_id step served_track shadow_track served shadow shadow_cost",
 }
@@ -35,6 +40,84 @@ UPSERT_SESSION = """INSERT INTO sessions(id,cwd,branch,first_ts,last_ts) VALUES(
   ON CONFLICT(id) DO UPDATE SET first_ts=MIN(first_ts,excluded.first_ts), last_ts=MAX(last_ts,excluded.last_ts),
   cwd=COALESCE(excluded.cwd,cwd), branch=COALESCE(excluded.branch,branch)"""
 RETAIN = 30 * 86400
+MAX_DEPTH = 32  # a full copy at least every 32 links, so reading one never walks far
+
+
+def _prefix(a, b):
+    """Length of the common prefix; binary search so the compares run in C."""
+    lo, hi = 0, min(len(a), len(b))
+    while lo < hi:
+        m = (lo + hi + 1) // 2
+        lo, hi = (m, hi) if a[:m] == b[:m] else (lo, m - 1)
+    return lo
+
+
+def _suffix(a, b, limit):
+    lo, hi = 0, limit
+    while lo < hi:
+        m = (lo + hi + 1) // 2
+        lo, hi = (m, hi) if a[len(a) - m:] == b[len(b) - m:] else (lo, m - 1)
+    return lo
+
+
+class Prompts:
+    """Prompts stored once by hash, each as an edit of a recent prompt from the same session: keep the base's first
+    `head` and last `tail` chars, put `body` between. Conversations grow by appending, so most rows hold only the new
+    turns. Bodies are zlib-compressed. Writer thread only."""
+
+    def __init__(self):
+        self.recent = {}  # session -> deque of (hash, text, depth)
+
+    def put(self, c, session, text):
+        h = sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+        if session not in self.recent and len(self.recent) >= 64:
+            del self.recent[next(iter(self.recent))]  # oldest session out
+        recent = self.recent.setdefault(session, deque(maxlen=4))
+        row = c.execute("SELECT depth FROM prompts WHERE hash=?", (h,)).fetchone()
+        if row:
+            depth = row[0]
+        else:
+            best = (0, 0, None, 0)
+            for bh, bt, bd in recent:
+                p = _prefix(bt, text)
+                t = _suffix(bt, text, min(len(bt), len(text)) - p)
+                if p + t > best[0] + best[1] and bd < MAX_DEPTH:
+                    best = (p, t, (bh, bt), bd + 1)
+            head, tail, base, depth = best
+            if base and not c.execute("SELECT 1 FROM prompts WHERE hash=?", (base[0],)).fetchone():
+                best = (0, 0, None, 0)  # pruned since it was remembered
+                head, tail, base, depth = best
+            if head + tail < len(text) // 2:  # not worth a link
+                head, tail, base, depth = 0, 0, None, 0
+            mid = text[head:len(text) - tail]
+            c.execute("INSERT INTO prompts VALUES(?,?,?,?,?,?)",
+                      (h, base and base[0], head, tail, zlib.compress(mid.encode("utf-8", "surrogatepass")), depth))
+        recent.append((h, text, depth))
+        return h
+
+    @staticmethod
+    def get(c, h):
+        if not h:
+            return None
+        chain = []
+        while h and len(chain) <= MAX_DEPTH:
+            r = c.execute("SELECT base, head, tail, body FROM prompts WHERE hash=?", (h,)).fetchone()
+            if not r:
+                return None
+            chain.append(r)
+            h = r[0]
+        text = ""
+        for _, head, tail, body in reversed(chain):
+            mid = zlib.decompress(body).decode("utf-8", "surrogatepass")
+            text = text[:head] + mid + (text[len(text) - tail:] if tail else "")
+        return text
+
+    @staticmethod
+    def prune(c):
+        """Drop prompts no request and no other prompt points at; repeat to peel unused chains."""
+        while c.execute("DELETE FROM prompts WHERE hash NOT IN (SELECT prompt_hash FROM requests WHERE prompt_hash IS NOT NULL) "
+                        "AND hash NOT IN (SELECT base FROM prompts WHERE base IS NOT NULL)").rowcount:
+            pass
 
 
 def load_console_config(path):
@@ -88,9 +171,12 @@ class Store:
             c.executescript(SCHEMA)
             self._migrate(c)
             c.execute("CREATE INDEX IF NOT EXISTS requests_sess_ts ON requests(session_id, ts)")  # after migrate: old dbs lack the column
+            c.execute("CREATE INDEX IF NOT EXISTS requests_prompt ON requests(prompt_hash)")
             c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - RETAIN,))
             c.execute("DELETE FROM sessions WHERE last_ts < ?", (time.time() - RETAIN,))
+            Prompts.prune(c)
             top = c.execute("SELECT MAX(id) FROM requests").fetchone()[0] or 0
+        self._prompts = Prompts()
         self._ids = itertools.count(top + 1)  # next() on itertools.count is atomic under the GIL
         self._q = queue.Queue(queue_max)
         self._t = threading.Thread(target=self._run, daemon=True)
@@ -165,10 +251,13 @@ class Store:
                 if t == "sessions":
                     c.execute(UPSERT_SESSION, row)
                 else:
+                    if t == "requests" and row.get("prompt"):
+                        row = {**row, "prompt_hash": self._prompts.put(c, row.get("session_id"), row["prompt"])}
                     c.execute(INSERT[t], {k: row.get(k) for k in COLS[t].split()})
             if time.time() - last_prune > 3600:
                 c.execute("DELETE FROM sessions WHERE last_ts < ?", (time.time() - RETAIN,))
                 c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - RETAIN,))
+                Prompts.prune(c)
 
     def _drop(self):
         with self._dlock:
@@ -202,7 +291,14 @@ class Store:
 
     def request(self, id):
         r = self._all("SELECT * FROM requests WHERE id=?", (id,))
-        return r[0] if r else None
+        if not r:
+            return None
+        c = self._conn()
+        try:
+            r[0]["prompt"] = Prompts.get(c, r[0]["prompt_hash"])
+        finally:
+            c.close()
+        return r[0]
 
     def pair_for_request(self, request_id):
         r = self._all("SELECT * FROM pairs WHERE request_id=? ORDER BY id DESC LIMIT 1", (request_id,))

@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import threading
 import time
 
@@ -33,7 +34,7 @@ def test_corrupt_config_falls_back(tmp_path):
 def test_departures_and_stats(tmp_path):
     s, now = Store(str(tmp_path / "s.db")), time.time()
     for i, (t, st) in enumerate([("anthropic", 200)] * 3 + [("local", 502)], 1):
-        s.record_request(req(s.next_id(), now - 10 * i, t, st))
+        s.record_request(req(s.next_id(), now - 10 * i, t, st, prompt="full %d" % i))
     s.record_request(req(s.next_id(), now - 7200))
     s.close()
     st = s.stats(now)
@@ -42,7 +43,27 @@ def test_departures_and_stats(tmp_path):
     assert [r["id"] for r in s.departures(since_id=3)] == [5, 4]
     assert [r["id"] for r in s.departures(before_id=3)] == [2, 1]
     assert s.request(4)["track"] == "local" and s.request(99) is None
+    assert s.request(4)["prompt"] == "full 4" and s.request(5)["prompt"] is None
     assert Store(str(tmp_path / "s.db")).next_id() == 6
+
+
+def test_prompts_stored_as_edits(tmp_path):
+    p = str(tmp_path / "s.db")
+    s, now = Store(p), time.time()
+    turns = ["<transcript>\n" + "".join("turn %d %s\n" % (k, "x" * 3000) for k in range(n)) for n in range(1, 41)]
+    texts = turns + ["unrelated", turns[5], turns[39][:500] + "EDIT" + turns[39][520:]]
+    for i, t in enumerate(texts):
+        s.record_request(req(s.next_id(), now, session_id="s1", prompt=t))
+    s.close()
+    assert [s.request(i + 1)["prompt"] for i in range(len(texts))] == texts
+    c = sqlite3.connect(p)
+    stored = c.execute("SELECT COUNT(*), SUM(LENGTH(body)), MAX(depth) FROM prompts").fetchone()
+    assert stored[0] == len(texts) - 1 and stored[1] < 20_000 < sum(map(len, texts)) // 100 and stored[2] <= store.MAX_DEPTH
+    c.execute("DELETE FROM requests WHERE id > 1")
+    store.Prompts.prune(c)
+    assert c.execute("SELECT COUNT(*) FROM prompts").fetchone()[0] == 1  # turns[0] is a snapshot, nothing else needed
+    c.commit()
+    assert s.request(1)["prompt"] == texts[0]
 
 
 def test_turns_pairs_verdict(tmp_path):

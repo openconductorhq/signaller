@@ -367,7 +367,7 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual((r["served"]["text"], r["served"]["output_tokens"], r["served"]["error"]), ("Hello world", 12, None))
         self.assertEqual((r["shadow"]["text"], r["shadow"]["error"]), ("Hi", None))
         served_h, shadow_h = self.a.seen[0][1], self.v.seen[0][1]
-        self.assertEqual(served_h["Accept-Encoding"], "gzip")
+        self.assertIsNone(served_h.get("Accept-Encoding"))  # upstreams answer uncompressed now
         self.assertIsNone(shadow_h.get("Accept-Encoding"))
 
     def test_shadow_to_anthropic_has_no_accept_encoding(self):

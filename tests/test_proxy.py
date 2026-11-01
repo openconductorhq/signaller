@@ -148,8 +148,9 @@ class ProxyTest(unittest.TestCase):
 
     def test_anthropic_passthrough_untouched(self):
         body = body_for("claude-opus-5-5")
-        self.assertEqual(self.post(body)[0], 200)
+        self.assertEqual(self.post(body, {**HDRS, "Accept-Encoding": "gzip, br, zstd"})[0], 200)
         _, path, h, got = self.a.seen[0]
+        self.assertNotIn("accept-encoding", {k.lower() for k in h})  # identity: the capture reads it, errors can be appended
         self.assertEqual(path, "/v1/messages?beta=true")
         self.assertEqual(got, body)
         self.assertEqual(h["Authorization"], HDRS["Authorization"])

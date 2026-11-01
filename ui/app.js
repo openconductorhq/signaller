@@ -350,7 +350,7 @@ for (const row of document.querySelectorAll(".trow")) {
 const openCls = { v: false };
 const DEFAULT_TEXT = {
   servertool: ["when servertool go anthropic",
-    () => ["web search, web fetch & other tools Anthropic runs itself → ", trk("anthropic")]],
+    () => ["web search, web fetch, other tools Anthropic runs itself & Claude Code's transcript checks → ", trk("anthropic")]],
   tags: ["when tag is planning go anthropic\nwhen tag is local go local\nwhen tag is execution go valar",
     () => [el("b", {}, "#planning"), " → ", trk("anthropic"), ", ", el("b", {}, "#local"), " → ", trk("local", 1), ", ", el("b", {}, "#execution"), " → ", trk("valar")]],
   tier: ["when tier is opus or tier is fable go anthropic\nwhen tier is sonnet or tier is haiku or tier is other go valar",
@@ -653,6 +653,7 @@ function explain(d) {
   const money = priced(d.track, d.cost, d.api_cost);
   out.push(el("div", { class: "facts" }, ["session " + fullLabel(d.session_id), d.model_out,
     d.in_tok != null && `${tok(d.in_tok)} in / ${tok(d.out_tok)} out`].filter(Boolean).join(" · "), money && [" · ", el("b", {}, money)]));
+  if (d.prompt) out.push(el("pre", { class: "prompt" }, d.prompt));
   if (d.turn_id) {
     let s = null;
     try { s = d.shadow ? JSON.parse(d.shadow.shadow) : null; } catch (_) { /* unreadable pair */ }
