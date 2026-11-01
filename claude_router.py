@@ -12,7 +12,7 @@ import struct
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
@@ -163,6 +163,7 @@ class App:
         os.makedirs(config_dir, mode=0o700, exist_ok=True)
         self.cfg, self.config_dir = cfg, config_dir
         self.routing, self.banner = load_console_config(os.path.join(config_dir, "console.json"))
+        self.session_levers = {}  # session id -> lever /router chose for that session only
         self.classifier = Classifier({"valar": (cfg.valar_url, cfg.valar_key), "local": (cfg.litellm_url, cfg.litellm_key)})
         try:
             self.store = Store(os.path.join(config_dir, "stats.db"))
@@ -197,6 +198,13 @@ class App:
                 self.refresh_valar_prices()
                 time.sleep(every)
         threading.Thread(target=loop, daemon=True).start()
+
+    def set_session_lever(self, sid: str, lever: str | None) -> None:
+        # ponytail: memory only, a restart drops them (the status line shows it); one small entry per session that used /router
+        if lever:
+            self.session_levers[sid] = lever
+        else:
+            self.session_levers.pop(sid, None)
 
     def set_routing(self, new: RoutingConfig) -> None:
         with self._rlock:  # file and memory must agree under concurrent PUTs
@@ -241,6 +249,15 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                       file=sys.stderr, flush=True)
                 return
             routing = app.routing  # read once; a concurrent set_routing doesn't affect this request
+            model, stream, req = "-", False, None
+            try:
+                req = json.loads(body)
+                model, stream = str(req.get("model", "-")), bool(req.get("stream"))
+            except (ValueError, AttributeError):
+                pass
+            lever = app.session_levers.get(session_of(self.headers, req))
+            if lever:  # /router set this session's own lever
+                routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
                 f = Features.from_body(body) if is_routed(self.command, self.path) else None
                 d = decide_route(routing, f, app.classifier) if f else None
@@ -250,12 +267,6 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__), file=sys.stderr, flush=True)
                 return
             route, reason = (d.track, d.reason) if d else ("anthropic", "passthrough")
-            model, stream, req = "-", False, None
-            try:
-                req = json.loads(body)
-                model, stream = str(req.get("model", "-")), bool(req.get("stream"))
-            except (ValueError, AttributeError):
-                pass
             shown = out_model = model
             rec = f is not None and self.path.split("?", 1)[0] == "/v1/messages"
             sid = session_of(self.headers, req) if rec else None

@@ -102,10 +102,13 @@ To turn it on in Claude Code, add this to `~/.claude/settings.json`:
 
 ### `/router` in Claude Code
 
-The `router-lever` plugin in `plugin/` adds `/router` (show the mode) and
-`/router rules|valar|anthropic|local` (switch it), answered without a model
-turn, and puts `router: <mode>` in the status line (checked every 15 s). It
-talks to the console API on `127.0.0.1:8787`. Install:
+The `router-lever` plugin in `plugin/` adds `/router` (show the mode),
+`/router rules|valar|anthropic|local` (switch it for this session only; its
+subagents follow) and `/router reset` (back to the global lever), answered
+without a model turn, and puts `router: <mode> (this session|global)` in the
+status line (checked every 15 s). Other sessions keep the console's lever. A
+session's own lever lives in the router's memory, so a router restart drops it.
+It talks to the console API (`/ui/api/lever`) on `127.0.0.1:8787`. Install:
 
 ```
 /plugin install router-lever --marketplace wilfoa/claude-router

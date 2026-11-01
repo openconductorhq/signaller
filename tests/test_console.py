@@ -147,6 +147,18 @@ class ConsoleTest(Fixture):
         r, _ = self.req("GET", "/ui?x=1", origin=None)
         self.assertEqual(r.status, 200)
 
+    def test_session_lever_applies_to_that_session_only(self):
+        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules"})
+        self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})[1]["lever"], "valar")
+        self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "bogus"})[0], 400)
+        self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "unknown", "lever": "valar"})[0], 400)
+        self.assertEqual(self.req("PUT", "/ui/api/lever", {"session": "s1", "lever": "local"}, origin=None)[0].status, 403)
+        for sid in ("s1", "s2"):
+            self.post(body_for("claude-opus-5-5"), {**HDRS, "X-Claude-Code-Session-Id": sid})
+        self.assertEqual((len(self.v.seen), len(self.a.seen)), (1, 1))  # s1 → valar, s2 keeps the global rules
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
+        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["session"], None)
+
     def test_preview_ignores_lever(self):
         self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "add schema migration"}]}))
         self.logged(1)

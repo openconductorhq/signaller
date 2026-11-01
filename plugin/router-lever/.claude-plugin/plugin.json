@@ -1,1 +1,1 @@
-{ "name": "router-lever", "version": "0.1.0", "description": "/router switches claude-router between rules, Valar and Anthropic; the status line shows the mode." }
+{ "name": "router-lever", "version": "0.2.0", "description": "/router switches claude-router between rules, Valar and Anthropic for this session; the status line shows the mode." }

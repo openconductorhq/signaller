@@ -9,7 +9,7 @@ from dataclasses import replace
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from prices import parse_valar
-from routing import TRACKS, WINDOWS, ClassResult, Rule, config_from_json, config_to_json, route
+from routing import TRACKS, WINDOWS, _sid_ok, ClassResult, Rule, config_from_json, config_to_json, route
 from rulelang import RuleError, parse
 
 UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui")
@@ -213,6 +213,20 @@ def api(h, app, method, path, query, body):
         if r["turn_id"]:
             r["shadow"] = st.pair_for_request(r["id"])
         return r
+    if path == "/ui/api/lever":  # one Claude Code session's own lever (/router), over the global one
+        body = body if isinstance(body, dict) else {}
+        sid = body.get("session") if method == "PUT" else (query.get("session") or [None])[0]
+        if not _sid_ok(sid):
+            raise Err(400, "session must be a Claude Code session id")
+        if method == "PUT":
+            lever = body.get("lever")
+            if lever not in (None, "rules") + TRACKS:
+                raise Err(400, "lever must be rules, anthropic, valar, local or null")
+            app.set_session_lever(sid, lever)
+        elif method != "GET":
+            raise Err(405, "GET or PUT")
+        own = app.session_levers.get(sid)
+        return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever}
     if path == "/ui/api/config" and method == "PUT":
         try:
             new = config_from_json(body)
