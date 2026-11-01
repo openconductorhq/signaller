@@ -1,0 +1,15 @@
+# docker compose up -d --build   (config and stats stay in ~/.config/claude-router)
+services:
+  router:
+    build: .
+    image: claude-router
+    restart: unless-stopped
+    ports: ["127.0.0.1:8787:8787"]  # this machine only
+    env_file: ${HOME}/.config/claude-router/env
+    environment:  # wins over the env file
+      CLAUDE_ROUTER_LISTEN: 0.0.0.0:8787
+      LITELLM_URL: http://host.docker.internal:4000
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - ${HOME}/.config/claude-router:/config
+      - ${HOME}/.claude/projects:/claude/projects:ro  # session labels (cwd, branch) only

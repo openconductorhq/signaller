@@ -394,6 +394,9 @@ class ConfigTests(unittest.TestCase):
         for listen in ("0.0.0.0:8787", "192.168.1.5:8787", "example.com:8787"):
             with self.assertRaises(ValueError):
                 load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": listen})
+        self.assertEqual(load_config({"CLAUDE_ROUTER_LISTEN": "0.0.0.0:8787", "CLAUDE_ROUTER_IN_CONTAINER": "1"}).listen_host, "0.0.0.0")
+        with self.assertRaises(ValueError):  # only the any-address, and only in a container
+            load_config({"CLAUDE_ROUTER_LISTEN": "192.168.1.5:8787", "CLAUDE_ROUTER_IN_CONTAINER": "1"})
         c = load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": "localhost:9000"})
         self.assertEqual((c.listen_host, c.listen_port), ("localhost", 9000))
         c = load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": "[::1]:9000"})

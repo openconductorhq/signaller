@@ -45,6 +45,9 @@ def load_config(env: Mapping[str, str]) -> Config:
         port = int(port)
     except ValueError:
         loopback = False
+    # in a container the router must take connections from the bridge; the host publishes the port on 127.0.0.1 only
+    if host == "0.0.0.0" and env.get("CLAUDE_ROUTER_IN_CONTAINER") == "1":
+        loopback = True
     if not loopback:
         raise ValueError("CLAUDE_ROUTER_LISTEN must be a loopback host:port, got %r" % listen)
     return Config(

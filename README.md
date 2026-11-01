@@ -50,6 +50,25 @@ keys are never logged.
 
 ## Install
 
+### In a container (recommended)
+
+```
+mkdir -p ~/.config/claude-router
+cp env.example ~/.config/claude-router/env
+chmod 600 ~/.config/claude-router/env      # then set VALAR_API_KEY (and LITELLM_API_KEY if you use local)
+docker compose up -d --build
+```
+
+`compose.yaml` publishes the router on `127.0.0.1:8787` only, keeps config and
+stats in `~/.config/claude-router`, reads `~/.claude/projects` read-only for
+session labels, and points LiteLLM at `host.docker.internal:4000`. Inside the
+container the router listens on `0.0.0.0`, which it allows only with
+`CLAUDE_ROUTER_IN_CONTAINER=1` (set by the image). Logs: `docker compose logs -f`.
+The image runs as uid 1000; on Linux, if your uid differs, add
+`user: "<uid>:<gid>"` to the service.
+
+### As a systemd user service
+
 ```
 mkdir -p ~/.config/claude-router
 cp env.example ~/.config/claude-router/env
@@ -80,6 +99,17 @@ To turn it on in Claude Code, add this to `~/.claude/settings.json`:
 - **Router down:** every Claude Code session fails to connect. Use the bypass
   above, or restart the router.
 - **Logs:** `journalctl --user -u claude-router -f`
+
+### `/router` in Claude Code
+
+The `router-lever` plugin in `plugin/` adds `/router` (show the mode) and
+`/router rules|valar|anthropic|local` (switch it), answered without a model
+turn, and puts `router: <mode>` in the status line (checked every 15 s). It
+talks to the console API on `127.0.0.1:8787`. Install:
+
+```
+/plugin install router-lever --marketplace wilfoa/claude-router
+```
 
 ## Console
 
@@ -193,9 +223,10 @@ In `~/.config/claude-router/` (override with `CLAUDE_ROUTER_CONFIG_DIR`), mode 0
   edit it to match current prices.
 - `models.json`: Valar's model list, now with each model's prices from
   `/v1/models` (refreshed at startup and hourly).
-- `stats.db`: SQLite stats. It stores the first 120 characters of each message
-  and the doubled answers (text and tool calls), locally. Never headers, keys
-  or full bodies. Requests are pruned after 30 days; pairs and verdicts stay
+- `stats.db`: SQLite stats. It stores each request's latest user message in
+  full (as compressed edits of earlier ones from the same session, so a growing
+  conversation costs only its new turns) and the doubled answers (text and tool
+  calls), locally. Never headers or keys. Requests are pruned after 30 days; pairs and verdicts stay
   until "Forget all pairs".
 
 ValarCode (Valar's own agent product) was evaluated and rejected: this router

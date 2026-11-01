@@ -1,0 +1,5 @@
+{
+  "name": "claude-router",
+  "owner": { "name": "Amir Wilf" },
+  "plugins": [{ "name": "router-lever", "source": "./plugin/router-lever" }]
+}
