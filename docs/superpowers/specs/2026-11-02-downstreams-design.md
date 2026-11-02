@@ -1,5 +1,7 @@
 # Downstreams you add from the console: design
 
+Status: implemented on branch feat/downstreams
+
 ## Intent
 
 The router sends Claude Code traffic to downstreams. Today there are exactly three, hardcoded throughout:
