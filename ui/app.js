@@ -228,7 +228,7 @@ function renderMoney(m, sfx) {
   $("nA").textContent = usd(t.anthropic.api_cost);
   $("mA").textContent = io(t.anthropic);
   $("nS").textContent = "≈ " + usd(m.savings);
-  $("mS").textContent = `${ds.map(NAME).join(" + ") || "Downstreams"} would have cost ${usd(m.saved_would)}`;
+  $("mS").textContent = `${ds.map(NAME).join(" + ") || "Downstream"} requests would have cost ${usd(m.saved_would)} on Anthropic`;
 }
 // "decided N of M" under each rule and Otherwise, for the picked sessions and span
 function renderCounts(m) {
