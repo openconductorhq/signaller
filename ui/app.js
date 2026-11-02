@@ -117,7 +117,7 @@ function renderSess() {
     all.length > shown.length || moreOpen && all.length > 8 ? chip({ class: "sc more", "data-k": "sc:more", "aria-expanded": String(moreOpen),
       onclick: () => { moreOpen = !moreOpen; renderSess(); } }, moreOpen ? "fewer" : `+ ${all.length - shown.length} more`) : ""));
 }
-function setPick(ids) { view.pick = ids; saveView(); renderSess(); viewChanged(true); }
+function setPick(ids) { view.pick = ids; saveView(); renderSess(); if (cfg) renderLever(); viewChanged(true); }
 // A new pick restarts departures and side by side; a new span only changes the yard and the cost cards.
 function viewChanged(pickToo) {
   viewGen++;
@@ -198,6 +198,7 @@ function applyState(st) {
   const f = document.activeElement;
   const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }
+  if (cfg) keepFocus(renderLever);  // a session's lever can change from /router at any time
 }
 
 function renderMoney(m, sfx) {
@@ -249,24 +250,49 @@ function renderConfig(force) {
 
 /* lever */
 const leverBtns = [...document.querySelectorAll("#lever .lever")];
+// One picked session: the lever shows and sets that session's own lever (/router), falling back to the global one.
+const oneSess = () => view.pick.length === 1 && view.pick[0] !== "unknown" ? view.pick[0] : null;
+const ownLever = () => { const id = oneSess(); return id && S && S.session_levers ? S.session_levers[id] || null : null; };
+const curLever = () => ownLever() || cfg.lever;
 function renderLever() {
+  const lv = curLever(), id = oneSess(), own = ownLever();
   for (const b of leverBtns) {
-    const on = b.dataset.v === cfg.lever;
+    const on = b.dataset.v === lv;
     b.setAttribute("aria-checked", String(on));
     b.tabIndex = on ? 0 : -1;
   }
-  const off = cfg.lever !== "rules";
+  const off = lv !== "rules";
   $("rulebook").classList.toggle("dim", off);
   $("leverNote").hidden = !off;
-  $("leverNote").className = "levernote " + cfg.lever;
-  $("leverNote").textContent = off ? `The lever is sending everything to ${NAME[cfg.lever]}` : "";
-  $("yard").parentNode.className = "yard lev-" + cfg.lever;
+  $("leverNote").className = "levernote " + lv;
+  $("leverNote").textContent = off ? `The lever is sending ${id ? "this session" : "everything"} to ${NAME[lv]}` : "";
+  $("yard").parentNode.className = "yard lev-" + lv;
   $("jlabel").textContent = off ? "lever" : "rulebook";
-  if (!offTrack(cfg.lever)) $("localWarn").hidden = true;
+  if (!offTrack(lv)) $("localWarn").hidden = true;
+  const sc = $("leverScope");
+  if (!id) sc.replaceChildren("Lever for ", el("b", {}, "all sessions"));
+  else sc.replaceChildren("Lever for ", el("b", {}, fullLabel(id)), own ? " · its own" : ` · following the global lever (${NAME[cfg.lever] || "Rules"})`,
+    own ? " " : "", own ? el("button", { type: "button", class: "linkish", "data-k": "lever:reset", onclick: () => setLever(null) }, "back to global") : "");
 }
 const offTrack = (v) => v === "valar" || v === "local";
 async function setLever(v) {
-  if (!cfg || v === cfg.lever) return;
+  if (!cfg) return;
+  const id = oneSess();
+  if (id) {
+    if (v === ownLever() || (v === null && !ownLever())) return;
+    try {
+      await api("PUT", "lever", { session: id, lever: v });
+      const { [id]: _, ...rest } = S.session_levers || {};
+      S.session_levers = v ? { ...rest, [id]: v } : rest;
+      showErr($("leverErr"), "");
+      renderLever();
+      if (offTrack(v)) $("localWarn").hidden = false;
+    } catch (e) {
+      showErr($("leverErr"), "Couldn't set this session's lever: " + e.message);
+    }
+    return;
+  }
+  if (v === cfg.lever) return;
   if (await save({ ...cfg, lever: v }, $("leverErr")) && offTrack(v)) $("localWarn").hidden = false;
 }
 leverBtns.forEach((b, i) => {

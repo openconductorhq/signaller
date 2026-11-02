@@ -150,7 +150,7 @@ def state(app, query=None):
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
             "upstreams": {"valar": up("valar"), "local": up("local")},
-            "recent_count": len(app.recent)}
+            "recent_count": len(app.recent), "session_levers": dict(app.session_levers)}
 
 
 def api(h, app, method, path, query, body):
@@ -226,6 +226,16 @@ def api(h, app, method, path, query, body):
             raise Err(405, "GET or PUT")
         own = app.session_levers.get(sid)
         return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever}
+    if path == "/ui/api/name" and method == "PUT":  # /router name: what the console calls this session
+        body = body if isinstance(body, dict) else {}
+        sid, name = body.get("session"), body.get("name")
+        if not _sid_ok(sid):
+            raise Err(400, "session must be a Claude Code session id")
+        if name is not None and not isinstance(name, str):
+            raise Err(400, "name must be text or null")
+        name = " ".join((name or "").split())[:80] or None
+        st.set_session_name(sid, name)
+        return {"session": sid, "name": name}
     if path == "/ui/api/config" and method == "PUT":
         try:
             new = config_from_json(body)

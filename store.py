@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS pairs(id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id T
   step INTEGER, served_track TEXT, shadow_track TEXT, served TEXT, shadow TEXT, shadow_cost REAL);
 CREATE TABLE IF NOT EXISTS prompts(hash TEXT PRIMARY KEY, base TEXT, head INTEGER, tail INTEGER, body BLOB, depth INTEGER);
 CREATE INDEX IF NOT EXISTS prompts_base ON prompts(base);
-CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT, branch TEXT, first_ts REAL, last_ts REAL);
+CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT, branch TEXT, first_ts REAL, last_ts REAL, name TEXT);
 """
 COLS = {
     "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok window cost api_cost prompt_hash",
@@ -192,6 +192,8 @@ class Store:
             for col in cols.split():
                 if col not in have:
                     c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (t, col, types.get(col, "TEXT")))
+        if "name" not in {r[1] for r in c.execute("PRAGMA table_info(sessions)")}:
+            c.execute("ALTER TABLE sessions ADD COLUMN name TEXT")
 
     def _conn(self):
         c = sqlite3.connect(self.path, timeout=5)
@@ -379,12 +381,12 @@ class Store:
 
     def list_sessions(self, t0, t1):
         rows = self._all(
-            "SELECT r.session_id id, s.cwd, s.branch, s.first_ts, s.last_ts, COUNT(*) n, MAX(r.ts) last FROM requests r "
+            "SELECT r.session_id id, s.cwd, s.branch, s.name, s.first_ts, s.last_ts, COUNT(*) n, MAX(r.ts) last FROM requests r "
             "LEFT JOIN sessions s ON s.id=r.session_id WHERE r.ts BETWEEN ? AND ? GROUP BY r.session_id ORDER BY last DESC", (t0, t1))
         out = []
         for r in rows:
             r.pop("last")
-            r["label"] = sess.label(r["id"], r["cwd"], r["branch"])
+            r["label"] = r["name"] or sess.label(r["id"], r["cwd"], r["branch"])
             r["id"] = r["id"] or "unknown"
             out.append(r)
         return out
@@ -403,6 +405,17 @@ class Store:
         try:
             with c:
                 return c.execute("UPDATE turns SET verdict=? WHERE id=?", (verdict, turn_id)).rowcount > 0
+        finally:
+            c.close()
+
+    def set_session_name(self, sid, name):
+        """Name a session (from /router name); None clears it. Synchronous so the console shows it on the next poll."""
+        now = time.time()
+        c = self._conn()
+        try:
+            with c:
+                c.execute("INSERT INTO sessions(id,first_ts,last_ts,name) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name",
+                          (sid, now, now, name))
         finally:
             c.close()
 
@@ -460,6 +473,7 @@ class NullStore:
     def turn(self, turn_id): return None
     def set_verdict(self, turn_id, verdict): return False
     def forget_pairs(self): pass
+    def set_session_name(self, sid, name): pass
     def reprice(self, prices): return 0
 
     def stats(self, now):

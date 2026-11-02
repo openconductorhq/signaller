@@ -156,8 +156,17 @@ class ConsoleTest(Fixture):
         for sid in ("s1", "s2"):
             self.post(body_for("claude-opus-5-5"), {**HDRS, "X-Claude-Code-Session-Id": sid})
         self.assertEqual((len(self.v.seen), len(self.a.seen)), (1, 1))  # s1 → valar, s2 keeps the global rules
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["session_levers"], {"s1": "valar"})  # the console's lever follows it
         self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["session"], None)
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["session_levers"], {})
+
+    def test_session_name(self):
+        self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": "  fix   login "})[1], {"session": "s1", "name": "fix login"})
+        self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": ""})[1]["name"], None)
+        self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "unknown", "name": "x"})[0], 400)
+        self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": 5})[0], 400)
+        self.assertEqual(self.req("PUT", "/ui/api/name", {"session": "s1", "name": "x"}, origin=None)[0].status, 403)
 
     def test_preview_ignores_lever(self):
         self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "add schema migration"}]}))

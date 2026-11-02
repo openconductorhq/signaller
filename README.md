@@ -104,7 +104,9 @@ To turn it on in Claude Code, add this to `~/.claude/settings.json`:
 
 The `router-lever` plugin in `plugin/` adds `/router` (show the mode),
 `/router rules|valar|anthropic|local` (switch it for this session only; its
-subagents follow) and `/router reset` (back to the global lever), answered
+subagents follow), `/router reset` (back to the global lever) and
+`/router name <text>` (what the console calls this session; `/router name` alone
+clears it; kept in `stats.db`), answered
 without a model turn, and puts `router: <mode> (this session|global)` in the
 status line (checked every 15 s). Other sessions keep the console's lever. A
 session's own lever lives in the router's memory, so a router restart drops it.
@@ -120,7 +122,9 @@ Open `http://127.0.0.1:8787/ui` (loopback only). It shows live traffic, edits
 the routing rules, and compares track answers side by side.
 
 - **Lever:** Anthropic, Rules, Valar or Local. Anthropic, Valar and Local send
-  everything to that track (reason `lever`). Rules uses the Rulebook.
+  everything to that track (reason `lever`). Rules uses the Rulebook. With one
+  session picked, the lever shows and sets that session's own lever (the same one
+  `/router` sets, updated live), with "back to global" to drop it.
 - **Tracks panel:** per-track state (key set or not) and the model maps for
   Valar and local (sonnet, haiku), plus the classifier's upstream and model.
   Edits apply to the next request and are saved to `console.json`.

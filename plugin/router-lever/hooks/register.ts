@@ -2,6 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 const BASE = 'http://127.0.0.1:8787'
 const LEVER = `${BASE}/ui/api/lever`
+const NAME = `${BASE}/ui/api/name`
 const MODES = ['rules', 'valar', 'anthropic', 'local']
 const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the console takes writes from its own origin only
 
@@ -17,6 +18,14 @@ const lever = async ($: EngineInterface, set?: { lever: string | null }): Promis
   return JSON.parse(r.text)
 }
 
+// what the router console calls this session; empty clears it
+const rename = async ($: EngineInterface, name: string): Promise<string | null> => {
+  const session = await $.session.id()
+  const r = await $.http.fetch(NAME, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ session, name }) })
+  if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
+  return JSON.parse(r.text).name
+}
+
 const label = (l: Lever) => (l.session ? `${l.lever} (this session)` : `${l.lever} (global)`)
 const show = ($: EngineInterface, l?: Lever) => $.ui.status(l ? `router: ${label(l)}` : 'router: down')
 
@@ -24,8 +33,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'router',
-      description: "Show or switch this session's claude-router mode; reset goes back to the global one",
-      argumentHint: '[rules|valar|anthropic|local|reset]',
+      description: "Show or switch this session's claude-router mode; reset goes back to the global one; name <text> labels it in the console",
+      argumentHint: '[rules|valar|anthropic|local|reset|name <text>]',
       immediate: true,
     })
     const poll = () => lever($).then(l => show($, l), () => show($))
@@ -35,9 +44,18 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'router' }, async ($, e) => {
-    const want = e.args.trim().toLowerCase()
+    const args = e.args.trim()
+    if (/^name(\s|$)/i.test(args)) {
+      try {
+        const n = await rename($, args.slice(4).trim())
+        return { text: n ? `claude-router: this session is "${n}" in the console` : 'claude-router: session name cleared' }
+      } catch (err) {
+        return { text: `claude-router isn't reachable at ${BASE}: ${(err as Error).message}` }
+      }
+    }
+    const want = args.toLowerCase()
     if (want && want !== 'reset' && !MODES.includes(want))
-      return { text: `Unknown mode "${want}". Use one of: ${MODES.join(', ')}, or reset.` }
+      return { text: `Unknown mode "${want}". Use one of: ${MODES.join(', ')}, reset, or name <text>.` }
     try {
       const l = await lever($, want ? { lever: want === 'reset' ? null : want } : undefined)
       show($, l)
