@@ -222,19 +222,14 @@ def filt(query):
 
 
 def state(app, query=None):
-    from claude_router import upstream
     ids, t0, t1 = filt(query or {})
     if t0 is None:  # whole session
         t0 = app.store.first_ts(ids)
-    def up(t):  # the old shape; the current page reads it (and a keyless "local"), the new page reads "downstreams"
-        _, url, key, _ = upstream(app, t)
-        return {"url": urlsplit(url).netloc, "configured": bool(key)}
     c, ts = app.cfg, tracks(app.routing)
     return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time(), ts),
             "summary": app.store.summary(ids, t0, t1, time.time(), tracks(app.routing)), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
-            "upstreams": {"valar": up("valar"), "local": up("local")},
             "downstreams": {d.id: {"key_set": app.keys.has(d.id), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
             "recent_count": len(app.recent), "session_levers": dict(app.session_levers)}
 

@@ -65,7 +65,8 @@ class ConsoleTest(Fixture):
         s, j = self.js("GET", "/ui/api/state")
         self.assertEqual(s, 200)
         self.assertEqual(j["config"]["lever"], "rules")
-        self.assertEqual(j["upstreams"]["valar"], {"url": self.v.url[7:], "configured": True})
+        self.assertEqual(j["downstreams"]["valar"], {"url": self.v.url[7:], "key_set": True})
+        self.assertNotIn("upstreams", j)
 
     def test_v1_with_own_origin_still_forbidden(self):
         s, _ = self.post(body_for("claude-opus-5-5"), {**HDRS, "Origin": "http://127.0.0.1:%d" % self.port})
@@ -257,24 +258,26 @@ class ConsoleTest(Fixture):
         self.assertEqual(s, 502)
         self.assertNotIn("VK", json.dumps(j))
 
-    def test_state_upstreams_no_key(self):
+    def test_state_downstreams_no_key(self):
         s, j = self.js("GET", "/ui/api/state")
-        self.assertTrue(j["upstreams"]["valar"]["configured"])
-        self.assertEqual(j["upstreams"]["valar"]["url"], self.v.url[7:])
+        self.assertTrue(j["downstreams"]["valar"]["key_set"])
+        self.assertEqual(j["downstreams"]["valar"]["url"], self.v.url[7:])
         self.assertNotIn("VK", json.dumps(j))
         self.assertNotIn("LK", json.dumps(j))
         self.app.keys.delete("valar")
-        self.assertFalse(self.js("GET", "/ui/api/state")[1]["upstreams"]["valar"]["configured"])
+        self.assertFalse(self.js("GET", "/ui/api/state")[1]["downstreams"]["valar"]["key_set"])
 
     def test_verdict_api_valar(self):
         self.app.store.record_turn({"id": "t2", "ts": time.time(), "preview": "p", "verdict": None})
         self.assertEqual(self.js("PUT", "/ui/api/turns/t2/verdict", {"verdict": "valar"})[0], 200)
 
-    def test_page_has_valar(self):
+    def test_page_draws_downstreams(self):
         page = self.req("GET", "/ui/", origin=None)[1].decode()
-        self.assertIn('data-v="valar"', page)
+        self.assertNotIn('data-v="valar"', page)  # the lever, yard and Tracks rows come from config.downstreams
         self.assertIn('id="tracks"', page)
-        self.assertIn('api("GET", "models?track="', self.req("GET", "/ui/app.js", origin=None)[1].decode())
+        js = self.req("GET", "/ui/app.js", origin=None)[1].decode()
+        self.assertIn('api("GET", "models?track="', js)
+        self.assertIn("cfg.downstreams", js)
 
     def test_filters(self):
         now = time.time()
