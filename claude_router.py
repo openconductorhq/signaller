@@ -22,7 +22,7 @@ from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from prices import Prices, parse_valar
-from routing import session_of, Features, RoutingConfig, is_routed, route as decide_route, track_model, track_window
+from routing import session_of, Features, RoutingConfig, downstream, is_routed, route as decide_route, track_model, track_window
 from store import NullStore, Store, load_console_config, save_console_config
 
 @dataclass
@@ -283,13 +283,14 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 if turn_id:  # shadow starts before the served upstream; it never touches the served path again
                     pair = app.doubler.pending_served(turn_id, rid, None, route, routing.doubling.shadow[route])
                     shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
-                                                      self.headers.items(), body, cfg, routing.models, windows=routing.windows)
+                                                      self.headers.items(), body, cfg, routing)
             except Exception as e:
                 print("doubling failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
                 pair, shadow, turn_id = None, "-", None
             name, base, key = upstream(cfg, route)
             if route != "anthropic":
-                out_model = track_model(model, routing.models[route])
+                ds = downstream(routing, route)
+                out_model = track_model(model, ds)
                 hoisted = route == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
                 if out_model != model or hoisted:
                     req["model"] = out_model
@@ -297,8 +298,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 if out_model != model:
                     shown = "%s→%s" % (model, out_model)
                 headers = upstream_headers(self.headers.items(), key)
-                if route == "valar":
-                    window = track_window(model, routing.windows["valar"])
+                window = track_window(model, ds)
+                if window:
                     headers.append(("X-Valar-Completion-Window", window))
             else:
                 headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]

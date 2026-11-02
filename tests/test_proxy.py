@@ -17,9 +17,8 @@ from claude_router import App, Config, make_server, upstream_headers
 from classifier import Classifier
 from routing import DEFAULT_CONFIG
 
-MODELS = {"valar": {"fable": "VS", "opus": "VS", "sonnet": "VS", "haiku": "VH"},
-          "local": {"fable": "S", "opus": "S", "sonnet": "S", "haiku": "H"}}
-BASE = replace(DEFAULT_CONFIG, models=MODELS)
+VALAR = replace(DEFAULT_CONFIG.downstreams[0], models={"fable": "VS", "opus": "VS", "sonnet": "VS", "haiku": "VH"})
+BASE = replace(DEFAULT_CONFIG, downstreams=(VALAR,))
 CLASSIFIER_OFF = replace(BASE, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in BASE.rules))
 
 
@@ -172,22 +171,19 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(json.loads(self.v.seen[1][3])["model"], "VH")
 
     def test_valar_window_header_and_row(self):
-        w = {"valar": {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}}
-        self.app.routing = replace(CLASSIFIER_OFF, windows=w)
+        w = {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}
+        self.app.routing = replace(CLASSIFIER_OFF, downstreams=(replace(VALAR, windows=w),))
         self.post(body_for("claude-sonnet-5-5"), {**HDRS, "X-Valar-Completion-Window": "flex"})
         self.assertEqual(self.v.seen[0][2].get_all("X-Valar-Completion-Window"), ["standard"])
         self.post(body_for("claude-haiku-4-5"))
         self.assertEqual(self.v.seen[1][2]["X-Valar-Completion-Window"], "asap")
         self.app.routing = replace(self.app.routing, lever="anthropic")
         self.post(body_for("claude-sonnet-5-5"))
-        self.app.routing = replace(self.app.routing, lever="local")
-        self.post(body_for("claude-sonnet-5-5"))
         self.assertIsNone(self.a.seen[0][2]["X-Valar-Completion-Window"])
-        self.assertIsNone(self.l.seen[0][2]["X-Valar-Completion-Window"])
-        self.logged(4)
+        self.logged(3)
         self.app.store.close()
         rows = sorted(self.app.store.departures(), key=lambda r: r["id"])
-        self.assertEqual([r["window"] for r in rows], ["standard", "asap", None, None])
+        self.assertEqual([r["window"] for r in rows], ["standard", "asap", None])
 
     def test_valar_streams(self):
         c = HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -241,14 +237,6 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertIn("Valar unreachable", json.loads(data)["error"]["message"])
         self.assertEqual(self.a.seen, [])
-
-    def test_local_still_works(self):
-        self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "go #local"}]}), {**HDRS, "x-api-key": "client"})
-        _, path, h, got = self.l.seen[0]
-        self.assertEqual(h["Authorization"], "Bearer LK")
-        self.assertIsNone(h["x-api-key"])
-        self.assertEqual(json.loads(got)["model"], "S")
-        self.assertEqual(self.v.seen + self.a.seen, [])
 
     def test_config_change_applies_next_request(self):
         self.post(body_for("claude-sonnet-5-5"))
@@ -375,20 +363,6 @@ class ProxyTest(unittest.TestCase):
         s, data = self.post(body_for("claude-opus-5-5"))
         self.assertEqual(s, 529)
         self.assertEqual(data, b'{"type":"error","error":{"type":"overloaded_error"}}')
-
-    def test_litellm_down_502(self):
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            dead = "http://127.0.0.1:%d" % s.getsockname()[1]
-        self.srv.shutdown()
-        self.srv.server_close()
-        self.start(dead)
-        status, data = self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "#local"}]}))
-        self.assertEqual(status, 502)
-        j = json.loads(data)
-        self.assertEqual(j["type"], "error")
-        self.assertEqual(j["error"]["type"], "api_error")
-        self.assertIn("LiteLLM unreachable", j["error"]["message"])
 
     def test_client_disconnect_mid_stream(self):
         body = body_for("claude-opus-5-5", stream=True)

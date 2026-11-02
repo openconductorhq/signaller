@@ -14,7 +14,9 @@ from hashlib import sha256
 import time
 
 import sessions as sess
-from routing import DEFAULT_CONFIG, TRACKS, config_from_json, config_to_json
+from routing import DEFAULT_CONFIG, config_from_json, config_to_json
+
+TRACKS = ("anthropic", "valar", "local")  # tracks stored rows may carry; per-downstream in a later task
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,

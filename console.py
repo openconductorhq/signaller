@@ -9,7 +9,7 @@ from dataclasses import replace
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from prices import parse_valar
-from routing import TRACKS, WINDOWS, _sid_ok, ClassResult, Rule, config_from_json, config_to_json, route
+from routing import WINDOWS, _sid_ok, ClassResult, Rule, config_from_json, config_to_json, route, tracks
 from rulelang import RuleError, parse
 
 UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui")
@@ -219,8 +219,8 @@ def api(h, app, method, path, query, body):
             raise Err(400, "session must be a Claude Code session id")
         if method == "PUT":
             lever = body.get("lever")
-            if lever not in (None, "rules") + TRACKS:
-                raise Err(400, "lever must be rules, anthropic, valar, local or null")
+            if lever not in (None, "rules") + tracks(app.routing):
+                raise Err(400, "lever must be rules, a track or null")
             app.set_session_lever(sid, lever)
         elif method != "GET":
             raise Err(405, "GET or PUT")
@@ -259,7 +259,7 @@ def api(h, app, method, path, query, body):
     if m and m[2] and method == "PUT":
         v = body.get("verdict") if isinstance(body, dict) else None
         if not st.set_verdict(unquote(m[1]), v):
-            raise Err(404 if v in TRACKS + ("same",) else 400, "bad verdict or unknown turn")
+            raise Err(404 if v in tracks(app.routing) + ("same",) else 400, "bad verdict or unknown turn")
         return {"ok": True}
     raise Err(404, "not found")
 

@@ -71,7 +71,7 @@ class ConsoleTest(Fixture):
     def test_put_invalid_config_unchanged(self):
         cfg = self.js("GET", "/ui/api/state")[1]["config"]
         s, j = self.js("PUT", "/ui/api/config", {**cfg, "lever": "bogus"})
-        self.assertEqual((s, j["error"]), (400, "lever must be anthropic, rules, valar or local"))
+        self.assertEqual((s, j["error"]), (400, "lever: no downstream named bogus"))
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["config"]["lever"], "rules")
 
     def test_put_nested_rule_is_400(self):
@@ -81,9 +81,9 @@ class ConsoleTest(Fixture):
 
     def test_put_config_applies(self):
         cfg = self.js("GET", "/ui/api/state")[1]["config"]
-        self.assertEqual(self.js("PUT", "/ui/api/config", {**cfg, "lever": "local"})[0], 200)
+        self.assertEqual(self.js("PUT", "/ui/api/config", {**cfg, "lever": "valar"})[0], 200)
         self.post(body_for("claude-opus-5-5"))
-        self.assertEqual((len(self.l.seen), len(self.a.seen)), (1, 0))
+        self.assertEqual((len(self.v.seen), len(self.a.seen)), (1, 0))
 
     def test_preview(self):
         self.post(body_for("claude-opus-5-5"))
@@ -175,7 +175,7 @@ class ConsoleTest(Fixture):
         while not self.app.recent and time.time() - t < 2:
             time.sleep(0.01)
         cfg = self.js("GET", "/ui/api/state")[1]["config"]
-        self.js("PUT", "/ui/api/config", {**cfg, "lever": "local"})
+        self.assertEqual(self.js("PUT", "/ui/api/config", {**cfg, "lever": "valar"})[0], 200)
         rule = {"name": "mig", "text": 'when text contains "migration" go anthropic'}
         j = self.js("POST", "/ui/api/preview", {"rule": rule, "position": 0})[1]
         self.assertEqual((j["matched"], j["changed"]), (1, 1))

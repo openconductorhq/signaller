@@ -312,7 +312,7 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(h.get_all("Authorization"), ["Bearer VK"])
         self.assertNotIn("oauth-2025-04-20", h.get("anthropic-beta", ""))
         self.assertIs(req["stream"], False)
-        self.assertEqual(req["model"], self.app.routing.models["valar"]["sonnet"])
+        self.assertEqual(req["model"], self.app.routing.downstreams[0].models["sonnet"])
         self.assertEqual(self.a.seen[0][1]["Authorization"], HDRS["Authorization"])
         self.assertEqual(self.l.seen, [])
 
@@ -334,15 +334,15 @@ class DoublingTest(unittest.TestCase):
         self.assertNotIn(HDRS["Authorization"], [x[1]["Authorization"] for x in self.v.seen])
 
     def test_shadow_to_valar_carries_its_slot_window(self):
-        w = {"valar": {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}}
-        self.app.routing = replace(self.app.routing, windows=w)
+        w = {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}
+        self.app.routing = replace(self.app.routing, downstreams=(replace(self.app.routing.downstreams[0], windows=w),))
         self.post(msg("opus turn", "claude-opus-5-5"), headers={**HDRS, "X-Valar-Completion-Window": "flex"})  # served by Anthropic, shadowed on Valar
         self.pairs(1)
         self.assertEqual(self.v.seen[0][1].get_all("X-Valar-Completion-Window"), ["priority"])
 
     def test_shadow_usage_and_cost_on_pair(self):
-        w = {"valar": {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}}
-        self.app.routing = replace(self.app.routing, windows=w)
+        w = {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}
+        self.app.routing = replace(self.app.routing, downstreams=(replace(self.app.routing.downstreams[0], windows=w),))
         self.app.prices.set_valar({"VS": {"priority": [1.0, 0.5, 2.0]}})
         self.post(msg("priced turn", "claude-opus-5-5"))
         r = self.pairs(1)[0]
