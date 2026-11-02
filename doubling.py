@@ -130,9 +130,7 @@ class Doubler:
         self.turns = {}  # turn_key -> [turn_id | None, last_seen, steps, recorded]
         self.by_id = {}  # turn_id -> same entry
         self.pending = {}  # request_id -> PairHandle, until start_shadow takes it
-        self.caps = {"anthropic": threading.BoundedSemaphore(2), "valar": threading.BoundedSemaphore(2),
-                     "local": threading.BoundedSemaphore(1)}
-        self.inflight = {"anthropic": 0, "valar": 0, "local": 0}
+        self.caps, self.inflight = {}, {}  # track -> BoundedSemaphore(2) / running shadows; made on first use
 
     def turn_for(self, f, served_track: str, d, session_id=None) -> str | None:
         if d.rate <= 0 or (d.tag and d.tag.lower() not in f.tags):
@@ -167,20 +165,21 @@ class Doubler:
             h = self.pending[request_id] = PairHandle(self.store, turn_id, request_id, step, served_track, shadow_track)
         return h
 
-    def start_shadow(self, turn_id, request_id, f, served_track, method, path, headers, body, cfg, routing) -> str:
+    def start_shadow(self, turn_id, request_id, f, served_track, method, path, headers, body, app) -> str:
         """Starts the shadow in a daemon thread; returns its track, or "busy" when that direction is full."""
         with self.lock:
             h = self.pending.pop(request_id)  # pending_served always comes first
-        track = h.row["shadow_track"]
-        if not self.caps[track].acquire(blocking=False):
+            track = h.row["shadow_track"]
+            cap = self.caps.setdefault(track, threading.BoundedSemaphore(2))
+        if not cap.acquire(blocking=False):
             h.shadow({"skipped": "busy", "status": None, "ttfb_ms": None, "ms": None, "error": None,
                       "text": "", "tools": [], "output_tokens": None})
             return "busy"
         with self.lock:
-            self.inflight[track] += 1
+            self.inflight[track] = self.inflight.get(track, 0) + 1
         headers = list(headers)  # credentials stay in memory only, in this thread
         try:
-            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, cfg, routing), daemon=True).start()
+            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, app), daemon=True).start()
         except Exception as e:  # e.g. can't start new thread: give the slot back, the served request goes on
             self._release(track)
             h.shadow({"skipped": "error", "status": None, "ttfb_ms": None, "ms": None, "error": type(e).__name__,
@@ -193,23 +192,22 @@ class Doubler:
             self.inflight[track] -= 1
         self.caps[track].release()
 
-    def _run(self, h, track, method, path, headers, body, cfg, routing):
+    def _run(self, h, track, method, path, headers, body, app):
         from claude_router import HOP, hoist_inline_tools, upstream, upstream_headers  # late: claude_router imports this module
-        from routing import downstream, track_model, track_window
+        from routing import track_model, track_window
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
         model_out, window = None, None
         try:
             req = json.loads(body)
             req["stream"] = False
             headers = [(k, v) for k, v in headers if k.lower() != "accept-encoding"]  # identity, so it can be read
-            name, _, key = upstream(cfg, track)
+            name, base, key, ds = upstream(app, track)
             if track != "anthropic":
                 if not key:
-                    raise NotConfigured("%s not configured" % name)
+                    raise NotConfigured("%s has no key" % name)
                 model_in = str(req.get("model", ""))
-                ds = downstream(routing, track)
                 req["model"] = track_model(model_in, ds)
-                if track == "valar":
+                if ds.kind == "valar":
                     hoist_inline_tools(req)
                 headers = upstream_headers(headers, key)
                 window = track_window(model_in, ds)
@@ -219,7 +217,7 @@ class Doubler:
             else:
                 headers = [(k, v) for k, v in headers if k.lower() not in HOP]
             model_out = str(req.get("model", ""))
-            conn, resp = self.open_upstream(cfg, track, method, path, headers, json.dumps(req).encode())
+            conn, resp = self.open_upstream(base, method, path, headers, json.dumps(req).encode())
             out["ttfb_ms"], out["status"] = int((time.time() - t0) * 1000), resp.status
             cap = AnswerCapture(resp.getheader("content-type", ""), resp.getheader("content-encoding", ""))
             cap.feed(resp.read())

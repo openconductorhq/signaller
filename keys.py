@@ -36,22 +36,23 @@ class Keys:
         return bool(self.keys.get(id))
 
     def set(self, id: str, key: str) -> None:
-        self._save({**self.keys, id: key})
+        with self.lock:  # build inside the lock: two concurrent sets must both land
+            self._save({**self.keys, id: key})
 
     def delete(self, id: str) -> None:
-        self._save({k: v for k, v in self.keys.items() if k != id})
-
-    def _save(self, keys: dict) -> None:
         with self.lock:
-            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path))  # 0600 from the start
-            try:
-                with os.fdopen(fd, "w") as f:
-                    json.dump(keys, f)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp, self.path)
-            except BaseException:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
-                raise
-            self.keys = keys
+            self._save({k: v for k, v in self.keys.items() if k != id})
+
+    def _save(self, keys: dict) -> None:  # caller holds self.lock
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path))  # 0600 from the start
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(keys, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        self.keys = keys

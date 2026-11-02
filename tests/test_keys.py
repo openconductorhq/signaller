@@ -1,5 +1,6 @@
 import os
 import tempfile
+import threading
 import unittest
 
 from keys import Keys
@@ -29,3 +30,9 @@ class KeysTest(unittest.TestCase):
             self.assertEqual(Keys(self.d).get("a"), "")
             self.assertTrue(os.path.exists(self.p + ".bad"))
             self.assertFalse(os.path.exists(self.p))
+
+    def test_concurrent_sets_all_land(self):
+        k = Keys(self.d)
+        ts = [threading.Thread(target=k.set, args=("id%d" % i, "k%d" % i)) for i in range(20)]
+        [t.start() for t in ts]; [t.join() for t in ts]
+        self.assertEqual(len(Keys(self.d).keys), 20)

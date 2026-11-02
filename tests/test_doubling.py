@@ -16,7 +16,7 @@ import claude_router
 from claude_router import App, Config, make_server
 from doubling import AnswerCapture, Doubler
 from routing import DEFAULT_CONFIG, Doubling, Features
-from tests.test_proxy import CLASSIFIER_OFF, HDRS
+from tests.test_proxy import CLASSIFIER_OFF, HDRS, LEMMI
 
 SHADOW = DEFAULT_CONFIG.doubling.shadow
 
@@ -320,6 +320,21 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(self.a.seen[0][1]["Authorization"], HDRS["Authorization"])
         self.assertEqual(self.l.seen, [])
 
+    def test_shadow_to_generic_downstream(self):
+        self.app.keys.set("lemmi", "LK")
+        r = self.app.routing
+        self.app.routing = replace(r, downstreams=r.downstreams + (replace(LEMMI, url=self.l.url),),
+                                   doubling=replace(r.doubling, shadow={"anthropic": "lemmi", "valar": None, "lemmi": None}))
+        self.post(msg("served anthropic"))
+        r = self.pairs(1)[0]
+        self.assertEqual((r["served_track"], r["shadow_track"], r["shadow"]["text"]), ("anthropic", "lemmi", "Hi"))
+        _, h, req = self.l.seen[0]
+        self.assertEqual(h.get_all("Authorization"), ["Bearer LK"])
+        self.assertIsNone(h.get("X-Valar-Completion-Window"))
+        self.assertEqual((req["model"], req["stream"]), ("deepseek-v4.1-flash", False))
+        self.assertEqual(self.v.seen, [])
+        self.assertEqual(self.app.doubler.active()["lemmi"], 0)
+
     def test_shadow_none_means_off(self):
         self.app.routing = self.doubling(shadow={**SHADOW, "valar": None})
         self.post(msg("sonnet turn", "claude-sonnet-5-5"))
@@ -360,7 +375,7 @@ class DoublingTest(unittest.TestCase):
         self.srv.server_close()
         self.start(valar_key="")
         self.post(msg("no key"))
-        self.assertEqual(self.pairs(1)[0]["shadow"]["error"], "Valar not configured")
+        self.assertEqual(self.pairs(1)[0]["shadow"]["error"], "Valar has no key")
         self.assertEqual(self.v.seen, [])
 
     def test_gzipped_shadow_and_served_captured(self):
@@ -402,7 +417,7 @@ class DoublingTest(unittest.TestCase):
             self.assertEqual(self.post(msg("no threads")), (200, SSE))
         r = self.pairs(1)[0]
         self.assertEqual(r["shadow"]["skipped"], "error")
-        self.assertEqual(self.app.doubler.active(), {"anthropic": 0, "valar": 0, "local": 0})
+        self.assertEqual(self.app.doubler.active(), {"valar": 0})
         self.post(msg("no threads"))  # the slot came back: next step really goes out
         self.assertEqual(self.pairs(2)[1]["shadow"]["text"], "Hi")
 

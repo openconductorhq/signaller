@@ -1,4 +1,4 @@
-"""claude-router: route Claude Code requests to Anthropic, Valar or a local LiteLLM."""
+"""claude-router: route Claude Code requests to Anthropic or one of the downstreams set up in the console."""
 import collections
 import http.client
 import http.server
@@ -12,8 +12,7 @@ import struct
 import sys
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
@@ -23,7 +22,7 @@ from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from prices import Prices, parse_valar
-from routing import session_of, Features, RoutingConfig, downstream, is_routed, route as decide_route, track_model, track_window
+from routing import session_of, Downstream, Features, RoutingConfig, downstream, is_routed, route as decide_route, track_model, track_window
 from keys import Keys
 from store import NullStore, Store, load_console_config, save_console_config
 
@@ -33,7 +32,6 @@ class Config:
     listen_port: int
     anthropic_url: str
     env_valar: tuple[str, str] = ("", "")  # (VALAR_URL, VALAR_API_KEY): read once, by App.seed
-    resolve: Callable[[str], tuple[str, str, str]] | None = field(default=None, compare=False, repr=False)  # set by App
 
 
 def load_config(env: Mapping[str, str]) -> Config:
@@ -66,15 +64,17 @@ MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_erro
                  b'"message":"claude-router: upstream ended mid-stream"}}\n\n')
 
 
-def upstream(cfg: Config, track: str) -> tuple[str, str, str]:
-    """(display name, base url, key) of a track; anthropic has no key of ours."""
-    if track == "anthropic" or not cfg.resolve:
-        return "Anthropic", cfg.anthropic_url, ""
-    return cfg.resolve(track)
+def upstream(app: "App", track: str) -> tuple[str, str, str, Downstream | None]:
+    """(display name, base url, key, downstream) of a track, from the live config and keys; anthropic has no key of ours.
+    A track no longer configured comes back keyless, so it fails as "no key" rather than going anywhere else."""
+    if track == "anthropic":
+        return "Anthropic", app.cfg.anthropic_url, "", None
+    ds = downstream(app.routing, track)
+    return (ds.name, ds.url, app.keys.get(track), ds) if ds else (track, "", "", None)
 
 
 def upstream_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple[str, str]]:
-    """Client headers for Valar/LiteLLM: no client credentials, no oauth beta, our key."""
+    """Client headers for a downstream: no client credentials, no oauth beta, our key."""
     out = []
     for k, v in headers:
         lk = k.lower()
@@ -115,7 +115,7 @@ def hoist_inline_tools(req: dict) -> bool:
 RETRY_DELAYS = (0.5, 1.5, 3)  # seconds before each retry of a connection failure (~5 s of blips covered)
 
 
-def open_upstream(cfg: Config, track: str, method: str, path: str, headers, body: bytes):
+def open_upstream(base: str, method: str, path: str, headers, body: bytes):
     """Like _open_upstream, retrying connection failures (DNS, refused, reset before a response).
     Nothing has reached the client yet, so a retry is invisible to it. Timeouts are not retried: one already
     waited UPSTREAM_TIMEOUT."""
@@ -124,16 +124,16 @@ def open_upstream(cfg: Config, track: str, method: str, path: str, headers, body
     headers = [(k, v) for k, v in headers if k.lower() != "accept-encoding"]
     for delay in RETRY_DELAYS + (None,):
         try:
-            return _open_upstream(cfg, track, method, path, headers, body)
+            return _open_upstream(base, method, path, headers, body)
         except (OSError, http.client.HTTPException) as e:
             if delay is None or isinstance(e, TimeoutError):
                 raise
             time.sleep(delay)
 
 
-def _open_upstream(cfg: Config, track: str, method: str, path: str, headers, body: bytes):
-    """Send the request as given to the track's base URL; returns (conn, resp). Raises OSError/HTTPException."""
-    u = urlsplit(upstream(cfg, track)[1])
+def _open_upstream(base: str, method: str, path: str, headers, body: bytes):
+    """Send the request as given to a base URL; returns (conn, resp). Raises OSError/HTTPException."""
+    u = urlsplit(base)
     Conn = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
     conn = Conn(u.hostname, u.port, timeout=UPSTREAM_TIMEOUT)
     try:
@@ -159,8 +159,7 @@ class App:
         self.session_levers = {}  # session id -> lever /router chose for that session only
         self.keys = Keys(config_dir)
         self.seed()
-        cfg.resolve = self._resolve
-        self.classifier = Classifier({d.id: (d.url, self.keys.get(d.id)) for d in self.routing.downstreams})
+        self.classifier = Classifier(self._classifier_upstream)
         try:
             self.store = Store(os.path.join(config_dir, "stats.db"))
         except (OSError, sqlite3.Error) as e:  # broken stats must never cost Claude Code its router
@@ -173,9 +172,9 @@ class App:
         self.prices = Prices(config_dir)
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
 
-    def _resolve(self, track: str) -> tuple[str, str, str]:
-        ds = downstream(self.routing, track)
-        return (ds.name, ds.url, self.keys.get(track)) if ds else (track, "", "")
+    def _classifier_upstream(self, id: str) -> tuple[str, str, str] | None:
+        _, url, key, ds = upstream(self, id)
+        return (url, key, ds.kind) if ds else None
 
     def seed(self) -> None:
         """First start only: Valar's url and key from the environment. Later starts ignore it, so a deleted Valar stays deleted."""
@@ -191,7 +190,7 @@ class App:
 
     def refresh_valar_prices(self) -> None:
         """Fetch Valar's prices, keep them in memory and models.json, and price rows that were waiting. Never raises."""
-        _, url, key = upstream(self.cfg, "valar")
+        _, url, key, _ = upstream(self, "valar")
         if not key:
             return
         try:
@@ -254,7 +253,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 return self._error(404, "not found")
             t0 = time.time()
             body = self.rfile.read(int(self.headers.get("content-length") or 0))
-            # browsers (cross-origin) and DNS rebinding must not reach the injected Valar/LiteLLM keys
+            # browsers (cross-origin) and DNS rebinding must not reach the injected downstream keys
             if "origin" in self.headers or not LOOPBACK_HOST_RE.fullmatch(self.headers.get("host", "")):
                 self._error(403, "claude-router: forbidden origin/host")
                 print("%s route=- reason=forbidden status=403 shadow=-" % time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -295,15 +294,14 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 if turn_id:  # shadow starts before the served upstream; it never touches the served path again
                     pair = app.doubler.pending_served(turn_id, rid, None, route, routing.doubling.shadow[route])
                     shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
-                                                      self.headers.items(), body, cfg, routing)
+                                                      self.headers.items(), body, app)
             except Exception as e:
                 print("doubling failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
                 pair, shadow, turn_id = None, "-", None
-            name, base, key = upstream(cfg, route)
-            if route != "anthropic":
-                ds = downstream(routing, route)
+            name, base, key, ds = upstream(app, route)
+            if ds:
                 out_model = track_model(model, ds)
-                hoisted = route == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
+                hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
                 if out_model != model or hoisted:
                     req["model"] = out_model
                     body = json.dumps(req).encode()
@@ -319,10 +317,10 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             try:
                 if route != "anthropic" and not key:  # never fall back to another track
                     status = 502
-                    self._error(502, "claude-router: %s not configured (no key set)" % name)
+                    self._error(502, "claude-router: %s has no key; set it in the console" % name)
                     return
                 try:
-                    conn, resp = open_upstream(cfg, route, self.command, self.path, headers, body)
+                    conn, resp = open_upstream(base, self.command, self.path, headers, body)
                     ttfb = int((time.time() - t0) * 1000)
                 except (OSError, http.client.HTTPException) as e:
                     status = 502

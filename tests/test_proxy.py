@@ -14,10 +14,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import claude_router
 from claude_router import App, Config, make_server, upstream_headers
-from classifier import Classifier
-from routing import DEFAULT_CONFIG
+from routing import DEFAULT_CONFIG, Downstream
 
 VALAR = replace(DEFAULT_CONFIG.downstreams[0], models={"fable": "VS", "opus": "VS", "sonnet": "VS", "haiku": "VH"})
+LEMMI = Downstream("lemmi", "Lemmi", "", "generic", dict.fromkeys(("fable", "opus", "sonnet", "haiku"), "deepseek-v4.1-flash"), "#888888")
 BASE = replace(DEFAULT_CONFIG, downstreams=(VALAR,))
 CLASSIFIER_OFF = replace(BASE, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in BASE.rules))
 
@@ -114,13 +114,11 @@ class ProxyTest(unittest.TestCase):
         self.a, self.v, self.l = Fake(), Fake(), Fake()
         self.start(self.l.url)
 
-    def start(self, litellm_url, classifier_url=None, valar_key="VK"):
+    def start(self, litellm_url, valar_key="VK"):
         self.dir = tempfile.mkdtemp()
         cfg = Config("127.0.0.1", 0, self.a.url, (self.v.url, valar_key))
         self.app = App(cfg, self.dir)
         self.app.routing = replace(CLASSIFIER_OFF, downstreams=(replace(VALAR, url=self.v.url),))
-        if classifier_url:
-            self.app.classifier = Classifier({"valar": (classifier_url, "VK")})
         self.srv = make_server(cfg, self.app)
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.port = self.srv.server_address[1]
@@ -220,13 +218,53 @@ class ProxyTest(unittest.TestCase):
         self.post(body)
         self.assertEqual(self.a.seen[0][3], body)  # never on the Anthropic route
 
+    def test_generic_downstream_passthrough(self):
+        self.app.keys.set("lemmi", "LK")  # after start: keys are read per request
+        self.app.routing = replace(self.app.routing, lever="lemmi",
+                                   downstreams=self.app.routing.downstreams + (replace(LEMMI, url=self.l.url),))
+        t = {"name": "late", "input_schema": {"type": "object"}}
+        add = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": t}}
+        msgs = [{"role": "user", "content": "hi"}, {"role": "system", "content": [add]}]
+        self.assertEqual(self.post(body_for("claude-opus-5-5", {"messages": msgs}))[0], 200)
+        _, _, h, got = self.l.seen[0]
+        self.assertEqual(h["Authorization"], "Bearer LK")
+        self.assertIsNone(h["X-Valar-Completion-Window"])
+        j = json.loads(got)
+        self.assertEqual(j["model"], "deepseek-v4.1-flash")
+        self.assertEqual(j["messages"], msgs)  # no Valar hoisting on a generic downstream
+        self.assertEqual(self.a.seen + self.v.seen, [])
+        self.logged()
+        self.assertIn("route=lemmi", self.err.getvalue())
+
+    def test_valar_kind_keeps_window_and_hoist(self):  # Valar extras follow kind, not the id "valar"
+        w = {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}
+        fast = replace(VALAR, id="fast", name="Fast", url=self.v.url, windows=w)
+        self.app.keys.set("fast", "FK")
+        self.app.routing = replace(self.app.routing, lever="fast", downstreams=(fast,))
+        t = {"name": "late", "input_schema": {"type": "object"}}
+        add = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": t}}
+        msgs = [{"role": "user", "content": "hi"}, {"role": "system", "content": [add]}]
+        self.post(body_for("claude-sonnet-5-5", {"messages": msgs}))
+        _, _, h, got = self.v.seen[0]
+        self.assertEqual((h["Authorization"], h.get_all("X-Valar-Completion-Window")), ("Bearer FK", ["standard"]))
+        self.assertEqual(json.loads(got)["messages"], [{"role": "user", "content": "hi"}])
+        self.assertEqual(json.loads(got)["tools"], [t])
+
+    def test_no_key_502_names_downstream(self):
+        self.app.routing = replace(self.app.routing, lever="lemmi",
+                                   downstreams=self.app.routing.downstreams + (replace(LEMMI, url=self.l.url),))
+        status, data = self.post(body_for("claude-sonnet-5-5"))
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Lemmi has no key; set it in the console")
+        self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
+
     def test_valar_not_configured_502(self):
         self.srv.shutdown()
         self.srv.server_close()
         self.start(self.l.url, valar_key="")
         status, data = self.post(body_for("claude-sonnet-5-5"))
         self.assertEqual(status, 502)
-        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Valar not configured (no key set)")
+        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Valar has no key; set it in the console")
         self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
 
     def test_valar_down_502(self):
@@ -272,8 +310,10 @@ class ProxyTest(unittest.TestCase):
         self.addCleanup(lambda: (slow.shutdown(), slow.server_close()))
         self.srv.shutdown()
         self.srv.server_close()
-        self.start(self.l.url, slow.url)
-        self.app.routing = replace(BASE, downstreams=(replace(VALAR, url=self.v.url),), classifier=replace(BASE.classifier, timeout_s=0.2))
+        self.start(self.l.url)
+        self.app.keys.set("cls", "CK")
+        self.app.routing = replace(BASE, downstreams=(replace(VALAR, url=self.v.url), replace(LEMMI, id="cls", url=slow.url)),
+                                   classifier=replace(BASE.classifier, timeout_s=0.2, upstream="cls"))
         t = time.time()
         self.assertEqual(self.post(body_for("claude-sonnet-5-5"))[0], 200)
         self.assertLess(time.time() - t, 0.5)
@@ -535,7 +575,7 @@ class RetryTest(unittest.TestCase):
         with mock.patch.object(claude_router, "_open_upstream", fake), \
                 mock.patch.object(claude_router, "RETRY_DELAYS", (0, 0, 0)):
             try:
-                return claude_router.open_upstream(None, "valar", "POST", "/v1/messages", iter([("h", "v")]), b"{}"), calls
+                return claude_router.open_upstream("http://v", "POST", "/v1/messages", iter([("h", "v")]), b"{}"), calls
             except Exception as e:
                 return e, calls
 
@@ -543,7 +583,7 @@ class RetryTest(unittest.TestCase):
         out, calls = self.run_with(ConnectionRefusedError(), ConnectionResetError(), ("conn", "resp"))
         self.assertEqual(out, ("conn", "resp"))
         self.assertEqual(len(calls), 3)
-        self.assertEqual(calls[2][4], [("h", "v")])  # headers survive retries even when given as an iterator
+        self.assertEqual(calls[2][3], [("h", "v")])  # headers survive retries even when given as an iterator
 
     def test_gives_up_after_three_retries(self):
         out, calls = self.run_with(*[ConnectionRefusedError()] * 4)

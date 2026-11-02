@@ -142,7 +142,7 @@ def state(app, query=None):
     if t0 is None:  # whole session
         t0 = app.store.first_ts(ids)
     def up(t):
-        _, url, key = upstream(app.cfg, t)
+        _, url, key, _ = upstream(app, t)
         return {"url": urlsplit(url).netloc, "configured": bool(key)}
     c = app.cfg
     return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()),
@@ -162,7 +162,7 @@ def api(h, app, method, path, query, body):
         t = (query.get("track") or [""])[0]
         if t not in ("valar", "local"):
             raise Err(400, "track must be valar or local")
-        name, url, key = upstream(app.cfg, t)
+        name, url, key, _ = upstream(app, t)
         saved = read_models(app.config_dir)
         try:
             if not key:
