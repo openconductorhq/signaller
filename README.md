@@ -111,8 +111,9 @@ without a model turn, and puts `router: <mode> (this session|global)` in the
 status line (checked every 15 s). Other sessions keep the console's lever. A
 session's own lever lives in the router's memory, so a router restart drops it.
 Claude can switch it too, through the plugin's `router_lever` tool, but only
-when your latest message says `/router <mode>` ("do /router anthropic");
-otherwise the switch is refused. It talks to the console
+when you typed `/router <mode>` in a message ("do /router anthropic", or a plan
+with "/router rules" at a later step). Each one you type allows one switch to
+that mode; anything else is refused. It talks to the console
 API (`/ui/api/lever`) on `127.0.0.1:8787`. Install:
 
 ```

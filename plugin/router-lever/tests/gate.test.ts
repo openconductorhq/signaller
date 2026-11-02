@@ -20,13 +20,17 @@ test('Claude switches the lever only when the latest prompt asks for it', async 
 
   await $.prompt.submit({ text: 'please simplify this file' })
   expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')  // never asked
-  expect((await $.tool.call({ tool: TOOL })).deny).toBeUndefined()               // reading is fine
+  expect((await $.tool.call({ tool: TOOL })).deny).toBeUndefined()                               // reading is fine
 
   await $.prompt.submit({ text: "switch the router to anthropic, don't use valar" })  // no "/router <mode>"
   expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toContain('Not switching')
 
-  await $.prompt.submit({ text: 'do /router anthropic then /simplify' })
-  expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')  // asked for a different mode
+  // a multi-step plan: each /router allows one switch, and a later prompt doesn't erase them
+  await $.prompt.submit({ text: 'step 1: /router anthropic and /simplify. step 3: /router rules, then re-review' })
+  await $.prompt.submit({ text: 'looks good, go on' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')  // never typed
   expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toBeUndefined()
-  expect(puts).toEqual([JSON.stringify({ session: 's1', lever: 'anthropic' })])
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toContain('Not switching')  // used up
+  expect((await $.tool.call({ tool: TOOL, lever: 'rules' })).deny).toBeUndefined()
+  expect(puts).toEqual([JSON.stringify({ session: 's1', lever: 'anthropic' }), JSON.stringify({ session: 's1', lever: 'rules' })])
 })
