@@ -110,7 +110,10 @@ clears it; kept in `stats.db`), answered
 without a model turn, and puts `router: <mode> (this session|global)` in the
 status line (checked every 15 s). Other sessions keep the console's lever. A
 session's own lever lives in the router's memory, so a router restart drops it.
-It talks to the console API (`/ui/api/lever`) on `127.0.0.1:8787`. Install:
+Claude can switch it too, through the plugin's `router_lever` tool, but only
+when your latest message says `/router <mode>` ("do /router anthropic");
+otherwise the switch is refused. It talks to the console
+API (`/ui/api/lever`) on `127.0.0.1:8787`. Install:
 
 ```
 /plugin install router-lever --marketplace wilfoa/claude-router
