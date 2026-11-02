@@ -3,10 +3,10 @@ import type { EngineInterface, Register } from 'claude-code'
 const BASE = 'http://127.0.0.1:8787'
 const LEVER = `${BASE}/ui/api/lever`
 const NAME = `${BASE}/ui/api/name`
-const MODES = ['rules', 'valar', 'anthropic', 'local']
+let MODES = ['rules', 'anthropic'] // the router's list, refreshed by every lever answer
 const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the console takes writes from its own origin only
 
-type Lever = { lever: string; session: string | null; global: string }
+type Lever = { lever: string; session: string | null; global: string; modes?: string[] }
 
 // this session's lever: its own if /router set one, else the router's global one
 const lever = async ($: EngineInterface, set?: { lever: string | null }): Promise<Lever> => {
@@ -15,7 +15,9 @@ const lever = async ($: EngineInterface, set?: { lever: string | null }): Promis
     ? await $.http.fetch(LEVER, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ session, ...set }) })
     : await $.http.fetch(`${LEVER}?session=${encodeURIComponent(session)}`)
   if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
-  return JSON.parse(r.text)
+  const l: Lever = JSON.parse(r.text)
+  if (Array.isArray(l.modes) && l.modes.length) MODES = l.modes
+  return l
 }
 
 // what the router console calls this session; empty clears it
@@ -30,11 +32,10 @@ const rename = async ($: EngineInterface, name: string): Promise<string | null> 
 // prompt (e.g. a multi-step plan), allows Claude one switch to that mode. Later prompts don't erase it.
 // Kept in memory; a reload forgets them, which only denies.
 const granted: string[] = []
-const GRANT = /(?:^|\s)\/router\s+([a-z]+)\b/gi
+const GRANT = /(?:^|\s)\/router\s+([a-z0-9_-]+)/gi
 const grant = (text: string) => {
   for (const m of text.matchAll(GRANT)) {
-    const mode = m[1]!.toLowerCase()
-    if (mode === 'reset' || MODES.includes(mode)) granted.push(mode)
+    granted.push(m[1]!.toLowerCase()) // checked against the router's modes when used: they may not be known yet
   }
 }
 const use = (want: string) => {
@@ -50,7 +51,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'router',
       description: "Show or switch this session's claude-router mode; reset goes back to the global one; name <text> labels it in the console",
-      argumentHint: '[rules|valar|anthropic|local|reset|name <text>]',
+      argumentHint: '[mode|reset|name <text>]',
       immediate: true,
     })
     // the same switch for Claude itself: mcp__router-lever__router_lever
@@ -58,12 +59,12 @@ export const register: Register = on => {
       name: 'router_lever',
       description:
         "Show or switch claude-router's lever for this Claude Code session (its subagents follow). " +
-        'lever: rules (follow the rulebook), anthropic, valar or local (send everything there), reset (back to the global lever); omit it to only read the current one. ' +
+        'lever: rules (follow the rulebook), anthropic, or a downstream id (send everything there), reset (back to the global lever); omit it to only read the current one. ' +
         'Never switch on your own initiative: only when the person tells you to with "/router <mode>" in a message (e.g. "do /router anthropic", or a plan with "/router rules" at a later step). ' +
         'Each "/router <mode>" they typed allows one switch to that mode; others are refused.',
       inputSchema: {
         type: 'object',
-        properties: { lever: { type: 'string', enum: [...MODES, 'reset'] } },
+        properties: { lever: { type: 'string' } },
         additionalProperties: false,
       },
       isDeferred: false,

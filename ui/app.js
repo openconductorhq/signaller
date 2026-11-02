@@ -1,24 +1,32 @@
 "use strict";
 // claude-router cockpit: polls the JSON API once a second and edits the routing config as a whole.
 const $ = (id) => document.getElementById(id);
-const TRACKS = ["anthropic", "valar", "local"];
-const NAME = { anthropic: "Anthropic", valar: "Valar", local: "Local" };
-const C = { anthropic: "a", valar: "v", local: "l" };  // colour class letter per track
-const UP = { valar: "Valar", local: "LiteLLM" }, KEY = { valar: "VALAR_API_KEY", local: "LITELLM_API_KEY" };
+// Tracks: Anthropic (fixed) then the config's downstreams; a track id seen in history but no longer configured is "removed".
+const DS = () => (cfg ? cfg.downstreams : []);
+const dsOf = (t) => DS().find((d) => d.id === t);
+const TRACKS = () => ["anthropic", ...DS().map((d) => d.id)];
+const gone = (t) => t !== "anthropic" && !dsOf(t);
+const NAME = (t) => t === "anthropic" ? "Anthropic" : dsOf(t) ? dsOf(t).name : t;
+const label = (t) => NAME(t) + (gone(t) ? ", removed" : "");
+// Each track's colour reaches CSS as --c on its elements.
+const col = (t) => t === "anthropic" ? "var(--anth)" : dsOf(t) ? dsOf(t).color : "var(--off)";
+const cv = (t) => "--c:" + col(t);
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
 
+const SVG = new Set(["circle", "path", "text", "tspan"]);
 function el(tag, attrs, ...kids) {
-  const e = tag === "circle" ? document.createElementNS($("yard").namespaceURI, tag) : document.createElement(tag);
+  const e = SVG.has(tag) ? document.createElementNS($("yard").namespaceURI, tag) : document.createElement(tag);
   for (const [k, v] of Object.entries(attrs || {})) {
     if (v == null || v === false) continue;
     if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
     else if (k === "class") e.setAttribute("class", v);
+    else if (k === "style") { const [p, x] = v.split(/:(.*)/); e.style.setProperty(p, x); }  // CSSOM: the page's CSP blocks style attributes
     else e.setAttribute(k, v === true ? "" : String(v));
   }
   for (const c of kids.flat()) if (c != null && c !== false) e.append(c instanceof Node ? c : String(c));
   return e;
 }
-const trk = (t, lower) => el("span", { class: "to-" + C[t] }, lower && t === "local" ? "local" : NAME[t]);
+const trk = (t) => el("span", { class: "to", style: cv(t) }, label(t));
 
 async function api(method, path, body, ms = 5000) {
   const opt = { method, headers: {}, signal: AbortSignal.timeout(ms) };  // a stalled fetch must not stop polling
@@ -44,7 +52,7 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 // What a request cost, for a departure or a side-by-side card; null when there's nothing to say.
 function priced(track, cost, api) {
   if (track === "anthropic") return api != null ? usd(api) + " at API prices" : null;
-  if (cost == null) return track === "valar" ? "unpriced" : null;
+  if (cost == null) return "unpriced";
   return usd(cost) + (api != null ? ` (would be ${usd(api)} on Anthropic)` : "");
 }
 
@@ -179,14 +187,9 @@ function applyState(st) {
   $("who").textContent = `${st.listen} · up ${fmtUp(st.uptime_s)}`;
   $("errs").hidden = !s.errors_last_hour;
   $("errs").textContent = `${s.errors_last_hour} error${s.errors_last_hour === 1 ? "" : "s"} in the last hour`;
-  const m = st.summary, tr = m.tracks, none = !m.total, span = spanText();
-  $("pctA").textContent = none ? "–" : tr.anthropic.pct + "%";
-  $("pctV").textContent = none ? "–" : tr.valar.pct + "%";
-  $("pctL").textContent = none ? "–" : tr.local.pct + "%";
+  const m = st.summary, span = spanText();
   $("share").textContent = (view.span === "custom" ? "share of " : "share of the ") + span;
   $("cc").textContent = view.pick.length ? "Claude Code · " + plural(view.pick.length, "session") : "Claude Code";
-  $("yard").setAttribute("aria-label", none ? `Live traffic: no requests in the ${span}`
-    : `Live traffic: ${tr.anthropic.pct}% Anthropic, ${tr.valar.pct}% Valar, ${tr.local.pct}% local in the ${span}`);
   renderMoney(m, view.span === "whole" ? "" : " · " + span);
   renderCounts(m);
   const pm = m.per_minute;
@@ -198,19 +201,34 @@ function applyState(st) {
   const f = document.activeElement;
   const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }
-  if (cfg) keepFocus(renderLever);  // a session's lever can change from /router at any time
+  if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /router at any time
+}
+// Downstream POST/DELETE/key PUT change the config on the server: reload it (even after an error or a timeout),
+// so the next config PUT starts from it, and let the touched downstream's models load afresh.
+async function dsCall(method, path, body, id) {
+  let r, err = null;
+  try { r = await api(method, path, body, 15000); } catch (e) { err = e; }  // POST probes the url first: up to 5 s
+  ASKED.delete(id); delete MODELS[id]; delete WARN[id];
+  const st = await api("GET", "state" + qs(sessQ(), spanQ()));
+  applyState(st);
+  cfg = st.config;
+  renderConfig(true);
+  if (err) throw err;
+  return r;
 }
 
+// Anthropic, one card per downstream (and per removed one with rows in the span), then the savings over all of them.
 function renderMoney(m, sfx) {
-  const t = m.tracks, io = (x) => `${tok(x.in)} in / ${tok(x.out)} out`, v = t.valar;
+  const t = m.tracks, io = (x) => `${tok(x.in)} in / ${tok(x.out)} out`, ds = Object.keys(t).filter((k) => k !== "anthropic");
+  $("money").style.setProperty("--cols", ds.length <= 3 ? `repeat(${ds.length + 1},minmax(0,1fr)) 1.3fr` : "repeat(4,minmax(0,1fr))");
+  $("money").replaceChildren($("money").firstElementChild, ...ds.map((k) => { const v = t[k]; return el("div", { class: "mcell", style: cv(k) },
+    el("div", { class: "k" }, label(k), el("span", { class: "sfx" })), el("div", { class: "n" }, usd(v.cost + v.comparisons)),
+    el("div", { class: "t" }, [io(v), v.unpriced > 0 && "partly unpriced", v.comparisons > 0 && `incl. ${usd(v.comparisons)} comparisons`].filter(Boolean).join(" · "))); }), $("mcS"));
   for (const e of document.querySelectorAll("#money .sfx")) e.textContent = sfx;
   $("nA").textContent = usd(t.anthropic.api_cost);
   $("mA").textContent = io(t.anthropic);
-  $("nV").textContent = usd(v.cost + v.comparisons);
-  $("mV").textContent = [io(v), v.unpriced > 0 && "partly unpriced", v.comparisons > 0 && `incl. ${usd(v.comparisons)} comparisons`].filter(Boolean).join(" · ");
-  $("mL").textContent = io(t.local);
   $("nS").textContent = "≈ " + usd(m.savings);
-  $("mS").textContent = `Valar + local would have cost ${usd(m.saved_would)}`;
+  $("mS").textContent = `${ds.map(NAME).join(" + ") || "Downstreams"} would have cost ${usd(m.saved_would)}`;
 }
 // "decided N of M" under each rule and Otherwise, for the picked sessions and span
 function renderCounts(m) {
@@ -245,18 +263,18 @@ function renderConfig(force) {
   const key = JSON.stringify(cfg);
   if (!cfg || (key === rendered && !force)) return;
   rendered = key;
-  keepFocus(() => { renderLever(); renderTracks(); renderRules(); renderOtherwise(); renderStrip(); });
+  keepFocus(() => { renderYard(); renderLever(); renderTracks(); renderRules(); renderOtherwise(); renderStrip(); });
 }
 
-/* lever */
-const leverBtns = [...document.querySelectorAll("#lever .lever")];
+/* lever: Anthropic, Rules, then one button per downstream */
+const leverBtns = () => [...$("lever").querySelectorAll(".lever")];
 // One picked session: the lever shows and sets that session's own lever (/router), falling back to the global one.
 const oneSess = () => view.pick.length === 1 && view.pick[0] !== "unknown" ? view.pick[0] : null;
 const ownLever = () => { const id = oneSess(); return id && S && S.session_levers ? S.session_levers[id] || null : null; };
 const curLever = () => ownLever() || cfg.lever;
 function renderLever() {
   const lv = curLever(), id = oneSess(), own = ownLever();
-  for (const b of leverBtns) {
+  for (const b of leverBtns()) {
     const on = b.dataset.v === lv;
     b.setAttribute("aria-checked", String(on));
     b.tabIndex = on ? 0 : -1;
@@ -264,17 +282,21 @@ function renderLever() {
   const off = lv !== "rules";
   $("rulebook").classList.toggle("dim", off);
   $("leverNote").hidden = !off;
-  $("leverNote").className = "levernote " + lv;
-  $("leverNote").textContent = off ? `The lever is sending ${id ? "this session" : "everything"} to ${NAME[lv]}` : "";
-  $("yard").parentNode.className = "yard lev-" + lv;
+  $("leverNote").style.color = off ? col(lv) : "";
+  $("leverNote").textContent = off ? `The lever is sending ${id ? "this session" : "everything"} to ${NAME(lv)}` : "";
+  for (const [t, y] of Object.entries(YARD)) y.trk.classList.toggle("dim", off && t !== lv);
   $("jlabel").textContent = off ? "lever" : "rulebook";
   if (!offTrack(lv)) $("localWarn").hidden = true;
   const sc = $("leverScope");
   if (!id) sc.replaceChildren("Lever for ", el("b", {}, "all sessions"));
-  else sc.replaceChildren("Lever for ", el("b", {}, fullLabel(id)), own ? " · its own" : ` · following the global lever (${NAME[cfg.lever] || "Rules"})`,
+  else sc.replaceChildren("Lever for ", el("b", {}, fullLabel(id)), own ? " · its own" : ` · following the global lever (${cfg.lever === "rules" ? "Rules" : NAME(cfg.lever)})`,
     own ? " " : "", own ? el("button", { type: "button", class: "linkish", "data-k": "lever:reset", onclick: () => setLever(null) }, "back to global") : "");
 }
-const offTrack = (v) => v === "valar" || v === "local";
+const offTrack = (v) => !!dsOf(v);
+function warnOff(v) {
+  $("localWarnT").textContent = `Conversations that run on ${NAME(v)} may fail when you switch back. Start a new session afterwards if they do.`;
+  $("localWarn").hidden = false;
+}
 async function setLever(v) {
   if (!cfg) return;
   const id = oneSess();
@@ -286,117 +308,259 @@ async function setLever(v) {
       S.session_levers = v ? { ...rest, [id]: v } : rest;
       showErr($("leverErr"), "");
       renderLever();
-      if (offTrack(v)) $("localWarn").hidden = false;
+      if (offTrack(v)) warnOff(v);
     } catch (e) {
       showErr($("leverErr"), "Couldn't set this session's lever: " + e.message);
     }
     return;
   }
   if (v === cfg.lever) return;
-  if (await save({ ...cfg, lever: v }, $("leverErr")) && offTrack(v)) $("localWarn").hidden = false;
+  if (await save({ ...cfg, lever: v }, $("leverErr")) && offTrack(v)) warnOff(v);
 }
-leverBtns.forEach((b, i) => {
-  b.dataset.k = "lever:" + b.dataset.v;
-  b.addEventListener("click", () => setLever(b.dataset.v));
-  b.addEventListener("keydown", (e) => {
-    const d = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
-    if (!d) return;
-    e.preventDefault();
-    const n = leverBtns[(i + d + leverBtns.length) % leverBtns.length];
-    n.focus();
-    setLever(n.dataset.v);
-  });
+for (const b of leverBtns()) b.dataset.k = "lever:" + b.dataset.v;
+const fixedLever = leverBtns();
+function buildLever() {
+  $("lever").replaceChildren(...fixedLever, ...DS().map((d) => el("button", { type: "button", class: "lever", role: "radio", "aria-checked": "false",
+    "data-v": d.id, "data-t": d.id, "data-k": "lever:" + d.id, style: cv(d.id) }, el("b", {}, d.name), el("small", {}, "everything, ignore rules"))));
+}
+$("lever").addEventListener("click", (e) => { const b = e.target.closest(".lever"); if (b) setLever(b.dataset.v); });
+$("lever").addEventListener("keydown", (e) => {
+  const d = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key], bs = leverBtns(), i = bs.indexOf(e.target.closest(".lever"));
+  if (!d || i < 0) return;
+  e.preventDefault();
+  const n = bs[(i + d + bs.length) % bs.length];
+  n.focus();
+  setLever(n.dataset.v);
 });
 $("localWarnX").addEventListener("click", () => { $("localWarn").hidden = true; });
 
-/* tracks: yard labels + the models panel */
-function renderTracks() {
-  for (const t of ["valar", "local"]) {
-    const up = S ? S.upstreams[t] : { url: "", configured: true }, L = C[t].toUpperCase();
-    $("model" + L).textContent = up.configured ? "" : ` · not configured: no ${KEY[t]}`;
-    $("trk" + L).classList.toggle("off", !up.configured);
-    $("pct" + L).classList.toggle("off", !up.configured);
-    const row = document.querySelector(`.trow[data-t="${t}"]`), key = row.querySelector(".tkey");
-    row.querySelector(".turl").textContent = up.url;
-    key.textContent = up.configured ? "key set" : "no key";
-    key.className = "tkey " + (up.configured ? "ok" : "no");
-    for (const old of row.querySelectorAll("[data-m]")) {
-      const m = old.dataset.m;
-      old.replaceWith(modelPick(t, cfg.models[t][m], { "data-m": m, "data-k": `m:${t}:${m}`,
-        "aria-label": `${NAME[t]} model for ${m}` },
-        (v) => save({ ...cfg, models: { ...cfg.models, [t]: { ...cfg.models[t], [m]: v } },
-          // a model without the slot's window falls back to Now
-          windows: { valar: { ...cfg.windows.valar, [m]: windowsFor(v).includes(cfg.windows.valar[m]) ? cfg.windows.valar[m] : "asap" } } }, $("trErr"))));
-      if (t === "valar") {
-        const lab = row.querySelector(`[data-m="${m}"]`).parentElement;
-        for (const x of lab.querySelectorAll(".seg")) x.remove();
-        lab.append(el("span", { class: "seg win", role: "group", "aria-label": `Valar completion window for ${m}` },
-          windowsFor(cfg.models.valar[m]).map((w) => el("button", { type: "button", "data-k": `w:${m}:${w}`,
-            "aria-pressed": String(cfg.windows.valar[m] === w),
-            onclick: () => cfg.windows.valar[m] !== w && save({ ...cfg, windows: { valar: { ...cfg.windows.valar, [m]: w } } }, $("trErr")) },
-            WIN[w]))));
-      }
-    }
+/* the yard: Anthropic on top, one line per downstream below it; the first runs straight on (y=125) */
+const YARD = {};  // track → its line, ghost path (for dots), share text and "no key" note
+let dsKey = "";
+function renderYard() {
+  const key = JSON.stringify(DS().map((d) => [d.id, d.name, d.color]));
+  if (key === dsKey) return;
+  dsKey = key;
+  buildLever();
+  for (const k of Object.keys(YARD)) delete YARD[k];
+  YARD.anthropic = { trk: $("trkA"), ghost: $("pathA"), pct: $("pctA") };
+  const out = [];
+  DS().forEach((d, i) => {
+    const y = 125 + 85 * i, tail = i ? ` C520 125 540 ${y} 640 ${y} H960` : " H960", st = cv(d.id), model = el("tspan", { class: "model" });
+    const L = YARD[d.id] = { trk: el("path", { class: "trk", "data-t": d.id, style: st, d: "M430 125" + tail }), ghost: el("path", { class: "ghost", d: "M30 125 H430" + tail }),
+      pct: el("text", { x: 960, y: y - 14, class: "big", "data-t": d.id, style: st, "text-anchor": "end" }, "–"), model };
+    out.push(L.trk, L.ghost, el("text", { x: 660, y: y - 14, class: "branch" }, d.name, model), L.pct);
+  });
+  $("lines").replaceChildren(...out);
+  $("yard").setAttribute("viewBox", `0 0 1000 ${Math.max(165, 85 * DS().length + 80)}`);
+  $("refIds").replaceChildren(...DS().flatMap((d, i) => [i ? ", " : "", el("code", {}, d.id)]));
+}
+function renderYardNums(m, span) {
+  const tr = m.tracks, none = !m.total, pct = (t) => (tr[t] ? tr[t].pct : 0) + "%";
+  for (const [t, L] of Object.entries(YARD)) {
+    L.pct.textContent = none ? "–" : pct(t);
+    if (!L.model) continue;
+    const k = S.downstreams[t], off = !k || !k.key_set;
+    L.model.textContent = off ? " · not configured: no key" : "";
+    L.trk.classList.toggle("off", off);
+    L.pct.classList.toggle("off", off);
   }
+  $("yard").setAttribute("aria-label", none ? `Live traffic: no requests in the ${span}`
+    : `Live traffic: ${TRACKS().map((t) => pct(t) + " " + NAME(t)).join(", ")} in the ${span}`);
+}
+
+/* tracks: one row per downstream — name, models per tier, Valar's windows, a generic one's prices, key, delete */
+const TIER = { fable: "Fable", opus: "Opus", sonnet: "Sonnet", haiku: "Haiku" };
+const PK = { in: "in", out: "out", cache_read: "cache read", cache_write: "cache write" };
+const MAX_DS = 6;
+const saveDs = (t, patch) => save({ ...cfg, downstreams: cfg.downstreams.map((d) => (d.id === t ? { ...d, ...patch } : d)) }, $("trErr"));
+// Prices: all four filled (0 or more) or all four blank (unpriced); anything in between is refused.
+function readPrices(inputs) {
+  const v = inputs.map((x) => x.value.trim());
+  if (v.every((x) => x === "")) return { prices: null };
+  if (v.some((x) => x === "" || !(Number(x) >= 0))) return { error: "Fill in all four prices (0 or more), or leave all four blank for unpriced." };
+  return { prices: Object.fromEntries(Object.keys(PK).map((k, i) => [k, Number(v[i])])) };
+}
+const priceInputs = (name, vals, attrs) => Object.entries(PK).map(([pk, pn]) => el("label", {}, pn + " ",
+  el("input", { type: "number", min: 0, step: "any", value: vals ? vals[pk] : "", placeholder: "–", "aria-label": `${name} price for ${pn}, USD per 1M tokens`, ...attrs(pk) })));
+const ROWERR = {};  // track → { msg, refs } from its last key/delete call
+function renderTracks() {
+  for (const d of DS()) if (!ASKED.has(d.id)) loadModels(d.id);
+  $("trows").replaceChildren(...DS().map(trow));
+  const full = DS().length >= MAX_DS;
+  $("addDs").disabled = full;
+  $("addDsWhy").hidden = !full;
+}
+function trow(d) {
+  const t = d.id, k = S && S.downstreams[t], keyed = !!(k && k.key_set), valar = d.kind === "valar", re = ROWERR[t];
+  const cur = () => dsOf(t);  // handlers read the config as it is when they fire, not as it was drawn
+  const pErr = el("p", { class: "err", role: "alert", hidden: true }), keyIn = el("input", { type: "password", autocomplete: "off", placeholder: "Replace key",
+    "data-k": "k:" + t, "aria-label": `New key for ${d.name} (empty keeps the current one)` });
+  const act = async (fn) => {
+    delete ROWERR[t];
+    try { await fn(); } catch (e) { ROWERR[t] = { msg: e.message, refs: e.status === 409 && e.body && e.body.references }; renderConfig(true); }
+  };
+  return el("div", { class: "trow", "data-t": t, style: cv(t) },
+    el("div", {}, el("input", { class: "tname", value: d.name, spellcheck: "false", "data-k": "n:" + t, "aria-label": `Name of ${d.name}`,
+      onchange: (e) => { const v = e.target.value.trim(); if (v) saveDs(t, { name: v }); else renderConfig(true); } }),
+      el("div", { class: "tmeta" }, el("code", {}, t), " · ", el("span", { class: "turl" }, k ? k.url : ""), " · ", el("span", { class: "tkey " + (keyed ? "ok" : "no") }, keyed ? "key set" : "no key"))),
+    Object.entries(TIER).map(([m, tn]) => el("label", { class: "f" }, tn + " ",
+      modelPick(t, d.models[m], { "data-m": m, "data-k": `m:${t}:${m}`, "aria-label": `${d.name} model for ${m}` },
+        // a model without the slot's window falls back to Now
+        (v) => { const c = cur(); saveDs(t, { models: { ...c.models, [m]: v }, ...(valar && { windows: { ...c.windows, [m]: windowsFor(v).includes(c.windows[m]) ? c.windows[m] : "asap" } }) }); }),
+      valar && el("span", { class: "seg win", role: "group", "aria-label": `${d.name} completion window for ${m}` },
+        windowsFor(d.models[m]).map((w) => el("button", { type: "button", "data-k": `w:${t}:${m}:${w}`, "aria-pressed": String(d.windows[m] === w),
+          onclick: () => { const c = cur(); if (c.windows[m] !== w) saveDs(t, { windows: { ...c.windows, [m]: w } }); } }, WIN[w]))))),
+    !valar && el("div", { class: "tprices" }, "USD per 1M tokens", priceInputs(d.name, d.prices, (pk) => ({ "data-k": `p:${t}:${pk}`,
+      onchange: (e) => {
+        const p = readPrices([...e.target.closest(".tprices").querySelectorAll("input")]);
+        showErr(pErr, p.error || "");  // shown in place: a re-render would wipe the half-filled fields
+        if (!p.error) saveDs(t, { prices: p.prices });
+      } })), !d.prices && el("span", {}, "unpriced"), pErr),
+    el("div", { class: "tacts" }, keyIn,
+      el("button", { type: "button", class: "mini", "data-k": "ks:" + t, onclick: () => {
+        const v = keyIn.value.trim();
+        if (v) act(async () => { await dsCall("PUT", `downstreams/${encodeURIComponent(t)}/key`, { key: v }, t); keyIn.value = ""; });
+      } }, "Replace key"),
+      el("button", { type: "button", class: "mini del", "data-k": "del:" + t, onclick: () => {
+        if (confirm(`Delete ${d.name}? Its key goes too. Its history stays, shown as "${t}, removed".`)) act(() => dsCall("DELETE", "downstreams/" + encodeURIComponent(t), undefined, t));
+      } }, "Delete")),
+    re && el("div", { class: "err tacts", role: "alert" }, re.refs ? [`${cur().name} is still in use. Point these elsewhere first:`, el("ul", {}, re.refs.map((x) => el("li", {}, x)))] : re.msg),
+    el("p", { class: "warn", role: "status", hidden: !WARN[t] }, WARN[t] || ""));
 }
 const WIN = { asap: "Now", priority: "Priority", standard: "Standard" };
 const WINDOWS = {};  // model id → completion windows it has a price for (absent until the models response says: all)
 const windowsFor = (id) => WINDOWS[id] ? Object.keys(WIN).filter((w) => WINDOWS[id].includes(w)) : Object.keys(WIN);
-const MODELS = {};  // track → model ids from its upstream, once loaded
-// A real dropdown once the track's models are in; a text box until then, or when the upstream can't be reached.
+const MODELS = {}, WARN = {}, ASKED = new Set();  // track → model ids from it, once loaded; → a note on its row; asked already
+// A real dropdown once the track's models are in; a text box until then, or when the downstream can't be reached.
 function modelPick(t, value, attrs, onPick) {
   const ids = MODELS[t];
   if (!ids) return el("input", { ...attrs, value, spellcheck: "false", autocomplete: "off", onchange: (e) => onPick(e.target.value.trim()) });
   return el("select", { ...attrs, onchange: (e) => onPick(e.target.value) },
     (ids.includes(value) ? ids : [value, ...ids]).map((m) => el("option", { value: m, selected: m === value }, m)));
 }
-for (const row of document.querySelectorAll(".trow")) {
-  const t = row.dataset.t;
-  // GET /ui/api/models?track=…: the router asks the upstream with the track's key; the key never reaches the page
-  api("GET", "models?track=" + t, undefined, 15000).then((j) => {
+// GET /ui/api/models?track=…: the router asks the downstream with its key; the key never reaches the page
+function loadModels(t) {
+  ASKED.add(t);
+  api("GET", "models?track=" + encodeURIComponent(t), undefined, 15000).then((j) => {
     MODELS[t] = j.models;
     Object.assign(WINDOWS, j.windows);
+    WARN[t] = j.stale ? `${j.stale}. Showing the saved model list (models.json).` : "";
     renderConfig(true);
-    if (j.stale) {
-      const w = row.querySelector(".warn");
-      w.textContent = `${j.stale}. Showing the saved model list (models.json).`;
-      w.hidden = false;
-    }
-  }, (e) => {
-    const w = row.querySelector(".warn");
-    w.textContent = `Couldn't load models (${e.message}). Type a model id.`;
-    w.hidden = false;
-  });
+  }, (e) => { WARN[t] = `Couldn't load models (${e.message}). Type a model id.`; renderConfig(true); });
 }
+
+/* the wizard: connect (and test), a model per tier, prices for a generic one, save. A failed test can still be saved. */
+const W = { list: null, kind: null, models: {}, idTouched: false };  // list: model ids from the last good test
+const slug = (n) => n.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^[^a-z]+/, "").slice(0, 24).replace(/-+$/, "");
+const wPrices = priceInputs("New downstream", null, () => ({}));
+$("wPrices").replaceChildren(...wPrices);
+function wizOpen(open) {
+  $("wiz").hidden = !open;
+  $("addDs").setAttribute("aria-expanded", String(open));
+  for (const id of ["wName", "wId", "wUrl", "wKey"]) $(id).value = "";
+  if (!open) { $("addDs").focus(); return; }
+  for (const x of wPrices) x.querySelector("input").value = "";
+  Object.assign(W, { list: null, kind: null, models: Object.fromEntries(Object.keys(TIER).map((m) => [m, ""])), idTouched: false });
+  $("wOne").checked = false;
+  $("wTestR").replaceChildren();
+  $("wCost").hidden = false;
+  showErr($("wErr"), "");
+  wizReuse(); wizModels();
+  $("wName").focus();
+}
+// Stored rows under this id (it was deleted earlier) will show under the new downstream.
+function wizReuse() {
+  const id = $("wId").value.trim(), old = id && S && S.summary && Object.hasOwn(S.summary.tracks, id) && gone(id);
+  $("wReuse").hidden = !old;
+  $("wReuse").textContent = old ? `History from an earlier ${id} will show under this one.` : "";
+}
+function wizModels() {
+  const one = $("wOne").checked, pick = (m, label) => {
+    const v = W.models[m], set = (x) => { for (const k of one ? Object.keys(TIER) : [m]) W.models[k] = x; };
+    const attrs = { "aria-label": label + " model", "data-k": "wm:" + m + (one ? ":all" : "") };
+    return el("label", { class: "f" }, label + " ", W.list
+      ? el("select", { ...attrs, onchange: (e) => set(e.target.value) }, el("option", { value: "", selected: !v }, "pick a model"),
+        (v && !W.list.includes(v) ? [v, ...W.list] : W.list).map((x) => el("option", { value: x, selected: x === v }, x)))
+      : el("input", { ...attrs, value: v, spellcheck: "false", autocomplete: "off", placeholder: "model id", onchange: (e) => set(e.target.value.trim()) }));
+  };
+  keepFocus(() => $("wModels").replaceChildren(...(one ? [pick("fable", "Every tier")] : Object.entries(TIER).map(([m, tn]) => pick(m, tn)))));
+}
+$("addDs").addEventListener("click", () => wizOpen($("wiz").hidden));
+$("wCancel").addEventListener("click", () => wizOpen(false));
+$("wiz").addEventListener("keydown", (e) => { if (e.key === "Escape") wizOpen(false); });
+$("wName").addEventListener("input", () => { if (!W.idTouched) { $("wId").value = slug($("wName").value); wizReuse(); } });
+$("wId").addEventListener("input", () => { W.idTouched = true; wizReuse(); });
+$("wOne").addEventListener("change", () => {
+  if ($("wOne").checked) for (const m of Object.keys(TIER)) W.models[m] = W.models.fable;
+  wizModels();
+});
+$("wTest").addEventListener("click", async () => {
+  const r = $("wTestR");
+  r.className = "wtest";
+  r.textContent = "Testing…";
+  try {
+    const p = await api("POST", "downstreams/probe", { url: $("wUrl").value, key: $("wKey").value }, 15000);
+    const valar = p.kind === "valar" ? " · looks like Valar (it prices itself)" : "";
+    r.className = "wtest " + (p.ok ? "ok" : "no");
+    r.textContent = p.ok ? `✓ Reachable · ${plural(p.models.length, "model")}${valar}` : `✗ Not reachable: ${p.reason}. You can still save it.${valar}`;
+    W.list = p.ok && p.models.length ? p.models : null;
+    W.kind = p.kind;
+    if (W.list && W.list.length === 1) { $("wOne").checked = true; for (const m of Object.keys(TIER)) W.models[m] = W.list[0]; }
+    $("wCost").hidden = p.kind === "valar";
+    wizModels();
+  } catch (e) {
+    r.className = "wtest no";
+    r.textContent = "Couldn't test: " + e.message;
+  }
+});
+$("wSave").addEventListener("click", async () => {
+  const name = $("wName").value.trim(), id = $("wId").value.trim(), err = $("wErr");
+  if (!name) { showErr(err, "Give it a name."); $("wName").focus(); return; }
+  if (Object.values(W.models).some((m) => !m)) { showErr(err, "Pick a model for every tier."); return; }
+  const p = $("wCost").hidden ? { prices: null } : readPrices(wPrices.map((x) => x.querySelector("input")));
+  if (p.error) { showErr(err, p.error); return; }
+  $("wSave").disabled = true;
+  showErr(err, "");
+  try {
+    await dsCall("POST", "downstreams", { id, name, url: $("wUrl").value, key: $("wKey").value, models: { ...W.models }, prices: p.prices }, id);
+    $("wKey").value = "";
+    wizOpen(false);
+  } catch (e) {
+    showErr(err, e.status === 400 || e.status === 409 ? e.message : "Couldn't save: " + e.message);
+  } finally {
+    $("wSave").disabled = false;
+  }
+});
 
 /* rulebook */
 const openCls = { v: false };
 const DEFAULT_TEXT = {
   servertool: ["when servertool go anthropic",
     () => ["web search, web fetch, other tools Anthropic runs itself & Claude Code's transcript checks → ", trk("anthropic")]],
-  tags: ["when tag is planning go anthropic\nwhen tag is local go local\nwhen tag is execution go valar",
-    () => [el("b", {}, "#planning"), " → ", trk("anthropic"), ", ", el("b", {}, "#local"), " → ", trk("local", 1), ", ", el("b", {}, "#execution"), " → ", trk("valar")]],
+  tags: ["when tag is planning go anthropic\nwhen tag is execution go valar",
+    () => [el("b", {}, "#planning"), " → ", trk("anthropic"), ", ", el("b", {}, "#execution"), " → ", trk("valar")]],
   tier: ["when tier is opus or tier is fable go anthropic\nwhen tier is sonnet or tier is haiku or tier is other go valar",
     () => ["opus & fable → ", trk("anthropic"), ", sonnet, haiku & anything else → ", trk("valar")]],
 };
 const lines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
-// "Can send your main session off Anthropic": a line going valar/local whose condition never looks at tier or subagent.
-const GO_OFF = /\bgo\s+(valar|local)\s*$/i;
+// "Can send your main session off Anthropic": a line going to a downstream whose condition never looks at tier or subagent.
+const GO_OFF = /\bgo\s+(?!anthropic\s*$)[\w-]+\s*$/i;
 const risky = (r) => r.kind === "dsl" && lines(r.text).some((l) => GO_OFF.test(l) && !/\btier\b|\bsubagent\b/i.test(l.replace(GO_OFF, "")));
 
 function describe(r) {
-  if (r.kind === "classifier") return el("div", { class: "rdesc" }, `A small model on ${UP[cfg.classifier.upstream]} reads your newest message once per turn and labels it.`);
+  if (r.kind === "classifier") return el("div", { class: "rdesc" }, `A small model on ${NAME(cfg.classifier.upstream)} reads your newest message once per turn and labels it.`);
   const d = DEFAULT_TEXT[r.builtin];
   if (d && r.text.trim() === d[0]) return el("div", { class: "rdesc" }, d[1]());
   return el("div", { class: "rdesc" }, lines(r.text).map((l) => {
-    const m = l.match(/^when\s+(.*?)\s+go\s+(anthropic|valar|local)$/i);
-    return el("div", { class: "rline" }, m ? [m[1], " → ", trk(m[2].toLowerCase(), 1)] : l);
+    const m = l.match(/^when\s+(.*?)\s+go\s+([\w-]+)$/i);
+    return el("div", { class: "rline" }, m ? [m[1], " → ", trk(m[2].toLowerCase())] : l);
   }));
 }
 
 function classifierBits(r, i) {
   const c = cfg.classifier, pct = Math.round(c.threshold * 100);
-  const chips = el("div", { class: "chips" }, c.labels.map((l) => el("span", { class: "chip" }, l.name, " → ", trk(l.track, 1))));
+  const chips = el("div", { class: "chips" }, c.labels.map((l) => el("span", { class: "chip" }, l.name, " → ", trk(l.track))));
   const lab = el("span", {}, `Only decide when at least ${pct}% sure`);
   const slider = el("input", {
     type: "range", min: 0, max: 100, step: 1, value: pct, "data-k": "thr", "aria-label": "Classifier confidence threshold, percent",
@@ -409,7 +573,7 @@ function classifierBits(r, i) {
     out.push(el("div", { class: "cls" },
       el("div", { class: "row" },
         el("label", {}, "Asks ", el("select", { "data-k": "cup", onchange: (e) => setCls({ upstream: e.target.value }) },
-          ["valar", "local"].map((u) => el("option", { value: u, selected: c.upstream === u }, UP[u])))),
+          [...DS().map((d) => d.id), "none"].map((u) => el("option", { value: u, selected: c.upstream === u }, u === "none" ? "none (classifier off)" : NAME(u))))),
         el("label", {}, "Model ", modelPick(c.upstream, c.model, { "data-k": "cmodel" }, (v) => setCls({ model: v }))),
         el("label", {}, "Time limit ", el("input", { type: "number", class: "narrow", min: 0.1, max: 30, step: 0.1, value: c.timeout_s, "data-k": "ctime",
           onchange: (e) => { const v = Number(e.target.value); if (v >= 0.1 && v <= 30) setCls({ timeout_s: v }); else renderConfig(true); } }), " s")),
@@ -417,11 +581,11 @@ function classifierBits(r, i) {
         el("input", { class: "lname", value: l.name, "aria-label": "Label name", "data-k": "ln:" + j, onchange: (e) => setLabel(j, { name: e.target.value.trim() }) }),
         el("input", { class: "ldesc", value: l.description, "aria-label": "What this label means", placeholder: "what it means", "data-k": "ld:" + j, onchange: (e) => setLabel(j, { description: e.target.value }) }),
         el("select", { "aria-label": "Track for " + l.name, "data-k": "lt:" + j, onchange: (e) => setLabel(j, { track: e.target.value }) },
-          TRACKS.map((t) => el("option", { value: t, selected: l.track === t }, "→ " + NAME[t]))),
+          TRACKS().map((t) => el("option", { value: t, selected: l.track === t }, "→ " + NAME(t)))),
         el("button", { type: "button", class: "mini", "aria-label": "Remove label " + l.name, onclick: () => setCls({ labels: c.labels.filter((_, k) => k !== j) }) }, "remove"))),
       el("div", {}, el("button", { type: "button", class: "mini", "data-k": "addlabel", onclick: () => {
         let n = 1; while (c.labels.some((l) => l.name === "label " + n)) n++;
-        setCls({ labels: [...c.labels, { name: "label " + n, description: "", track: "valar" }] });
+        setCls({ labels: [...c.labels, { name: "label " + n, description: "", track: "anthropic" }] });
       } }, "+ add label"))));
   }
   return out;
@@ -455,7 +619,7 @@ function ruleItem(r, i) {
   },
     num,
     el("div", { class: "rbody" },
-      el("div", { class: "rname" }, r.name, risky(r) && el("span", { class: "badge", title: "A line sends requests to Valar or local without checking tier or subagent, so it can move your main (opus) conversation." }, "Can send your main session off Anthropic")),
+      el("div", { class: "rname" }, r.name, risky(r) && el("span", { class: "badge", title: "A line sends requests to a downstream without checking tier or subagent, so it can move your main (opus) conversation." }, "Can send your main session off Anthropic")),
       describe(r),
       r.kind === "classifier" ? classifierBits(r, i) : null,
       el("div", { class: "hint dec", "data-r": r.kind === "classifier" ? "classifier" : r.name }),
@@ -483,12 +647,9 @@ function ruleItem(r, i) {
 const renderRules = () => { $("rules").replaceChildren(...cfg.rules.map(ruleItem)); renderCounts(); };
 
 function renderOtherwise() {
-  for (const b of $("otherwise").children) {
-    b.setAttribute("aria-pressed", String(b.dataset.v === cfg.otherwise));
-    b.dataset.k = "ow:" + b.dataset.v;
-  }
+  $("otherwise").replaceChildren(...TRACKS().map((t) => el("button", { type: "button", "data-v": t, "data-k": "ow:" + t, style: cv(t),
+    "aria-pressed": String(t === cfg.otherwise), onclick: () => t !== cfg.otherwise && save({ ...cfg, otherwise: t }, $("rbErr")) }, NAME(t))));
 }
-for (const b of $("otherwise").children) b.addEventListener("click", () => { if (b.dataset.v !== cfg.otherwise) save({ ...cfg, otherwise: b.dataset.v }, $("rbErr")); });
 
 /* doubling strip */
 function renderStrip() {
@@ -496,31 +657,30 @@ function renderStrip() {
   $("dRate").value = pct;
   $("dRateN").value = pct;
   $("dTag").value = d.tag;
-  for (const sel of shadowSels) sel.value = d.shadow[sel.dataset.t] || "";
+  // one row per track: when it answers, which other track to compare with
+  $("shadows").replaceChildren(...TRACKS().map((t) => el("label", { class: "srow" }, el("span", { class: "sw", style: cv(t) }), `When ${NAME(t)} answers, compare with `,
+    el("select", { "data-k": "sh:" + t, onchange: (e) => setDbl({ shadow: { ...cfg.doubling.shadow, [t]: e.target.value || null } }) },
+      [...TRACKS().filter((x) => x !== t), ""].map((x) => el("option", { value: x, selected: (d.shadow[t] || "") === x }, x ? NAME(x) : "off"))))));
 }
-const shadowSels = [...document.querySelectorAll(".shadows select")];
 const setDbl = (patch) => save({ ...cfg, doubling: { ...cfg.doubling, ...patch } }, $("dblErr"));
 const setRate = (v) => { v = Math.max(0, Math.min(100, Math.round(Number(v) || 0))); setDbl({ rate: v / 100 }); };
 $("dRate").addEventListener("input", (e) => { $("dRateN").value = e.target.value; });
 $("dRate").addEventListener("change", (e) => setRate(e.target.value));
 $("dRateN").addEventListener("change", (e) => setRate(e.target.value));
 $("dTag").addEventListener("change", (e) => setDbl({ tag: e.target.value.trim().replace(/^#+/, "") }));
-for (const sel of shadowSels) {
-  sel.dataset.k = "sh:" + sel.dataset.t;
-  sel.addEventListener("change", () => setDbl({ shadow: { ...cfg.doubling.shadow, [sel.dataset.t]: sel.value || null } }));
-}
 ["dRate", "dRateN", "dTag"].forEach((id) => { $(id).dataset.k = id; });
 
 /* ---------- rule editor ---------- */
 let ed = null, edSeq = 0, edTimer = null;
-const TOK = /("(?:\\.|[^"\\])*"?)|(\/(?:\\.|[^/\\])*\/?[ims]*)|\b(when|and|or|not|is|contains|matches|go)\b|\b(anthropic)\b|\b(valar)\b|\b(local)\b|\b(text|tag|tier|model|tokens|subagent|servertool|label)\b/gi;
-const TOKCLS = [null, "st", "st", "kw", "an", "va", "lo", "fd"];
+const TOK = /("(?:\\.|[^"\\])*"?)|(\/(?:\\.|[^/\\])*\/?[ims]*)|\b(when|and|or|not|is|contains|matches|go)\b|\b(anthropic)\b|(?<=\bgo\s+)([a-z][\w-]*)|\b(text|tag|tier|model|tokens|subagent|servertool|label)\b/gi;
+const TOKCLS = [null, "st", "st", "kw", "an", "ds", "fd"];
 function highlight() {
   const src = $("edText").value, out = [];
   let i = 0;
   for (const m of src.matchAll(TOK)) {
     if (m.index > i) out.push(src.slice(i, m.index));
-    out.push(el("span", { class: TOKCLS[m.findIndex((g, k) => k && g !== undefined)] }, m[0]));
+    const g = m.findIndex((x, k) => k && x !== undefined);  // a word after "go" shows in that downstream's colour
+    out.push(el("span", { class: TOKCLS[g], style: g === 5 && dsOf(m[0].toLowerCase()) ? cv(m[0].toLowerCase()) : null }, m[0]));
     i = m.index + m[0].length;
   }
   out.push(src.slice(i) + "\n");
@@ -634,17 +794,18 @@ function shortReason(reason, row) {
 function why(r) {
   if (isErr(r.status)) {
     // ponytail: "not configured" reads today's key state, not the state when the request ran
-    if (UP[r.track]) return r.status === 502 ? `${UP[r.track]} ${S && !S.upstreams[r.track].configured ? "not configured" : "down"} · 502`
-      : `${UP[r.track]} error · ` + (r.status || "no answer");
-    return "Anthropic error · " + (r.status || "no answer");
+    const k = S && S.downstreams[r.track];
+    if (gone(r.track)) return `${label(r.track)} · ${r.status || "no answer"}`;
+    if (r.track !== "anthropic" && r.status === 502) return `${label(r.track)} ${k && !k.key_set ? "not configured" : "down"} · 502`;
+    return `${label(r.track)} error · ` + (r.status || "no answer");
   }
   return shortReason(r.reason, r);
 }
 function depRow(r) {
-  const err = isErr(r.status), c = err ? "x" : C[r.track];
+  const err = isErr(r.status);
   const head = el("div", { class: "dephead", role: "button", tabindex: 0, "aria-expanded": "false", "data-k": "dep:" + r.id },
     el("time", { datetime: new Date(r.ts * 1000).toISOString() }, hms(r.ts)),
-    el("span", { class: "sw " + c, role: "img", "aria-label": err ? "error" : NAME[r.track] }),
+    el("span", { class: "sw" + (err ? " x" : ""), style: cv(r.track), role: "img", "aria-label": err ? "error" : label(r.track) }),
     el("span", { class: "what" }, el("span", { class: "stag" }, shortLabel(r.session_id)), r.preview || "(no text)"),
     el("span", { class: "why" + (err ? " x" : "") }, why(r), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄")));
   const row = el("div", { class: "dep", "data-id": r.id }, head), toggle = () => toggleDep(row, head, r);
@@ -684,8 +845,8 @@ function explain(d) {
     const what = !s ? "the other answer hasn't arrived yet"
       : s.skipped ? "skipped, " + s.skipped
       : s.error || isErr(s.status) ? `error: ${s.error || "status " + s.status} after ${fmtMs(s.ms)}`
-      : `${NAME[to]} answered in ${fmtMs(s.ms)} (status ${s.status})`;
-    out.push(el("div", { class: "sh" }, `Doubled${to ? " to " + NAME[to] : ""} for comparison · ${what} · `,
+      : `${label(to)} answered in ${fmtMs(s.ms)} (status ${s.status})`;
+    out.push(el("div", { class: "sh" }, `Doubled${to ? " to " + label(to) : ""} for comparison · ${what} · `,
       el("button", { type: "button", class: "mini", onclick: () => showTurn(d.turn_id) }, "see side by side")));
   }
   return out;
@@ -734,14 +895,16 @@ $("older").addEventListener("click", async () => {
 function animate(rows) {
   if (reduceMotion.matches) return;
   rows.slice(-12).forEach((r, k) => setTimeout(() => {
-    run(r.track, isErr(r.status) ? "x" : C[r.track]);
+    run(r.track, isErr(r.status) ? "x" : "");
     const sh = r.turn_id && cfg && cfg.doubling.shadow[r.track];
     if (sh) run(sh, "s");
   }, k * 220));
 }
 function run(track, cls) {
-  const p = $("path" + C[track].toUpperCase()), len = p.getTotalLength();
-  const c = el("circle", { class: "dot " + cls, r: 6, cx: -20, cy: -20 }), base = cls === "s" ? 0.55 : 1;
+  const p = YARD[track] && YARD[track].ghost;
+  if (!p) return;  // a removed track has no line
+  const len = p.getTotalLength();
+  const c = el("circle", { class: "dot " + cls, style: cv(track), r: 6, cx: -20, cy: -20 }), base = cls === "s" ? 0.55 : 1;
   $("dots").append(c);
   const t0 = performance.now(), dur = 2600;
   const f = (now) => {
@@ -805,7 +968,7 @@ function tally() {
   for (const x of turns) if (x.verdict) t[x.verdict] = (t[x.verdict] || 0) + 1;
   return t;
 }
-const tallyText = () => { const t = tally(); return "So far: " + [...TRACKS, "same"].map((k) => `${k === "same" ? "same" : NAME[k]} ${t[k] || 0}`).join(" · "); };
+const tallyText = () => { const t = tally(); return "So far: " + [...new Set([...TRACKS(), ...Object.keys(t).filter((k) => k !== "same")]), "same"].map((k) => `${k === "same" ? "same" : label(k)} ${t[k] || 0}`).join(" · "); };
 
 // request id → its row, for the served side's cost (the pair stores only the shadow's); null while loading.
 // A pair can be written before its request row, so a failed fetch isn't cached: it's retried a few seconds later.
@@ -817,7 +980,7 @@ function fetchRow(id, prev) {
     if (REQ.get(id) !== prev) return;  // pruned or replaced meanwhile
     REQ.set(id, r);
     renderTurn();
-    if (r.track === "valar" && r.cost == null) setTimeout(() => { if (REQ.get(id) === r) fetchRow(id, r); }, 60000);
+    if (r.track !== "anthropic" && r.cost == null) setTimeout(() => { if (REQ.get(id) === r) fetchRow(id, r); }, 60000);
   }, () => {
     if (prev) return setTimeout(() => { if (REQ.get(id) === prev) fetchRow(id, prev); }, 60000);  // keep what we have
     setTimeout(() => { if (REQ.get(id) === null) { REQ.delete(id); renderTurn(); } }, 3000);
@@ -833,7 +996,7 @@ function card(track, step) {
   try { s = JSON.parse(served ? step.served : step.shadow) || {}; } catch (_) { s.error = "unreadable"; }
   const r = served ? servedRow(step.request_id) : null;
   const money = served ? r && priced(track, r.cost, r.api_cost) : priced(track, s.cost, null);
-  const meta = el("div", { class: "meta" }, el("span", { class: "tn" }, NAME[track]), el("span", {}, fmtMs(s.ms)),
+  const meta = el("div", { class: "meta" }, el("span", { class: "tn" }, label(track)), el("span", {}, fmtMs(s.ms)),
     s.output_tokens != null && el("span", {}, s.output_tokens + " tokens"), money && el("span", {}, money),
     served && el("span", { class: "served" }, "sent to Claude Code"));
   const body = [];
@@ -849,7 +1012,7 @@ function card(track, step) {
     })));
     if (!s.text && !(s.tools && s.tools.length) && !s.error) body.push(el("p", { class: "state" }, "(empty answer)"));
   }
-  return el("div", { class: "ans " + C[track] }, meta, body);
+  return el("div", { class: "ans", style: cv(track) }, meta, body);
 }
 
 function renderTurn() {
@@ -864,8 +1027,8 @@ function renderTurn() {
     const d = turnData, steps = d.steps || [], ti = turns.findIndex((t) => t.id === d.id), st = steps[stepIdx];
     const nav = (label, k, dis, fn) => el("button", { type: "button", disabled: dis, "data-k": k, onclick: fn }, label);
     // the pair's tracks (a turn's steps can in principle land on different tracks)
-    const pairT = TRACKS.filter((t) => steps.some((x) => x.served_track === t || x.shadow_track === t));
-    const verdicts = [...pairT.map((t) => [t, NAME[t]]), ["same", "About the same"]];
+    const pairT = [...new Set(steps.flatMap((x) => [x.served_track, x.shadow_track]).filter(Boolean))];
+    const verdicts = [...pairT.map((t) => [t, label(t)]), ["same", "About the same"]];
     box.replaceChildren(
       el("div", { class: "turnhead" },
         el("span", { class: "q", title: d.preview }, el("span", { class: "stag" }, shortLabel(d.session_id)), `“${d.preview || "(no text)"}”`),

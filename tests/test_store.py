@@ -5,7 +5,7 @@ import time
 
 import store
 from routing import DEFAULT_CONFIG
-from store import Store, load_console_config, save_console_config
+from store import NullStore, Store, load_console_config, save_console_config
 
 
 def req(i, ts, track="anthropic", status=200, **kw):
@@ -31,13 +31,29 @@ def test_corrupt_config_falls_back(tmp_path):
     assert (tmp_path / "console.json.bad").exists() and not p.exists()
 
 
+T3 = ("anthropic", "valar", "local")
+
+
+def test_stats_and_verdicts_follow_tracks(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    s.record_request(req(s.next_id(), now - 5, "lemmi"))
+    s.record_request(req(s.next_id(), now - 5, "gone"))
+    s.record_turn(dict(id="t", ts=now, preview="p"))
+    s.close()
+    assert s.set_verdict("t", "lemmi", ("anthropic", "lemmi")) and not s.set_verdict("t", "valar", ("anthropic", "lemmi"))
+    st = s.stats(now, ("anthropic", "lemmi"))
+    assert (st["anthropic_pct"], st["lemmi_pct"], st["gone_pct"]) == (0, 50, 50) and "valar_pct" not in st
+    assert st["tally"] == {"anthropic": 0, "lemmi": 1, "same": 0}
+    assert NullStore().stats(now, ("anthropic", "x"))["tally"] == {"anthropic": 0, "x": 0, "same": 0}
+
+
 def test_departures_and_stats(tmp_path):
     s, now = Store(str(tmp_path / "s.db")), time.time()
     for i, (t, st) in enumerate([("anthropic", 200)] * 3 + [("local", 502)], 1):
         s.record_request(req(s.next_id(), now - 10 * i, t, st, prompt="full %d" % i))
     s.record_request(req(s.next_id(), now - 7200))
     s.close()
-    st = s.stats(now)
+    st = s.stats(now, T3)
     assert (st["anthropic_pct"], st["local_pct"], st["last_hour_total"], st["errors_last_hour"]) == (75, 25, 4, 1)
     assert [r["id"] for r in s.departures()] == [5, 4, 3, 2, 1]
     assert [r["id"] for r in s.departures(since_id=3)] == [5, 4]
@@ -77,10 +93,10 @@ def test_turns_pairs_verdict(tmp_path):
     s.close()
     assert [x["step"] for x in s.turn("a")["steps"]] == [1, 2]
     assert s.turn("b")["preview"] == "b" and s.turn("zz") is None
-    assert s.set_verdict("b", "local") and not s.set_verdict("b", "bogus") and not s.set_verdict("zz", "same")
+    assert s.set_verdict("b", "local", T3) and not s.set_verdict("b", "bogus", T3) and not s.set_verdict("zz", "same", T3)
     assert [t["id"] for t in s.turns()] == ["a", "b"]
-    assert s.stats(now)["tally"] == {"local": 1, "anthropic": 0, "valar": 0, "same": 0}
-    assert s.stats(now)["judged_today"] == 1
+    assert s.stats(now, T3)["tally"] == {"local": 1, "anthropic": 0, "valar": 0, "same": 0}
+    assert s.stats(now, T3)["judged_today"] == 1
     s.forget_pairs()
     assert s.turns() == [] and s.turn("a") is None
 
@@ -141,8 +157,8 @@ def test_null_store_is_inert():
     n.record_request(req(1, 0)); n.record_pair({}); n.record_turn({})
     assert n.dropped == 3
     assert n.departures() == [] and n.request(1) is None and n.turns() == [] and n.turn("x") is None
-    assert n.pair_for_request(1) is None and n.set_verdict("x", "local") is False
-    assert n.stats(time.time())["last_hour_total"] == 0
+    assert n.pair_for_request(1) is None and n.set_verdict("x", "local", T3) is False
+    assert n.stats(time.time(), T3)["last_hour_total"] == 0
     n.forget_pairs(); n.close()
 
 
@@ -151,7 +167,7 @@ def test_stats_three_tracks(tmp_path):
     for t in ("anthropic", "valar", "local"):
         s.record_request(req(s.next_id(), now - 5, t))
     s.close()
-    st = s.stats(now)
+    st = s.stats(now, T3)
     assert (st["anthropic_pct"], st["valar_pct"], st["local_pct"]) == (33, 33, 33)
     assert st["anthropic_pct"] + st["valar_pct"] + st["local_pct"] <= 100
 
@@ -160,8 +176,8 @@ def test_verdict_valar(tmp_path):
     s, now = Store(str(tmp_path / "s.db")), time.time()
     s.record_turn(dict(id="t", ts=now, preview="p"))
     s.close()
-    assert s.set_verdict("t", "valar") and not s.set_verdict("t", "openai")
-    assert s.stats(now)["tally"] == {"anthropic": 0, "valar": 1, "local": 0, "same": 0}
+    assert s.set_verdict("t", "valar", T3) and not s.set_verdict("t", "openai", T3)
+    assert s.stats(now, T3)["tally"] == {"anthropic": 0, "valar": 1, "local": 0, "same": 0}
 
 
 def test_old_db_gets_columns(tmp_path):
@@ -189,6 +205,9 @@ def test_old_db_gets_columns(tmp_path):
     c.close()
 
 
+T = ("anthropic", "valar", "local")
+
+
 def seeded(tmp_path):
     s, now = Store(str(tmp_path / "s.db")), time.time()
     s.touch_session("sa", now - 5000, "/x/alpha", "main")
@@ -214,7 +233,7 @@ def seeded(tmp_path):
 
 def test_summary(tmp_path):
     s, now = seeded(tmp_path)
-    m = s.summary(None, 0, now + 1, now)
+    m = s.summary(None, 0, now + 1, now, T)
     assert m["total"] == 7 and m["errors"] == 2 and m["per_minute"] == 6 / 5
     a, v, l = (m["tracks"][t] for t in ("anthropic", "valar", "local"))
     assert (a["n"], a["pct"], v["n"], v["pct"], l["pct"]) == (3, 43, 3, 43, 14)
@@ -223,17 +242,17 @@ def test_summary(tmp_path):
     assert m["savings"] == 0.75 + 0.5  # valar 1.0-.25 + local .5; anthropic and comparisons excluded
     assert m["rules"] == {"big": 1, "a:b": 1, "classifier": 1, "otherwise": 1, "lever": 1}
     assert m["tally"] == {"anthropic": 0, "valar": 1, "local": 0, "same": 0}
-    sa = s.summary(["sa"], 0, now + 1, now)
+    sa = s.summary(["sa"], 0, now + 1, now, T)
     assert sa["total"] == 3 and sa["savings"] == 0.75 and sa["tracks"]["local"]["n"] == 0 and sa["tally"]["valar"] == 1
-    assert s.summary(["unknown"], 0, now + 1, now)["total"] == 1
-    assert s.summary(["sb", "unknown"], 0, now + 1, now)["total"] == 4
-    span = s.summary(None, now - 3600, now + 1, now)  # drops request 1 and its comparison
+    assert s.summary(["unknown"], 0, now + 1, now, T)["total"] == 1
+    assert s.summary(["sb", "unknown"], 0, now + 1, now, T)["total"] == 4
+    span = s.summary(None, now - 3600, now + 1, now, T)  # drops request 1 and its comparison
     assert span["total"] == 6 and span["tracks"]["local"]["comparisons"] == 0 and "big" not in span["rules"]
-    assert s.summary([], 0, now + 1, now)["total"] == 0
+    assert s.summary([], 0, now + 1, now, T)["total"] == 0
     assert s.first_ts(["sb"]) == now - 50
     s2 = Store(str(tmp_path / "s.db"))  # an unpriced valar row with tokens and an api_cost is not a saving
     s2.record_request(req(8, now - 10, "valar", 200, reason="default", session_id="sb", cost=None, api_cost=9.0, in_tok=5, out_tok=5))
-    m2 = s2.summary(None, 0, now + 1, now)
+    m2 = s2.summary(None, 0, now + 1, now, T)
     assert m2["savings"] == m["savings"] and m2["saved_would"] == m["saved_would"] == 1.5
     s2.close()
 
@@ -254,4 +273,35 @@ def test_list_sessions_and_filtered_reads(tmp_path):
     s.set_session_name("sa", None)
     assert [x["label"] for x in s.list_sessions(0, now + 1) if x["id"] == "sa"] == ["alpha · main"]
     n = store.NullStore()
-    assert n.list_sessions(0, 1) == [] and n.summary(None, 0, 1, 1)["total"] == 0
+    assert n.list_sessions(0, 1) == [] and n.summary(None, 0, 1, 1, T)["total"] == 0
+
+
+def test_summary_includes_removed_tracks(tmp_path):
+    s, now = seeded(tmp_path)
+    s = Store(str(tmp_path / "s.db"))
+    s.record_request(req(8, now - 5, "lemmi", 200, reason="default", session_id="sb", cost=0.1, api_cost=0.5, in_tok=1, out_tok=1))
+    s.record_request(req(9, now - 4, "lemmi", 200, reason="default", session_id="sb", cost=None, api_cost=7.0, in_tok=1, out_tok=1))
+    s.close()
+    m = s.summary(None, 0, now + 1, now, ("anthropic", "valar"))
+    assert set(m["tracks"]) == {"anthropic", "valar", "local", "lemmi"}
+    assert {t for t, v in m["tracks"].items() if v.get("removed")} == {"local", "lemmi"}
+    assert m["tracks"]["lemmi"]["unpriced"] == 1 and m["tracks"]["lemmi"]["cost"] == 0.1
+    assert m["savings"] == 0.75 + 0.5 + 0.4  # valar .75, local .5, lemmi's priced row .4; its unpriced row adds nothing
+    assert set(m["tally"]) == {"anthropic", "valar", "local", "lemmi", "same"}
+    n = store.NullStore().summary(None, 0, 1, 1, ("anthropic", "x"))
+    assert set(n["tracks"]) == {"anthropic", "x"}
+
+
+def test_reprice_fills_only_null_costs(tmp_path):
+    from prices import Prices
+    from routing import Downstream
+    models = dict.fromkeys(("fable", "opus", "sonnet", "haiku"), "m")
+    lem = Downstream("lemmi", "Lemmi", "http://l", "generic", models, "#000", None, {"in": 1, "out": 2, "cache_read": 0, "cache_write": 0})
+    bare = Downstream("bare", "Bare", "http://b", "generic", models, "#000")
+    s, now, p = Store(str(tmp_path / "s.db")), time.time(), Prices(str(tmp_path))
+    for i, (t, c) in enumerate([("lemmi", None), ("lemmi", 9.0), ("bare", None), ("anthropic", None)], 1):
+        s.record_request(req(i, now, t, 200, cost=c, in_tok=1_000_000, out_tok=1_000_000, model_out="m"))
+    s.close()
+    assert s.reprice(p, (lem, bare)) == 1
+    assert [s.request(i)["cost"] for i in (1, 2, 3, 4)] == [3.0, 9.0, None, None]
+    assert s.reprice(p, (lem, bare)) == 0

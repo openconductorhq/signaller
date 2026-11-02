@@ -14,12 +14,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import claude_router
 from claude_router import App, Config, make_server, upstream_headers
-from classifier import Classifier
-from routing import DEFAULT_CONFIG
+from routing import DEFAULT_CONFIG, Downstream
 
-MODELS = {"valar": {"fable": "VS", "opus": "VS", "sonnet": "VS", "haiku": "VH"},
-          "local": {"fable": "S", "opus": "S", "sonnet": "S", "haiku": "H"}}
-BASE = replace(DEFAULT_CONFIG, models=MODELS)
+VALAR = replace(DEFAULT_CONFIG.downstreams[0], models={"fable": "VS", "opus": "VS", "sonnet": "VS", "haiku": "VH"})
+LEMMI = Downstream("lemmi", "Lemmi", "", "generic", dict.fromkeys(("fable", "opus", "sonnet", "haiku"), "deepseek-v4.1-flash"), "#888888")
+BASE = replace(DEFAULT_CONFIG, downstreams=(VALAR,))
 CLASSIFIER_OFF = replace(BASE, rules=tuple(replace(r, enabled=r.kind != "classifier") for r in BASE.rules))
 
 
@@ -115,16 +114,17 @@ class ProxyTest(unittest.TestCase):
         self.a, self.v, self.l = Fake(), Fake(), Fake()
         self.start(self.l.url)
 
-    def start(self, litellm_url, classifier_url=None, valar_key="VK"):
+    def start(self, litellm_url, valar_key="VK"):
         self.dir = tempfile.mkdtemp()
-        cfg = Config("127.0.0.1", 0, self.a.url, litellm_url, "LK", self.v.url, valar_key)
+        cfg = Config("127.0.0.1", 0, self.a.url, (self.v.url, valar_key))
         self.app = App(cfg, self.dir)
-        self.app.routing = CLASSIFIER_OFF
-        if classifier_url:
-            self.app.classifier = Classifier({"valar": (classifier_url, "VK"), "local": (classifier_url, "LK")})
+        self.app.routing = replace(CLASSIFIER_OFF, downstreams=(replace(VALAR, url=self.v.url),))
         self.srv = make_server(cfg, self.app)
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.port = self.srv.server_address[1]
+
+    def set_valar_url(self, url):
+        self.app.routing = replace(self.app.routing, downstreams=(replace(self.app.routing.downstreams[0], url=url),))
 
     def tearDown(self):
         for s in (self.srv, self.a, self.v, self.l):
@@ -172,22 +172,19 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(json.loads(self.v.seen[1][3])["model"], "VH")
 
     def test_valar_window_header_and_row(self):
-        w = {"valar": {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}}
-        self.app.routing = replace(CLASSIFIER_OFF, windows=w)
+        w = {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}
+        self.app.routing = replace(self.app.routing, downstreams=(replace(self.app.routing.downstreams[0], windows=w),))
         self.post(body_for("claude-sonnet-5-5"), {**HDRS, "X-Valar-Completion-Window": "flex"})
         self.assertEqual(self.v.seen[0][2].get_all("X-Valar-Completion-Window"), ["standard"])
         self.post(body_for("claude-haiku-4-5"))
         self.assertEqual(self.v.seen[1][2]["X-Valar-Completion-Window"], "asap")
         self.app.routing = replace(self.app.routing, lever="anthropic")
         self.post(body_for("claude-sonnet-5-5"))
-        self.app.routing = replace(self.app.routing, lever="local")
-        self.post(body_for("claude-sonnet-5-5"))
         self.assertIsNone(self.a.seen[0][2]["X-Valar-Completion-Window"])
-        self.assertIsNone(self.l.seen[0][2]["X-Valar-Completion-Window"])
-        self.logged(4)
+        self.logged(3)
         self.app.store.close()
         rows = sorted(self.app.store.departures(), key=lambda r: r["id"])
-        self.assertEqual([r["window"] for r in rows], ["standard", "asap", None, None])
+        self.assertEqual([r["window"] for r in rows], ["standard", "asap", None])
 
     def test_valar_streams(self):
         c = HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -221,13 +218,53 @@ class ProxyTest(unittest.TestCase):
         self.post(body)
         self.assertEqual(self.a.seen[0][3], body)  # never on the Anthropic route
 
+    def test_generic_downstream_passthrough(self):
+        self.app.keys.set("lemmi", "LK")  # after start: keys are read per request
+        self.app.routing = replace(self.app.routing, lever="lemmi",
+                                   downstreams=self.app.routing.downstreams + (replace(LEMMI, url=self.l.url),))
+        t = {"name": "late", "input_schema": {"type": "object"}}
+        add = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": t}}
+        msgs = [{"role": "user", "content": "hi"}, {"role": "system", "content": [add]}]
+        self.assertEqual(self.post(body_for("claude-opus-5-5", {"messages": msgs}))[0], 200)
+        _, _, h, got = self.l.seen[0]
+        self.assertEqual(h["Authorization"], "Bearer LK")
+        self.assertIsNone(h["X-Valar-Completion-Window"])
+        j = json.loads(got)
+        self.assertEqual(j["model"], "deepseek-v4.1-flash")
+        self.assertEqual(j["messages"], msgs)  # no Valar hoisting on a generic downstream
+        self.assertEqual(self.a.seen + self.v.seen, [])
+        self.logged()
+        self.assertIn("route=lemmi", self.err.getvalue())
+
+    def test_valar_kind_keeps_window_and_hoist(self):  # Valar extras follow kind, not the id "valar"
+        w = {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}
+        fast = replace(VALAR, id="fast", name="Fast", url=self.v.url, windows=w)
+        self.app.keys.set("fast", "FK")
+        self.app.routing = replace(self.app.routing, lever="fast", downstreams=(fast,))
+        t = {"name": "late", "input_schema": {"type": "object"}}
+        add = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": t}}
+        msgs = [{"role": "user", "content": "hi"}, {"role": "system", "content": [add]}]
+        self.post(body_for("claude-sonnet-5-5", {"messages": msgs}))
+        _, _, h, got = self.v.seen[0]
+        self.assertEqual((h["Authorization"], h.get_all("X-Valar-Completion-Window")), ("Bearer FK", ["standard"]))
+        self.assertEqual(json.loads(got)["messages"], [{"role": "user", "content": "hi"}])
+        self.assertEqual(json.loads(got)["tools"], [t])
+
+    def test_no_key_502_names_downstream(self):
+        self.app.routing = replace(self.app.routing, lever="lemmi",
+                                   downstreams=self.app.routing.downstreams + (replace(LEMMI, url=self.l.url),))
+        status, data = self.post(body_for("claude-sonnet-5-5"))
+        self.assertEqual(status, 502)
+        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Lemmi has no key; set it in the console")
+        self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
+
     def test_valar_not_configured_502(self):
         self.srv.shutdown()
         self.srv.server_close()
         self.start(self.l.url, valar_key="")
         status, data = self.post(body_for("claude-sonnet-5-5"))
         self.assertEqual(status, 502)
-        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Valar not configured (VALAR_API_KEY unset)")
+        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Valar has no key; set it in the console")
         self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
 
     def test_valar_down_502(self):
@@ -241,14 +278,6 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertIn("Valar unreachable", json.loads(data)["error"]["message"])
         self.assertEqual(self.a.seen, [])
-
-    def test_local_still_works(self):
-        self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "go #local"}]}), {**HDRS, "x-api-key": "client"})
-        _, path, h, got = self.l.seen[0]
-        self.assertEqual(h["Authorization"], "Bearer LK")
-        self.assertIsNone(h["x-api-key"])
-        self.assertEqual(json.loads(got)["model"], "S")
-        self.assertEqual(self.v.seen + self.a.seen, [])
 
     def test_config_change_applies_next_request(self):
         self.post(body_for("claude-sonnet-5-5"))
@@ -281,8 +310,10 @@ class ProxyTest(unittest.TestCase):
         self.addCleanup(lambda: (slow.shutdown(), slow.server_close()))
         self.srv.shutdown()
         self.srv.server_close()
-        self.start(self.l.url, slow.url)
-        self.app.routing = replace(BASE, classifier=replace(BASE.classifier, timeout_s=0.2))
+        self.start(self.l.url)
+        self.app.keys.set("cls", "CK")
+        self.app.routing = replace(BASE, downstreams=(replace(VALAR, url=self.v.url), replace(LEMMI, id="cls", url=slow.url)),
+                                   classifier=replace(BASE.classifier, timeout_s=0.2, upstream="cls"))
         t = time.time()
         self.assertEqual(self.post(body_for("claude-sonnet-5-5"))[0], 200)
         self.assertLess(time.time() - t, 0.5)
@@ -334,13 +365,13 @@ class ProxyTest(unittest.TestCase):
         self.assertAlmostEqual(v["api_cost"], api)
         self.assertEqual(a["cost"], 0.0)
         self.assertAlmostEqual(a["api_cost"], api)
-        self.app.prices.set_valar({"VS": {"asap": [1.0, 0.5, 2.0]}})
-        self.assertEqual(self.app.store.reprice(self.app.prices), 1)
+        self.app.prices.set_listed("valar", {"VS": {"asap": [1.0, 0.5, 2.0]}})
+        self.assertEqual(self.app.store.reprice(self.app.prices, self.app.routing.downstreams), 1)
         self.assertAlmostEqual(self.app.store.request(v["id"])["cost"], (10 + 5 * 0.5 + 7 * 2) / 1e6)
-        self.assertEqual(self.app.store.reprice(self.app.prices), 0)
+        self.assertEqual(self.app.store.reprice(self.app.prices, self.app.routing.downstreams), 0)
 
     def test_valar_cost_at_record_time(self):
-        self.app.prices.set_valar({"VS": {"asap": [1.0, 0.5, 2.0]}})
+        self.app.prices.set_listed("valar", {"VS": {"asap": [1.0, 0.5, 2.0]}})
         self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "USAGE"}]}, stream=True))
         self.logged()
         self.app.store.close()
@@ -348,26 +379,26 @@ class ProxyTest(unittest.TestCase):
         self.assertAlmostEqual(r["cost"], (10 + 5 * 0.5 + 7 * 2) / 1e6)
         self.assertGreater(r["api_cost"], 0)
 
-    def test_refresh_valar_prices(self):
+    def test_refresh_prices(self):
         self.v.models = json.dumps({"data": [{"id": "VS", "pricing": [
             {"tier": "realtime", "input_per_1m_tokens": 1, "cached_input_per_1m_tokens": 0.5, "output_per_1m_tokens": 2}]},
             {"id": "valar-auto-balanced", "pricing": []}]}).encode()
         self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "USAGE"}]}, stream=True))
         self.logged()
         self.app.store.close()
-        self.app.refresh_valar_prices()
+        self.app.refresh_prices()
         self.assertEqual(self.v.seen[-1][:2], ("GET", "/v1/models"))
         self.assertAlmostEqual(self.app.store.departures()[0]["cost"], (10 + 5 * 0.5 + 7 * 2) / 1e6)
         with open(os.path.join(self.dir, "models.json")) as f:
             saved = json.load(f)
-        self.assertEqual(saved["valar_prices"], {"VS": {"asap": [1, 0.5, 2]}})
+        self.assertEqual(saved["listed_prices"]["valar"], {"VS": {"asap": [1, 0.5, 2]}})
         self.v.models = json.dumps({"data": [{"id": "VS", "pricing": []}]}).encode()
-        self.app.refresh_valar_prices()  # nothing priced: keep what we have
-        self.assertEqual(self.app.prices.valar, {"VS": {"asap": [1, 0.5, 2]}})
+        self.app.refresh_prices()  # nothing priced: keep what we have
+        self.assertEqual(self.app.prices.listed["valar"], {"VS": {"asap": [1, 0.5, 2]}})
         with open(os.path.join(self.dir, "models.json")) as f:
-            self.assertEqual(json.load(f)["valar_prices"], {"VS": {"asap": [1, 0.5, 2]}})
-        self.app.cfg = replace(self.app.cfg, valar_url="http://127.0.0.1:1")
-        self.app.refresh_valar_prices()  # failure is logged, never raised
+            self.assertEqual(json.load(f)["listed_prices"]["valar"], {"VS": {"asap": [1, 0.5, 2]}})
+        self.set_valar_url("http://127.0.0.1:1")
+        self.app.refresh_prices()  # failure is logged, never raised
         self.assertIn("valar prices", self.err.getvalue())
 
     def test_upstream_error_passthrough(self):
@@ -375,20 +406,6 @@ class ProxyTest(unittest.TestCase):
         s, data = self.post(body_for("claude-opus-5-5"))
         self.assertEqual(s, 529)
         self.assertEqual(data, b'{"type":"error","error":{"type":"overloaded_error"}}')
-
-    def test_litellm_down_502(self):
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            dead = "http://127.0.0.1:%d" % s.getsockname()[1]
-        self.srv.shutdown()
-        self.srv.server_close()
-        self.start(dead)
-        status, data = self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "#local"}]}))
-        self.assertEqual(status, 502)
-        j = json.loads(data)
-        self.assertEqual(j["type"], "error")
-        self.assertEqual(j["error"]["type"], "api_error")
-        self.assertIn("LiteLLM unreachable", j["error"]["message"])
 
     def test_client_disconnect_mid_stream(self):
         body = body_for("claude-opus-5-5", stream=True)
@@ -494,7 +511,7 @@ class ProxyTest(unittest.TestCase):
             self.app.store.close()
             self.dir = tempfile.mkdtemp()
             make(os.path.join(self.dir, "stats.db"))
-            cfg = Config("127.0.0.1", 0, self.a.url, self.l.url, "LK", self.v.url, "VK")
+            cfg = Config("127.0.0.1", 0, self.a.url, (self.v.url, "VK"))
             self.app = App(cfg, self.dir)
             self.assertTrue(self.app.banner.startswith("Stats are off: "), self.app.banner)
             self.srv = make_server(cfg, self.app)
@@ -502,6 +519,31 @@ class ProxyTest(unittest.TestCase):
             self.port = self.srv.server_address[1]
             self.assertEqual(self.post(body_for("claude-opus-5-5"))[0], 200)
             self.assertEqual(self.app.store.departures(), [])
+
+
+class SeedTest(unittest.TestCase):
+    def test_env_seeds_valar_once(self):
+        d = tempfile.mkdtemp()
+        cfg = Config("127.0.0.1", 0, "http://a", ("http://v.example", "k1"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            app = App(cfg, d)
+            self.assertEqual(app.keys.get("valar"), "k1")
+            self.assertTrue(app.routing.seeded)
+            self.assertEqual(app.routing.downstreams[0].url, "http://v.example")
+            self.assertEqual(oct(os.stat(os.path.join(d, "downstreams.keys.json")).st_mode & 0o777), "0o600")
+            self.assertNotIn("k1", open(os.path.join(d, "console.json")).read())
+            app.store.close()
+            app.keys.delete("valar")
+            lemmi = replace(app.routing.downstreams[0], id="lemmi", kind="generic", windows=None)
+            # the person replaced Valar with another downstream
+            app.set_routing(replace(app.routing, downstreams=(lemmi,), rules=tuple(replace(r, enabled=False) for r in app.routing.rules), lever="anthropic",
+                                    classifier=replace(app.routing.classifier, upstream="none", labels=tuple(replace(l, track="anthropic") for l in app.routing.classifier.labels)),
+                                    doubling=replace(app.routing.doubling, shadow={"anthropic": None, "lemmi": None})))
+            app.store.close()
+            app = App(cfg, d)  # same env, restarted
+            self.assertEqual([x.id for x in app.routing.downstreams], ["lemmi"])
+            self.assertFalse(app.keys.has("valar"))
+            app.store.close()
 
 
 class MainTest(unittest.TestCase):
@@ -512,7 +554,7 @@ class MainTest(unittest.TestCase):
     def test_unusable_config_dir_exits_2(self):
         f = tempfile.NamedTemporaryFile()
         err = io.StringIO()
-        env = {"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_CONFIG_DIR": os.path.join(f.name, "sub")}
+        env = {"CLAUDE_ROUTER_CONFIG_DIR": os.path.join(f.name, "sub")}
         with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
             claude_router.main()
         self.assertEqual(cm.exception.code, 2)
@@ -533,7 +575,7 @@ class RetryTest(unittest.TestCase):
         with mock.patch.object(claude_router, "_open_upstream", fake), \
                 mock.patch.object(claude_router, "RETRY_DELAYS", (0, 0, 0)):
             try:
-                return claude_router.open_upstream(None, "valar", "POST", "/v1/messages", iter([("h", "v")]), b"{}"), calls
+                return claude_router.open_upstream("http://v", "POST", "/v1/messages", iter([("h", "v")]), b"{}"), calls
             except Exception as e:
                 return e, calls
 
@@ -541,7 +583,7 @@ class RetryTest(unittest.TestCase):
         out, calls = self.run_with(ConnectionRefusedError(), ConnectionResetError(), ("conn", "resp"))
         self.assertEqual(out, ("conn", "resp"))
         self.assertEqual(len(calls), 3)
-        self.assertEqual(calls[2][4], [("h", "v")])  # headers survive retries even when given as an iterator
+        self.assertEqual(calls[2][3], [("h", "v")])  # headers survive retries even when given as an iterator
 
     def test_gives_up_after_three_retries(self):
         out, calls = self.run_with(*[ConnectionRefusedError()] * 4)

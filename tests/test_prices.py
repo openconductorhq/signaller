@@ -7,6 +7,15 @@ import unittest
 
 import prices
 from prices import Prices, parse_valar
+from routing import Downstream
+
+MODELS = dict.fromkeys(("fable", "opus", "sonnet", "haiku"), "m")
+VALAR = Downstream("valar", "Valar", "http://v", "valar", MODELS, "#000", dict.fromkeys(MODELS, "asap"))
+
+
+def generic(prices=None):
+    return Downstream("lemmi", "Lemmi", "http://l", "generic", MODELS, "#000", None, prices)
+
 
 PAYLOAD = {"data": [
     {"id": "moonshotai/Kimi-K3", "pricing": [
@@ -23,7 +32,7 @@ class PricesTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.p = Prices(self.dir)
-        self.p.set_valar(parse_valar(PAYLOAD))
+        self.p.set_listed("valar", parse_valar(PAYLOAD))
 
     def test_parse_valar(self):
         got = parse_valar(PAYLOAD)
@@ -32,14 +41,13 @@ class PricesTest(unittest.TestCase):
 
     def test_valar_cost(self):
         u = {"in": M, "out": 0, "cache_read": 0, "cache_write": 500}
-        self.assertAlmostEqual(self.p.cost("valar", "moonshotai/Kimi-K3", "standard", u), 1.125)  # cache write free
+        self.assertAlmostEqual(self.p.cost(VALAR, "moonshotai/Kimi-K3", "standard", u), 1.125)  # cache write free
         u = {"in": M, "out": M, "cache_read": M, "cache_write": None}
-        self.assertAlmostEqual(self.p.cost("valar", "moonshotai/Kimi-K3", "asap", u), 2.25 + 11.25 + 0.225)
-        self.assertIsNone(self.p.cost("valar", "nope", "asap", u))
-        self.assertIsNone(self.p.cost("valar", "moonshotai/Kimi-K3", None, u))
-        self.assertIsNone(self.p.cost("valar", "moonshotai/Kimi-K3", "asap", dict.fromkeys(u)))
-        self.assertEqual(self.p.cost("anthropic", "claude-opus-5-5", None, u), 0.0)
-        self.assertEqual(self.p.cost("local", "S", None, u), 0.0)
+        self.assertAlmostEqual(self.p.cost(VALAR, "moonshotai/Kimi-K3", "asap", u), 2.25 + 11.25 + 0.225)
+        self.assertIsNone(self.p.cost(VALAR, "nope", "asap", u))
+        self.assertIsNone(self.p.cost(VALAR, "moonshotai/Kimi-K3", None, u))
+        self.assertIsNone(self.p.cost(VALAR, "moonshotai/Kimi-K3", "asap", dict.fromkeys(u)))
+        self.assertEqual(self.p.cost(None, "claude-opus-5-5", None, u), 0.0)
 
     def test_api_cost(self):
         u = {"in": 1e6, "out": 1e6, "cache_read": 1e6, "cache_write": 1e6}
@@ -65,10 +73,29 @@ class PricesTest(unittest.TestCase):
         self.assertAlmostEqual(p.api_cost("claude-opus-5-5", {"in": M}), 4.0)
         self.assertIn("prices.json", err.getvalue())
 
+    def test_generic_manual_price(self):
+        ds = generic({"in": 1, "out": 2, "cache_read": 0.5, "cache_write": 1})
+        self.assertAlmostEqual(self.p.cost(ds, "m", None, {"in": M, "out": M, "cache_read": 0, "cache_write": 0}), 3.0)
+        self.assertAlmostEqual(self.p.cost(ds, "m", None, {"in": None, "out": None, "cache_read": M, "cache_write": M}), 1.5)
+
+    def test_generic_unpriced_is_none(self):
+        self.assertIsNone(self.p.cost(generic(), "m", None, {"in": M}))
+        self.assertIsNone(self.p.cost(generic({"in": 1, "out": 2, "cache_read": 0.5, "cache_write": 1}), "m", None, {}))
+
+    def test_listed_prices_are_per_downstream(self):
+        self.p.set_listed("v2", {"x": {"asap": [3, 0, 0]}})
+        self.assertAlmostEqual(self.p.cost(Downstream("v2", "V2", "u", "valar", MODELS, "#0", dict.fromkeys(MODELS, "asap")), "x", "asap", {"in": M}), 3.0)
+        self.assertIsNone(self.p.cost(VALAR, "x", "asap", {"in": M}))
+
+    def test_old_valar_prices_key_loads(self):
+        with open(os.path.join(self.dir, "models.json"), "w") as f:
+            json.dump({"valar_prices": {"x": {"asap": [1, 0, 0]}}}, f)
+        self.assertEqual(Prices(self.dir).listed, {"valar": {"x": {"asap": [1, 0, 0]}}})
+
     def test_valar_prices_loaded_from_models_json(self):
         with open(os.path.join(self.dir, "models.json"), "w") as f:
             json.dump({"valar": ["x"], "valar_prices": {"x": {"asap": [1, 0, 0]}}}, f)
-        self.assertAlmostEqual(Prices(self.dir).cost("valar", "x", "asap", {"in": M}), 1.0)
+        self.assertAlmostEqual(Prices(self.dir).cost(VALAR, "x", "asap", {"in": M}), 1.0)
 
 
 if __name__ == "__main__":

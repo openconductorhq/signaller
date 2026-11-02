@@ -1,10 +1,12 @@
 import hashlib
 import json
+import os
 import unittest
 from dataclasses import replace
 
 from claude_router import load_config
-from routing import (DEFAULT_CONFIG, ClassResult, Features, Rule, is_routed, session_of, config_from_json, config_to_json, route, tier_of, track_model, track_window)
+from routing import (DEFAULT_CONFIG, MODEL_TIERS, ClassResult, Downstream, Features, Rule, is_routed, session_of, config_from_json,
+                     config_to_json, downstream, references, route, tier_of, track_model, track_window, tracks, valid_id)
 
 
 def body(messages, model="claude-opus-5-5"):
@@ -45,43 +47,43 @@ def route_(messages, model="claude-opus-5-5"):
 
 
 class RouteTests(unittest.TestCase):
-    def test_tag_local_in_latest_human(self):
-        self.assertEqual(route_([user(text("do it #local"))]), ("local", "rule:Tags in your message:2"))
+    def test_tag_execution_in_latest_human(self):
+        self.assertEqual(route_([user(text("do it #execution"))]), ("valar", "rule:Tags in your message:2"))
 
     def test_tag_plan_beats_haiku(self):
         self.assertEqual(route_([user(text("#planning"))], "claude-haiku-4-5"), ("anthropic", "rule:Tags in your message:1"))
 
-    def test_tag_local_beats_opus(self):
-        self.assertEqual(route_([user(text("#local"))]), ("local", "rule:Tags in your message:2"))
+    def test_tag_execution_beats_opus(self):
+        self.assertEqual(route_([user(text("#execution"))]), ("valar", "rule:Tags in your message:2"))
 
     def test_both_tags_anthropic(self):
-        self.assertEqual(route_([user(text("#local and #planning"))]), ("anthropic", "rule:Tags in your message:1"))
+        self.assertEqual(route_([user(text("#execution and #planning"))]), ("anthropic", "rule:Tags in your message:1"))
 
     def test_tag_case_insensitive_whole_word(self):
-        self.assertEqual(route_([user(text("#LOCAL"))]), ("local", "rule:Tags in your message:2"))
-        self.assertEqual(route_([user(text("#localhost"))]), ("anthropic", "rule:Model the request asked for:1"))
+        self.assertEqual(route_([user(text("#EXECUTION"))]), ("valar", "rule:Tags in your message:2"))
+        self.assertEqual(route_([user(text("#executions"))]), ("anthropic", "rule:Model the request asked for:1"))
 
     def test_tag_in_older_message_ignored(self):
-        msgs = [user(text("#local")), assistant(text("ok")), user(text("next"))]
+        msgs = [user(text("#execution")), assistant(text("ok")), user(text("next"))]
         self.assertEqual(route_(msgs), ("anthropic", "rule:Model the request asked for:1"))
 
     def test_tool_result_only_message_skipped(self):
         msgs = [
-            user(text("#local go")),
+            user(text("#execution go")),
             assistant([{"type": "tool_use", "id": "t1", "name": "x", "input": {}}]),
             user([{"type": "tool_result", "tool_use_id": "t1", "content": "done"}]),
         ]
-        self.assertEqual(route_(msgs), ("local", "rule:Tags in your message:2"))
+        self.assertEqual(route_(msgs), ("valar", "rule:Tags in your message:2"))
 
     def test_system_reminder_block_ignored(self):
         blocks = [
-            {"type": "text", "text": "<system-reminder>#local</system-reminder>"},
+            {"type": "text", "text": "<system-reminder>#execution</system-reminder>"},
             {"type": "text", "text": "hello"},
         ]
         self.assertEqual(route_([user(blocks)]), ("anthropic", "rule:Model the request asked for:1"))
 
     def test_string_content(self):
-        self.assertEqual(route_([user("fix #local")]), ("local", "rule:Tags in your message:2"))
+        self.assertEqual(route_([user("fix #execution")]), ("valar", "rule:Tags in your message:2"))
 
     def test_tier(self):
         m = [user("hi")]
@@ -109,19 +111,19 @@ class RouteTests(unittest.TestCase):
 
 
 OPUS_CASES = [
-    ([user(text("do it #local"))], "local"),
+    ([user(text("do it #execution"))], "valar"),
     ([user(text("#planning"))], "anthropic"),
-    ([user(text("#local and #planning"))], "anthropic"),
-    ([user(text("#LOCAL"))], "local"),
-    ([user(text("#localhost"))], "anthropic"),
+    ([user(text("#execution and #planning"))], "anthropic"),
+    ([user(text("#EXECUTION"))], "valar"),
+    ([user(text("#executions"))], "anthropic"),
     ([user("hi")], "anthropic"),
-    ([user(text("#local")), assistant(text("ok")), user(text("next"))], "anthropic"),
-    ([user(text("#local go")),
+    ([user(text("#execution")), assistant(text("ok")), user(text("next"))], "anthropic"),
+    ([user(text("#execution go")),
       assistant([{"type": "tool_use", "id": "t1", "name": "x", "input": {}}]),
-      user([{"type": "tool_result", "tool_use_id": "t1", "content": "done"}])], "local"),
-    ([user([{"type": "text", "text": "<system-reminder>#local</system-reminder>"},
+      user([{"type": "tool_result", "tool_use_id": "t1", "content": "done"}])], "valar"),
+    ([user([{"type": "text", "text": "<system-reminder>#execution</system-reminder>"},
             {"type": "text", "text": "hello"}])], "anthropic"),
-    ([user("fix #local")], "local"),
+    ([user("fix #execution")], "valar"),
 ]
 
 
@@ -134,25 +136,25 @@ class EngineTests(unittest.TestCase):
         return route(cfg, Features.from_body(body(msgs or [user("hi")], model)), classify)
 
     def test_lever_overrides(self):
-        d = self.go(replace(DEFAULT_CONFIG, lever="local"), [user("#plan")])
-        self.assertEqual((d.track, d.reason), ("local", "lever"))
-        self.assertEqual(d.explanation, [{"rule": "Lever", "outcome": "sending everything to local", "decided": True}])
+        d = self.go(replace(DEFAULT_CONFIG, lever="valar"), [user("#plan")])
+        self.assertEqual((d.track, d.reason), ("valar", "lever"))
+        self.assertEqual(d.explanation, [{"rule": "Lever", "outcome": "sending everything to valar", "decided": True}])
 
     def test_first_match_and_explanation(self):
-        d = self.go(OFF, [user("#local")])
+        d = self.go(OFF, [user("#execution")])
         self.assertEqual(d.reason, "rule:Tags in your message:2")
-        self.assertEqual([e["outcome"] for e in d.explanation], ["no match", "line 2 matched \u2192 local", "not reached", "not reached"])
+        self.assertEqual([e["outcome"] for e in d.explanation], ["no match", "line 2 matched \u2192 valar", "not reached", "not reached"])
 
     def test_disabled_rule_skipped(self):
-        d = self.go(rules_with(OFF, tags=False), [user("#local")])
+        d = self.go(rules_with(OFF, tags=False), [user("#execution")])
         self.assertEqual((d.track, d.reason), ("anthropic", "rule:Model the request asked for:1"))
         self.assertEqual(d.explanation[1]["outcome"], "switched off")
 
     def test_otherwise_track(self):
-        cfg = replace(OFF, otherwise="local", rules=tuple(replace(r, enabled=False) for r in OFF.rules))
+        cfg = replace(OFF, otherwise="valar", rules=tuple(replace(r, enabled=False) for r in OFF.rules))
         d = self.go(cfg)
-        self.assertEqual((d.track, d.reason), ("local", "default"))
-        self.assertEqual(d.explanation[-1], {"rule": "Otherwise", "outcome": "\u2192 local", "decided": True})
+        self.assertEqual((d.track, d.reason), ("valar", "default"))
+        self.assertEqual(d.explanation[-1], {"rule": "Otherwise", "outcome": "\u2192 valar", "decided": True})
 
     def test_classifier_decides_at_threshold(self):
         d = self.go(DEFAULT_CONFIG, model="claude-sonnet-5-5", classify=cls("planning", 0.7))
@@ -176,20 +178,20 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(d.classified)
 
     def test_label_on_opus_never_classifies(self):
-        user_rule = Rule("U", "dsl", True, "when label is coding go local", None)
+        user_rule = Rule("U", "dsl", True, "when label is coding go valar", None)
         cfg = replace(DEFAULT_CONFIG, rules=(user_rule,) + DEFAULT_CONFIG.rules)
         d = self.go(cfg)
         self.assertEqual(d.track, "anthropic")
 
     def test_classify_called_once_per_route(self):
-        r = Rule("U", "dsl", True, "when label is coding go local", None)
+        r = Rule("U", "dsl", True, "when label is coding go valar", None)
         cfg = replace(DEFAULT_CONFIG, rules=(r,) + DEFAULT_CONFIG.rules[2:])
         calls = []
         def c(f, s):
             calls.append(1)
             return ClassResult("coding", 0.9, "")
         d = self.go(cfg, model="claude-sonnet-5-5", classify=c)
-        self.assertEqual((d.track, len(calls)), ("local", 1))
+        self.assertEqual((d.track, len(calls)), ("valar", 1))
         d = self.go(replace(cfg, rules=(r, cfg.rules[1])), model="claude-sonnet-5-5", classify=c)
         self.assertEqual(len(calls), 2)
 
@@ -219,9 +221,9 @@ class EngineTests(unittest.TestCase):
         # first system block as captured from Claude Code 2.1.316 (main thread, then a haiku subagent)
         main = "x-anthropic-billing-header: cc_version=2.1.316.f82; cc_entrypoint=sdk-cli;"
         sub = "x-anthropic-billing-header: cc_version=2.1.316.69c; cc_entrypoint=sdk-cli; cc_is_subagent=true;"
-        rule = Rule("Main thread stays home", "dsl", True, "when not subagent go anthropic\nwhen subagent go local")
+        rule = Rule("Main thread stays home", "dsl", True, "when not subagent go anthropic\nwhen subagent go valar")
         cfg = replace(OFF, rules=(rule,))
-        for first, track in ((main, "anthropic"), (sub, "local")):
+        for first, track in ((main, "anthropic"), (sub, "valar")):
             raw = json.dumps({"model": "claude-haiku-5-5", "system": [{"type": "text", "text": first}], "messages": [user("hi")]}).encode()
             self.assertEqual(route(cfg, Features.from_body(raw), boom).track, track)
 
@@ -232,10 +234,9 @@ INTENT = [
     ("claude-sonnet-5-5", "hi", "valar", "Model the request asked for:2"),
     ("claude-haiku-5-5", "hi", "valar", "Model the request asked for:2"),
     ("zai-org/GLM-5.3", "hi", "valar", "Model the request asked for:2"),
-    ("claude-opus-5-5", "#execution go", "valar", "Tags in your message:3"),
+    ("claude-opus-5-5", "#execution go", "valar", "Tags in your message:2"),
     ("claude-haiku-5-5", "#planning x", "anthropic", "Tags in your message:1"),
-    ("claude-opus-5-5", "#local x", "local", "Tags in your message:2"),
-    ("claude-opus-5-5", "#local #planning", "anthropic", "Tags in your message:1"),
+    ("claude-opus-5-5", "#execution #planning", "anthropic", "Tags in your message:1"),
     ("claude-opus-5-5", "#plan x", "anthropic", "Model the request asked for:1"),
 ]
 
@@ -281,15 +282,15 @@ class ThreeTrackTests(unittest.TestCase):
         self.assertEqual(d.explanation[2]["outcome"], "skipped: main session (fable)")
 
     def test_track_model(self):
-        m = {"fable": "F", "opus": "O", "sonnet": "S", "haiku": "H"}
-        self.assertEqual([track_model(x, m) for x in ("claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5",
-                                                      "claude-3-5-foo", "zai-org/GLM-5.3")],
+        ds = replace(DEFAULT_CONFIG.downstreams[0], models={"fable": "F", "opus": "O", "sonnet": "S", "haiku": "H"})
+        self.assertEqual([track_model(x, ds) for x in ("claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-5",
+                                                       "claude-3-5-foo", "zai-org/GLM-5.3")],
                          ["F", "O", "S", "H", "S", "zai-org/GLM-5.3"])
 
-    def test_models_without_fable_opus_serve_sonnet(self):
-        o = config_to_json(DEFAULT_CONFIG)
+    def test_v2_models_without_fable_opus_serve_sonnet(self):
+        o = v2()
         o["models"]["valar"] = {"sonnet": "S", "haiku": "H"}
-        self.assertEqual(config_from_json(o).models["valar"], {"fable": "S", "opus": "S", "sonnet": "S", "haiku": "H"})
+        self.assertEqual(config_from_json(o).downstreams[0].models, {"fable": "S", "opus": "S", "sonnet": "S", "haiku": "H"})
 
     def test_v1_migrates(self):
         v1 = {"version": 1, "lever": "rules", "otherwise": "anthropic",
@@ -299,40 +300,40 @@ class ThreeTrackTests(unittest.TestCase):
                              "labels": [{"name": "coding", "description": "d", "track": "local"}]},
               "doubling": {"rate": 0.5, "tag": "x", "when_local": True, "when_anthropic": False}}
         c = config_from_json(v1)
-        self.assertEqual(c.models, DEFAULT_CONFIG.models)
-        self.assertEqual(c.classifier.upstream, "local")
-        self.assertEqual(c.doubling.shadow, {"anthropic": None, "local": "anthropic", "valar": None})
+        self.assertEqual(c.downstreams, DEFAULT_CONFIG.downstreams)
+        self.assertEqual(c.classifier.upstream, "valar")  # v1's local classifier now asks Valar
+        self.assertEqual(c.classifier.labels[0].track, "anthropic")
+        self.assertEqual(c.doubling.shadow, {"anthropic": None, "valar": None})
         self.assertEqual(c.rules, DEFAULT_CONFIG.rules)
-        self.assertEqual(config_to_json(c)["version"], 2)
+        self.assertEqual(config_to_json(c)["version"], 3)
 
     def test_windows(self):
         o = config_to_json(DEFAULT_CONFIG)
-        self.assertEqual(o["windows"], {"valar": {"fable": "asap", "opus": "asap", "sonnet": "asap", "haiku": "asap"}})
-        del o["windows"]
-        self.assertEqual(config_from_json(o), DEFAULT_CONFIG)
-        o["windows"] = {"valar": {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}}
-        self.assertEqual(config_from_json(json.loads(json.dumps(o))).windows, o["windows"])
-        self.assertEqual(config_to_json(config_from_json(o))["windows"], o["windows"])
+        self.assertEqual(o["downstreams"][0]["windows"], {"fable": "asap", "opus": "asap", "sonnet": "asap", "haiku": "asap"})
+        o2 = v2()
+        del o2["windows"]
+        self.assertEqual(config_from_json(o2).downstreams[0].windows, {t: "asap" for t in MODEL_TIERS})
+        w = {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}
+        o["downstreams"][0]["windows"] = w
+        self.assertEqual(config_from_json(json.loads(json.dumps(o))).downstreams[0].windows, w)
         for bad in ("flex", "batch", None):
-            o["windows"]["valar"]["haiku"] = bad
-            with self.assertRaisesRegex(ValueError, "windows.valar.haiku must be asap, priority or standard"):
+            o["downstreams"][0]["windows"] = {**w, "haiku": bad}
+            with self.assertRaisesRegex(ValueError, "downstream valar: windows must be asap, priority or standard"):
                 config_from_json(o)
 
     def test_track_window(self):
-        w = {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}
-        self.assertEqual([track_window(x, w) for x in ("claude-opus-5", "claude-sonnet-5", "claude-3-5-foo", "zai-org/GLM-5.3")],
+        ds = replace(DEFAULT_CONFIG.downstreams[0], windows={"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"})
+        self.assertEqual([track_window(x, ds) for x in ("claude-opus-5", "claude-sonnet-5", "claude-3-5-foo", "zai-org/GLM-5.3")],
                          ["priority", "standard", "standard", "standard"])
+        self.assertIsNone(track_window("claude-opus-5", LEMMI))
 
-    def test_v2_roundtrip(self):
-        self.assertEqual(config_from_json(config_to_json(DEFAULT_CONFIG)), DEFAULT_CONFIG)
-
-    def test_v2_errors(self):
+    def test_bad_values(self):
         def mod(f):
             o = json.loads(json.dumps(config_to_json(DEFAULT_CONFIG)))
             f(o)
             return o
-        def pop_haiku(o): del o["models"]["valar"]["haiku"]
-        def empty(o): o["models"]["local"]["sonnet"] = ""
+        def pop_haiku(o): del o["downstreams"][0]["models"]["haiku"]
+        def empty(o): o["downstreams"][0]["models"]["sonnet"] = ""
         def up(o): o["classifier"]["upstream"] = "anthropic"
         def sh(v): return lambda o: o["doubling"]["shadow"].__setitem__("valar", v)
         for f in (pop_haiku, empty, up, sh("valar"), sh("openai"),
@@ -344,7 +345,7 @@ class ThreeTrackTests(unittest.TestCase):
 class ConfigJsonTests(unittest.TestCase):
     def test_config_roundtrip(self):
         j = config_to_json(DEFAULT_CONFIG)
-        self.assertEqual(j["version"], 2)
+        self.assertEqual(j["version"], 3)
         self.assertEqual(config_from_json(json.loads(json.dumps(j))), DEFAULT_CONFIG)
 
     def test_config_errors(self):
@@ -360,15 +361,15 @@ class ConfigJsonTests(unittest.TestCase):
             return with_rules([{**r, **kw} if n == i else r for n, r in enumerate(rules)])
         cl = config_to_json(DEFAULT_CONFIG)["classifier"]
         cases = [
-            (j(version=3), "unsupported config version"),
-            (j(lever="x"), "lever must be anthropic, rules, valar or local"),
+            (j(version=4), "unsupported config version"),
+            (j(lever="x"), "lever: no downstream named x"),
             (j(classifier={**cl, "threshold": 1.5}), "classifier threshold must be 0\u20131"),
             (j(doubling={**config_to_json(DEFAULT_CONFIG)["doubling"], "rate": 2}), "doubling rate must be 0\u20131"),
             (with_rules(rules + [{**rules[2], "name": "Second"}]), "there must be exactly one classifier rule"),
             (with_rules(rules[:1] + rules[2:]), "built-in rule 'tags' cannot be deleted"),
             (with_rules(rules + [{**rules[0], "name": rules[0]["name"], "builtin": None}]), "rule names must be unique"),
-            (j(classifier={**cl, "labels": [{"name": "a", "description": "d", "track": "x"}]}), "label track must be anthropic, valar or local"),
-            (edit(1, text="when tag is plan go"), "rule 'Tags in your message': line 1, col 21: expected anthropic, valar or local"),
+            (j(classifier={**cl, "labels": [{"name": "a", "description": "d", "track": "x"}]}), "label track: no downstream named x"),
+            (edit(1, text="when tag is plan go"), "rule 'Tags in your message': line 1, col 21: expected a track name"),
         ]
         for bad in ("inf", 1e300, float("nan"), float("inf"), -1, 0.05, 31, True):
             cases.append((j(classifier={**cl, "timeout_s": bad}), "classifier time limit must be 0.1\u201330 s"))
@@ -382,34 +383,30 @@ class ConfigJsonTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_config_defaults(self):
-        c = load_config({"LITELLM_API_KEY": "k"})
+        c = load_config({})
         self.assertEqual((c.listen_host, c.listen_port), ("127.0.0.1", 8787))
         self.assertEqual(c.anthropic_url, "https://api.anthropic.com")
-        self.assertEqual(c.litellm_url, "http://127.0.0.1:4000")
-        self.assertEqual(c.litellm_key, "k")
-        self.assertEqual(c.valar_url, "https://api.valarhq.ai")
-        c = load_config({})
-        self.assertEqual((c.litellm_key, c.valar_key), ("", ""))
+        self.assertEqual(c.env_valar, ("", ""))
 
     def test_config_valar_url_strip(self):
         for u in ("https://api.valarhq.ai/v1/", "https://api.valarhq.ai/", "https://api.valarhq.ai/v1"):
-            self.assertEqual(load_config({"VALAR_URL": u}).valar_url, "https://api.valarhq.ai")
+            self.assertEqual(load_config({"VALAR_URL": u}).env_valar[0], "https://api.valarhq.ai")
 
     def test_config_keys_optional(self):
         c = load_config({"VALAR_API_KEY": "v"})
-        self.assertEqual((c.valar_key, c.litellm_key), ("v", ""))
+        self.assertEqual(c.env_valar, ("", "v"))
         self.assertEqual(load_config({}).listen_port, 8787)
 
     def test_config_rejects_non_loopback(self):
         for listen in ("0.0.0.0:8787", "192.168.1.5:8787", "example.com:8787"):
             with self.assertRaises(ValueError):
-                load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": listen})
+                load_config({"CLAUDE_ROUTER_LISTEN": listen})
         self.assertEqual(load_config({"CLAUDE_ROUTER_LISTEN": "0.0.0.0:8787", "CLAUDE_ROUTER_IN_CONTAINER": "1"}).listen_host, "0.0.0.0")
         with self.assertRaises(ValueError):  # only the any-address, and only in a container
             load_config({"CLAUDE_ROUTER_LISTEN": "192.168.1.5:8787", "CLAUDE_ROUTER_IN_CONTAINER": "1"})
-        c = load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": "localhost:9000"})
+        c = load_config({"CLAUDE_ROUTER_LISTEN": "localhost:9000"})
         self.assertEqual((c.listen_host, c.listen_port), ("localhost", 9000))
-        c = load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": "[::1]:9000"})
+        c = load_config({"CLAUDE_ROUTER_LISTEN": "[::1]:9000"})
         self.assertEqual((c.listen_host, c.listen_port), ("::1", 9000))
 
 
@@ -432,3 +429,140 @@ class SessionTests(unittest.TestCase):
         for req in (None, {}, [], {"metadata": 5}, {"metadata": {"user_id": "{bad"}},
                     {"metadata": {"user_id": "[1]"}}, {"metadata": {"user_id": '{"session_id": 3}'}}):
             self.assertIsNone(session_of({}, req))
+
+
+FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "console_v2.json")
+LEMMI = Downstream("lemmi", "lemmi", "https://lemmi.example", "generic", {t: "deepseek-v4.1-flash" for t in MODEL_TIERS},
+                   "#1F8A5B", None, None)
+
+
+def v2():
+    with open(FIXTURE) as f:
+        return json.load(f)
+
+
+def with_lemmi(cfg=DEFAULT_CONFIG, **kw):
+    return replace(cfg, downstreams=cfg.downstreams + (LEMMI,),
+                   doubling=replace(cfg.doubling, shadow={**cfg.doubling.shadow, "lemmi": None}), **kw)
+
+
+class DownstreamTests(unittest.TestCase):
+    def test_v2_real_config_migrates_without_routing_change(self):
+        cfg = config_from_json(v2())
+        self.assertEqual([d.id for d in cfg.downstreams], ["valar"])
+        self.assertEqual(cfg.downstreams[0].models["opus"], "zai-org/GLM-5.3")
+        tags = next(r for r in cfg.rules if r.builtin == "tags")
+        self.assertEqual(tags.text, "when tag is planning go anthropic\nwhen tag is execution go valar")
+        self.assertEqual(cfg.migrated_off, ())
+        for model, t, want in (("claude-opus-5-5", "hi", "anthropic"), ("claude-sonnet-5-5", "hi", "valar"),
+                               ("claude-haiku-5-5", "hi", "valar"), ("claude-haiku-5-5", "#planning x", "anthropic")):
+            self.assertEqual(route(cfg, Features.from_body(body([user(t)], model)), boom).track, want, model)
+
+    def test_v2_stray_window_key_migrates(self):
+        o = v2()
+        o["windows"]["valar"]["stray"] = "asap"
+        cfg = config_from_json(o)
+        self.assertEqual(set(cfg.downstreams[0].windows), set(MODEL_TIERS))
+
+    def test_v2_local_references_repointed(self):
+        o = v2()
+        o.update(lever="local", otherwise="local")
+        o["classifier"].update(upstream="local")
+        o["classifier"]["labels"][0]["track"] = "local"
+        o["doubling"]["shadow"]["anthropic"] = "local"
+        o["rules"].insert(1, {"name": "Mine", "kind": "dsl", "enabled": True, "text": "when tag is x go local", "builtin": None})
+        cfg = config_from_json(o)
+        self.assertEqual((cfg.lever, cfg.otherwise, cfg.classifier.labels[0].track, cfg.classifier.upstream),
+                         ("rules", "anthropic", "anthropic", "valar"))
+        self.assertIsNone(cfg.doubling.shadow["anthropic"])
+        self.assertNotIn("local", cfg.doubling.shadow)
+        self.assertIs(next(r for r in cfg.rules if r.name == "Mine").enabled, False)
+        self.assertEqual(cfg.migrated_off, ("Mine",))
+
+    def test_v3_round_trip(self):
+        for cfg in (DEFAULT_CONFIG, with_lemmi()):
+            j = json.loads(json.dumps(config_to_json(cfg)))
+            self.assertEqual(j["version"], 3)
+            self.assertEqual(config_from_json(j), cfg)
+
+    def test_unknown_track_in_enabled_rule_rejected(self):
+        o = config_to_json(DEFAULT_CONFIG)
+        o["rules"].insert(1, {"name": "L", "kind": "dsl", "enabled": True, "text": "when tag is x go lemmi", "builtin": None})
+        with self.assertRaisesRegex(ValueError, "no downstream named lemmi"):
+            config_from_json(o)
+
+    def test_unknown_track_in_disabled_rule_allowed(self):
+        o = config_to_json(DEFAULT_CONFIG)
+        o["rules"].insert(1, {"name": "L", "kind": "dsl", "enabled": False, "text": "when tag is x go lemmi", "builtin": None})
+        self.assertEqual(config_from_json(o).rules[1].lines[0].track, "lemmi")
+
+    def test_valid_id(self):
+        self.assertIsNone(valid_id("lemmi", ["valar"]))
+        for bad in ("Lemmi", "anthropic", "name", "go", "tier", "a" * 25):
+            self.assertIsInstance(valid_id(bad, []), str, bad)
+        self.assertIsInstance(valid_id("lemmi", ["lemmi"]), str)
+
+    def test_references(self):
+        rule = Rule("Mine", "dsl", True, "when tag is a go anthropic\nwhen tag is b go lemmi")
+        off = Rule("Off", "dsl", False, "when tag is c go lemmi")
+        cs = DEFAULT_CONFIG.classifier
+        cfg = with_lemmi(lever="lemmi", otherwise="lemmi", rules=(off, rule) + DEFAULT_CONFIG.rules,
+                         classifier=replace(cs, upstream="lemmi", labels=(replace(cs.labels[2], track="lemmi"),) + cs.labels[3:]))
+        cfg = replace(cfg, doubling=replace(cfg.doubling, shadow={**cfg.doubling.shadow, "anthropic": "lemmi"}))
+        self.assertEqual(references(cfg, "lemmi", {"819a0a39-aaaa": "lemmi", "other": "valar"}),
+                         ["the lever", "session 819a0a39's lever", "rule 'Mine' line 2", "Otherwise",
+                          "classifier label 'coding'", "classifier upstream", "side by side: anthropic → lemmi"])
+        self.assertEqual(references(cfg, "valar", {}), ["rule 'Tags in your message' line 2", "rule 'Model the request asked for' line 2",
+                                                       "classifier label 'chit-chat'"])  # valar → anthropic is its own
+        own = replace(cfg, doubling=replace(cfg.doubling, shadow={**cfg.doubling.shadow, "anthropic": None, "lemmi": "anthropic"}))
+        self.assertNotIn("side by side: lemmi → anthropic", references(own, "lemmi", {}))  # its own outgoing shadow goes with it
+
+    def test_seven_downstreams_rejected(self):
+        o = config_to_json(DEFAULT_CONFIG)
+        o["downstreams"] += [{**o["downstreams"][0], "id": "d%d" % i, "kind": "generic", "windows": None} for i in range(6)]
+        o["doubling"]["shadow"].update({"d%d" % i: None for i in range(6)})
+        with self.assertRaisesRegex(ValueError, "at most 6 downstreams"):
+            config_from_json(o)
+        o["downstreams"].pop()
+        del o["doubling"]["shadow"]["d5"]
+        self.assertEqual(len(config_from_json(o).downstreams), 6)
+
+    def test_zero_downstreams(self):
+        o = config_to_json(DEFAULT_CONFIG)
+        o["downstreams"] = []
+        texts = {"tags": "when tag is planning go anthropic", "tier": "when tier is opus go anthropic"}
+        for r in o["rules"]:
+            r["text"] = texts.get(r["builtin"], r["text"])
+        o["classifier"]["upstream"] = "none"
+        o["classifier"]["labels"] = [l for l in o["classifier"]["labels"] if l["track"] == "anthropic"]
+        o["doubling"]["shadow"] = {"anthropic": None}
+        cfg = config_from_json(o)
+        self.assertEqual(tracks(cfg), ("anthropic",))
+        self.assertIsNone(downstream(cfg, "valar"))
+
+    def test_v3_errors(self):
+        def mod(f):
+            o = json.loads(json.dumps(config_to_json(with_lemmi())))
+            f(o)
+            return o
+        def ds(i, **kw): return lambda o: o["downstreams"][i].update(kw)
+        cases = [
+            (ds(1, id="valar"), "there is already a downstream named valar"),
+            (ds(1, id="Lemmi"), "id"),
+            (ds(0, windows=None), "windows"),
+            (ds(0, windows={"opus": "asap"}), "windows"),
+            (ds(1, kind="openai"), "kind"),
+            (ds(1, prices={"in": 1, "out": 2, "cache_read": 0}), "prices"),
+            (ds(1, prices={"in": 1, "out": -2, "cache_read": 0, "cache_write": 0}), "prices"),
+            (ds(1, models={"opus": "x"}), "models"),
+            (lambda o: o["classifier"].update(upstream="anthropic"), "classifier upstream"),
+            (lambda o: o["doubling"]["shadow"].pop("lemmi"), "shadow"),
+            (lambda o: o.update(lever="local"), "lever"),
+            (ds(1, color="#88888"), "color"),
+            (ds(1, color="red"), "color"),
+        ]
+        for f, frag in cases:
+            with self.assertRaisesRegex(ValueError, frag):
+                config_from_json(mod(f))
+        ok = mod(ds(1, prices={"in": 1, "out": 2.5, "cache_read": 0.1, "cache_write": 0}))
+        self.assertEqual(downstream(config_from_json(ok), "lemmi").prices["out"], 2.5)

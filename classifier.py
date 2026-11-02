@@ -1,9 +1,9 @@
-"""Prompt classifier: asks a model on the Valar or local LiteLLM upstream to pick one label; cached per turn, time-limited."""
+"""Prompt classifier: asks a model on a downstream to pick one label; cached per turn, time-limited."""
 import json
 import re
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable
 from http.client import HTTPConnection, HTTPSConnection
 from urllib.parse import urlsplit
 
@@ -13,13 +13,15 @@ BAD = ClassResult(None, None, "error: unusable answer")
 
 
 class Classifier:
-    def __init__(self, upstreams: Mapping[str, tuple[str, str]], cache_size: int = 512):
-        self.upstreams, self.size = dict(upstreams), cache_size  # track -> (base url, key)
+    def __init__(self, resolve: Callable[[str], tuple[str, str, str] | None], cache_size: int = 512):
+        self.resolve, self.size = resolve, cache_size  # downstream id -> (base url, key, kind), read every call
         self.cache = OrderedDict()  # key -> ClassResult (LRU)
         self.inflight = {}  # key -> Event
         self.lock = threading.Lock()
 
     def __call__(self, f: Features, s: ClassifierSettings) -> ClassResult:
+        if s.upstream == "none":
+            return ClassResult(None, None, "classifier: no upstream")
         key = (f.turn_key, s.upstream, s.model, tuple((l.name, l.description) for l in s.labels))
         with self.lock:
             if key in self.cache:
@@ -47,16 +49,19 @@ class Classifier:
         ev.set()
 
     def _ask(self, text, s):
-        url, key = self.upstreams[s.upstream]
+        up = self.resolve(s.upstream)
+        if not up:
+            return ClassResult(None, None, "classifier: no downstream named %s" % s.upstream)
+        url, key, kind = up
         if not key:
-            return ClassResult(None, None, "classifier: %s not configured" % ("Valar" if s.upstream == "valar" else "LiteLLM"))
+            return ClassResult(None, None, "classifier: %s has no key" % s.upstream)
         names = [l.name for l in s.labels]
         instr = ("Classify the user's message into exactly one label:\n"
                  + "\n".join("- %s: %s" % (l.name, l.description) for l in s.labels)
                  + '\nReply with only JSON: {"label": "<one of: %s>", "confidence": <0..1>}' % ", ".join(names))
         req = {"model": s.model, "temperature": 0, "max_tokens": 200, "messages": [
             {"role": "system", "content": instr}, {"role": "user", "content": text[:4000]}]}
-        if s.upstream == "valar":
+        if kind == "valar":
             req["reasoning_effort"] = "none"  # else Valar reasoning models are slow / return empty content
         body = json.dumps(req)
         u = urlsplit(url.rstrip("/"))

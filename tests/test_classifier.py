@@ -49,7 +49,7 @@ class T(unittest.TestCase):
         f = Fake(**kw)
         self.addCleanup(f.shutdown)
         self.addCleanup(f.server_close)
-        return f, Classifier({"local": (f.url, "k")})
+        return f, Classifier({"local": (f.url, "k", "generic")}.get)
 
     def test_labels_and_confidence(self):
         f, c = self.fake(content='Sure: {"label": "coding", "confidence": 0.88}')
@@ -92,9 +92,8 @@ class T(unittest.TestCase):
             self.assertIsNone(r.label)
             self.assertTrue(r.note.startswith("error:"), r.note)
 
-    def test_litellm_down(self):
-        f, c = self.fake()
-        c.upstreams["local"] = ("http://127.0.0.1:1", "k")
+    def test_upstream_down(self):
+        c = Classifier({"local": ("http://127.0.0.1:1", "k", "generic")}.get)
         t = time.time()
         r = c(feat(), S)
         self.assertTrue(r.note.startswith("error:"), r.note)
@@ -110,11 +109,11 @@ class T(unittest.TestCase):
         for x in (fv, fl):
             self.addCleanup(x.shutdown)
             self.addCleanup(x.server_close)
-        return fv, fl, Classifier({"valar": (fv.url, vkey), "local": (fl.url, "LK")})
+        return fv, fl, Classifier({"fast": (fv.url, vkey, "valar"), "local": (fl.url, "LK", "generic")}.get)
 
-    def test_upstream_valar(self):
+    def test_upstream_valar_kind(self):  # kind valar, not the id "valar", gets reasoning_effort
         fv, fl, c = self.two()
-        self.assertEqual(c(feat(), replace(S, upstream="valar")), ClassResult("coding", 0.88, ""))
+        self.assertEqual(c(feat(), replace(S, upstream="fast")), ClassResult("coding", 0.88, ""))
         auth, req = fv.seen[0]
         self.assertEqual((auth, req["reasoning_effort"], fl.seen), ("Bearer VK", "none", []))
 
@@ -126,10 +125,24 @@ class T(unittest.TestCase):
 
     def test_not_configured_silent(self):
         fv, fl, c = self.two(vkey="")
-        self.assertEqual(c(feat(), replace(S, upstream="valar")), ClassResult(None, None, "classifier: Valar not configured"))
+        self.assertEqual(c(feat(), replace(S, upstream="fast")), ClassResult(None, None, "classifier: fast has no key"))
+        self.assertEqual(c(feat(), replace(S, upstream="gone")), ClassResult(None, None, "classifier: no downstream named gone"))
         self.assertEqual((fv.seen, fl.seen), ([], []))
+
+    def test_upstream_none_decides_nothing(self):
+        fv, fl, c = self.two()
+        self.assertEqual(c(feat(), replace(S, upstream="none")), ClassResult(None, None, "classifier: no upstream"))
+        self.assertEqual((fv.seen, fl.seen), ([], []))
+
+    def test_resolved_each_call(self):  # a key set after start applies to the next turn
+        fv, fl, c = self.two(vkey="")
+        ups = {"fast": (fv.url, "", "valar")}
+        c = Classifier(ups.get)
+        self.assertIsNone(c(feat(key="a"), replace(S, upstream="fast")).label)
+        ups["fast"] = (fv.url, "VK", "valar")
+        self.assertEqual(c(feat(key="b"), replace(S, upstream="fast")).label, "coding")
 
     def test_cache_key_includes_upstream(self):
         fv, fl, c = self.two()
-        c(feat(), replace(S, upstream="valar")); c(feat(), S)
+        c(feat(), replace(S, upstream="fast")); c(feat(), S)
         self.assertEqual((len(fv.seen), len(fl.seen)), (1, 1))

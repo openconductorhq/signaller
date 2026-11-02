@@ -2,15 +2,20 @@
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict, dataclass, field
 from typing import Callable
 
-from rulelang import RuleError, evaluate, parse
+from rulelang import FIELDS, KEYWORDS, RuleError, evaluate, parse
 
 ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
 TAG_RE = re.compile(r"(?<!\w)#(\w+)", re.I)
 TEXT_CAP = 20_000
-TRACKS = ("anthropic", "valar", "local")
+MAX_DOWNSTREAMS = 6
+ID_RE = re.compile(r"[a-z][a-z0-9-]{0,23}")
+COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}")
+RESERVED_IDS = {"anthropic", "rules", "reset", "name"} | KEYWORDS | set(FIELDS)
+PRICE_KEYS = ("in", "out", "cache_read", "cache_write")
 
 
 def latest_human_text(messages: list) -> str:
@@ -61,19 +66,34 @@ def tier_of(model: str) -> str:
 MODEL_TIERS = ("fable", "opus", "sonnet", "haiku")
 
 
-def track_model(model: str, m: dict) -> str:
-    """The model id a non-Anthropic track serves for a request's model; non-claude ids pass through."""
-    if not model.startswith("claude-"):
-        return model
-    return m.get(tier_of(model), m["sonnet"])
-
-
 WINDOWS = ("asap", "priority", "standard")  # Valar completion windows; flex rejects streaming, batch is async: never sent
 
 
-def track_window(model: str, windows: dict) -> str:
-    """The Valar completion window for a request's model (same slot lookup as track_model)."""
-    return windows.get(tier_of(model), windows["sonnet"]) if model.startswith("claude-") else windows["sonnet"]
+@dataclass(frozen=True)
+class Downstream:
+    id: str
+    name: str
+    url: str
+    kind: str  # "valar" | "generic"
+    models: dict  # tier -> model id, every MODEL_TIERS
+    color: str
+    windows: dict | None = None  # tier -> WINDOWS value; valar only
+    prices: dict | None = None  # PRICE_KEYS -> USD per 1M tokens; generic only, None = unpriced
+
+
+def track_model(model: str, ds: Downstream) -> str:
+    """The model id a downstream serves for a request's model; non-claude ids pass through."""
+    if not model.startswith("claude-"):
+        return model
+    return ds.models.get(tier_of(model), ds.models["sonnet"])
+
+
+def track_window(model: str, ds: Downstream) -> str | None:
+    """The Valar completion window for a request's model (same slot lookup as track_model); None off Valar."""
+    if ds.kind != "valar":
+        return None
+    w = ds.windows
+    return w.get(tier_of(model), w["sonnet"]) if model.startswith("claude-") else w["sonnet"]
 
 
 class Features:
@@ -163,8 +183,40 @@ class RoutingConfig:
     rules: tuple[Rule, ...]
     classifier: ClassifierSettings
     doubling: Doubling
-    models: dict  # {"valar"|"local": {"sonnet": id, "haiku": id}}
-    windows: dict = field(default_factory=lambda: {"valar": {t: "asap" for t in MODEL_TIERS}})
+    downstreams: tuple[Downstream, ...]
+    seeded: bool = False  # the valar downstream got its url/key from the env once
+    migrated_off: tuple[str, ...] = field(default=(), compare=False)  # rules the v2→v3 migration switched off; banner only
+
+
+def tracks(cfg: RoutingConfig) -> tuple[str, ...]:
+    return ("anthropic",) + tuple(d.id for d in cfg.downstreams)
+
+
+def downstream(cfg: RoutingConfig, id: str) -> Downstream | None:
+    return next((d for d in cfg.downstreams if d.id == id), None)
+
+
+def valid_id(id: str, taken: Iterable[str]) -> str | None:
+    """Why id can't name a new downstream, or None."""
+    if not isinstance(id, str) or not ID_RE.fullmatch(id):
+        return "id must be a lowercase letter, then up to 23 lowercase letters, digits or dashes"
+    if id in RESERVED_IDS:
+        return f"'{id}' is reserved"
+    if id in taken:
+        return f"there is already a downstream named {id}"
+    return None
+
+
+def references(cfg: RoutingConfig, id: str, session_levers: Mapping[str, str]) -> list[str]:
+    """What still points at a track, in words; any of these blocks deleting it. Switched-off rules don't count."""
+    out = ["the lever"] if cfg.lever == id else []
+    out += [f"session {sid[:8]}'s lever" for sid, lv in session_levers.items() if lv == id]
+    out += [f"rule '{r.name}' line {n}" for r in cfg.rules if r.enabled for n, ln in enumerate(r.lines, 1) if ln.track == id]
+    out += ["Otherwise"] if cfg.otherwise == id else []
+    out += [f"classifier label '{l.name}'" for l in cfg.classifier.labels if l.track == id]
+    out += ["classifier upstream"] if cfg.classifier.upstream == id else []
+    out += [f"side by side: {t} → {o}" for t, o in cfg.doubling.shadow.items() if o == id]  # its own shadow[id] goes with it
+    return out
 
 
 SERVERTOOL_RULE = Rule("Tools only Anthropic can run", "dsl", True, "when servertool go anthropic", "servertool")
@@ -173,7 +225,7 @@ DEFAULT_CONFIG = RoutingConfig(
     lever="rules", otherwise="anthropic",
     rules=(
         SERVERTOOL_RULE,
-        Rule("Tags in your message", "dsl", True, "when tag is planning go anthropic\nwhen tag is local go local\nwhen tag is execution go valar", "tags"),
+        Rule("Tags in your message", "dsl", True, "when tag is planning go anthropic\nwhen tag is execution go valar", "tags"),
         Rule("What the prompt is about", "classifier", True, "", "classifier"),
         Rule("Model the request asked for", "dsl", True,
              "when tier is opus or tier is fable go anthropic\n"
@@ -185,12 +237,12 @@ DEFAULT_CONFIG = RoutingConfig(
         Label("coding", "writing, editing, fixing or running code", "valar"),
         Label("chit-chat", "greetings, thanks, small talk", "valar"),
     ), "valar"),
-    doubling=Doubling(0, "", {"anthropic": "valar", "valar": "anthropic", "local": None}),
-    models={"valar": {"fable": "zai-org/GLM-5.3", "opus": "zai-org/GLM-5.3", "sonnet": "zai-org/GLM-5.3",
-                      "haiku": "deepseek-ai/DeepSeek-V4.1-Flash-1017"},
-            "local": {"fable": "claude-sonnet-4-6", "opus": "claude-sonnet-4-6", "sonnet": "claude-sonnet-4-6",
-                      "haiku": "claude-haiku-4-5-20251001"}},
+    doubling=Doubling(0, "", {"anthropic": "valar", "valar": "anthropic"}),
+    downstreams=(Downstream("valar", "Valar", "https://api.valarhq.ai", "valar",
+                            {"fable": "zai-org/GLM-5.3", "opus": "zai-org/GLM-5.3", "sonnet": "zai-org/GLM-5.3",
+                             "haiku": "deepseek-ai/DeepSeek-V4.1-Flash-1017"}, "#2F6DB5", {t: "asap" for t in MODEL_TIERS}),),
 )
+V2_TAGS_TEXT = "when tag is planning go anthropic\nwhen tag is local go local\nwhen tag is execution go valar"
 
 
 def _num(v, lo, hi, msg):
@@ -203,26 +255,99 @@ def _unit(v, what):
     return _num(v, 0, 1, f"{what} must be 0–1")
 
 
-def _track(v, what):
-    if v not in TRACKS:
-        raise ValueError(f"{what} must be anthropic, valar or local")
+def _track(v, ts, what):
+    if v not in ts:
+        raise ValueError(f"{what}: no downstream named {v}")
     return v
+
+
+def _v1_to_v2(obj):
+    d = obj["doubling"]
+    return {**obj, "version": 2, "models": {"valar": dict(DEFAULT_CONFIG.downstreams[0].models)},
+            "classifier": {**obj["classifier"], "upstream": "local"},
+            "doubling": {"rate": d["rate"], "tag": d["tag"],
+                         "shadow": {"anthropic": "local" if d["when_anthropic"] else None, "valar": None,
+                                    "local": "anthropic" if d["when_local"] else None}}}
+
+
+def _goes_local(text):
+    try:
+        return any(ln.track == "local" for ln in parse(text))
+    except RuleError:
+        return False  # the load reports it
+
+
+def _v2_to_v3(obj):
+    """Valar becomes a downstream; Local is dropped and whatever pointed at it re-pointed (rules: switched off)."""
+    loc = lambda v, to: to if v == "local" else v
+    m = obj["models"]["valar"]  # configs from before fable/opus had their own model: those served sonnet's
+    w = (obj.get("windows") or {}).get("valar", {})
+    rules, off = [], []
+    for r in obj["rules"]:
+        if r.get("builtin") == "tags" and r.get("text") == V2_TAGS_TEXT:
+            r = {**r, "text": DEFAULT_CONFIG.rules[1].text}
+        elif r.get("kind") == "dsl" and r.get("enabled") and _goes_local(r.get("text", "")):
+            r = {**r, "enabled": False}
+            off.append(r["name"])
+        rules.append(r)
+    c, d = obj["classifier"], obj["doubling"]
+    return {**obj, "version": 3, "seeded": False, "rules": rules,
+            "lever": loc(obj["lever"], "rules"), "otherwise": loc(obj["otherwise"], "anthropic"),
+            "classifier": {**c, "upstream": loc(c["upstream"], "valar"),
+                           "labels": [{**l, "track": loc(l["track"], "anthropic")} for l in c["labels"]]},
+            "doubling": {**d, "shadow": {t: loc(o, None) for t, o in d["shadow"].items() if t != "local"}},
+            "downstreams": [{"id": "valar", "name": "Valar", "url": "https://api.valarhq.ai", "kind": "valar", "color": "#2F6DB5",
+                             "models": {"fable": m["sonnet"], "opus": m["sonnet"], **{k: m[k] for k in m if k in MODEL_TIERS}},
+                             "windows": {t: w.get(t, "asap") for t in MODEL_TIERS}, "prices": None}]}, tuple(off)
+
+
+def _downstream(d, taken):
+    err = valid_id(d["id"], taken)
+    if err:
+        raise ValueError(err)
+    i = d["id"]
+    if d["kind"] not in ("valar", "generic"):
+        raise ValueError(f"downstream {i}: kind must be valar or generic")
+    for k in ("name", "url", "color"):
+        if not isinstance(d[k], str) or not d[k]:
+            raise ValueError(f"downstream {i}: {k} must be non-empty text")
+    if not COLOR_RE.fullmatch(d["color"]):
+        raise ValueError(f"downstream {i}: color must be #RRGGBB")
+    m = d["models"]
+    if not isinstance(m, dict) or set(m) != set(MODEL_TIERS) or not all(isinstance(v, str) and v for v in m.values()):
+        raise ValueError(f"downstream {i}: models must name a model for each of fable, opus, sonnet, haiku")
+    windows = prices = None
+    if d["kind"] == "valar":
+        w = d.get("windows")
+        if not isinstance(w, dict) or set(w) != set(MODEL_TIERS) or not all(isinstance(v, str) and v in WINDOWS for v in w.values()):
+            raise ValueError(f"downstream {i}: windows must be asap, priority or standard for each of fable, opus, sonnet, haiku")
+        windows = {t: w[t] for t in MODEL_TIERS}
+    elif d.get("prices") is not None:
+        p, msg = d["prices"], f"downstream {i}: prices must be in, out, cache_read and cache_write, each 0 or more"
+        if not isinstance(p, dict) or set(p) != set(PRICE_KEYS):
+            raise ValueError(msg)
+        prices = {k: float(_num(p[k], 0, 1e6, msg)) for k in PRICE_KEYS}
+    return Downstream(i, d["name"], d["url"], d["kind"], {t: m[t] for t in MODEL_TIERS}, d["color"], windows, prices)
 
 
 def config_from_json(obj: dict) -> RoutingConfig:
     try:
         if obj.get("version") == 1:
-            d = obj["doubling"]
-            obj = {**obj, "version": 2, "models": {k: dict(v) for k, v in DEFAULT_CONFIG.models.items()},
-                   "classifier": {**obj["classifier"], "upstream": "local"},
-                   "doubling": {"rate": d["rate"], "tag": d["tag"],
-                                "shadow": {"anthropic": "local" if d["when_anthropic"] else None, "valar": None,
-                                           "local": "anthropic" if d["when_local"] else None}}}
-        if obj.get("version") != 2:
+            obj = _v1_to_v2(obj)
+        off = ()
+        if obj.get("version") == 2:
+            obj, off = _v2_to_v3(obj)
+        if obj.get("version") != 3:
             raise ValueError("unsupported config version")
-        if obj["lever"] not in ("anthropic", "rules", "valar", "local"):
-            raise ValueError("lever must be anthropic, rules, valar or local")
-        otherwise = _track(obj["otherwise"], "otherwise")
+        if len(obj["downstreams"]) > MAX_DOWNSTREAMS:
+            raise ValueError(f"at most {MAX_DOWNSTREAMS} downstreams")
+        dss = []
+        for d in obj["downstreams"]:
+            dss.append(_downstream(d, [x.id for x in dss]))
+        ts = ("anthropic",) + tuple(d.id for d in dss)
+        if obj["lever"] != "rules":
+            _track(obj["lever"], ts, "lever")
+        otherwise = _track(obj["otherwise"], ts, "otherwise")
         rules = tuple(Rule(r["name"], r["kind"], bool(r["enabled"]), r.get("text", ""), r.get("builtin"))
                       for r in obj["rules"])
         if not any(r.builtin == "servertool" for r in rules):  # configs saved before it existed get it on top
@@ -236,40 +361,33 @@ def config_from_json(obj: dict) -> RoutingConfig:
             raise ValueError("there must be exactly one classifier rule")
         if len({r.name for r in rules}) != len(rules):
             raise ValueError("rule names must be unique")
+        for r in rules:  # a switched-off rule may name a downstream that's gone; switching it on re-checks
+            for ln in r.lines if r.enabled else ():
+                _track(ln.track, ts, f"rule '{r.name}'")
         c = obj["classifier"]
-        labels = tuple(Label(l["name"], l["description"], _track(l["track"], "label track")) for l in c["labels"])
+        labels = tuple(Label(l["name"], l["description"], _track(l["track"], ts, "label track")) for l in c["labels"])
         thr = _unit(c["threshold"], "classifier threshold")
-        if c["upstream"] not in ("valar", "local"):
-            raise ValueError("classifier upstream must be valar or local")
+        if c["upstream"] != "none":
+            _track(c["upstream"], ts[1:], "classifier upstream")
         d = obj["doubling"]
         sh = d["shadow"]
-        if set(sh) != set(TRACKS):
+        if set(sh) != set(ts):
             raise ValueError("doubling shadow must cover every track")
         for t, o in sh.items():
-            if o is not None and (o not in TRACKS or o == t):
+            if o is not None and (o not in ts or o == t):
                 raise ValueError(f"doubling shadow for {t} must be another track or none")
-        dbl = Doubling(_unit(d["rate"], "doubling rate"), str(d["tag"]), {t: sh[t] for t in TRACKS})
-        models = {}
-        for t in ("valar", "local"):
-            m = obj["models"][t]  # configs from before fable/opus had their own model: those served sonnet's
-            models[t] = {"fable": m["sonnet"], "opus": m["sonnet"], **{k: m[k] for k in m if k in MODEL_TIERS}, "haiku": m["haiku"]}
-            if not all(isinstance(v, str) and v for v in models[t].values()):
-                raise ValueError(f"models.{t} must be non-empty text")
-        w = {**{t: "asap" for t in MODEL_TIERS}, **(obj.get("windows") or {}).get("valar", {})}
-        for t in MODEL_TIERS:
-            if w[t] not in WINDOWS:
-                raise ValueError(f"windows.valar.{t} must be asap, priority or standard")
+        dbl = Doubling(_unit(d["rate"], "doubling rate"), str(d["tag"]), {t: sh[t] for t in ts})
         return RoutingConfig(obj["lever"], otherwise, rules,
                              ClassifierSettings(str(c["model"]), thr,
                                                 float(_num(c["timeout_s"], 0.1, 30, "classifier time limit must be 0.1–30 s")), labels,
-                                                c["upstream"]), dbl, models, {"valar": {t: w[t] for t in MODEL_TIERS}})
+                                                c["upstream"]), dbl, tuple(dss), bool(obj.get("seeded", False)), off)
     except (KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"bad config: {e!r}") from None
 
 
 def config_to_json(cfg: RoutingConfig) -> dict:
     return {
-        "version": 2, "lever": cfg.lever, "otherwise": cfg.otherwise,
+        "version": 3, "lever": cfg.lever, "otherwise": cfg.otherwise, "seeded": cfg.seeded,
         "rules": [{"name": r.name, "kind": r.kind, "enabled": r.enabled, "text": r.text, "builtin": r.builtin}
                   for r in cfg.rules],
         "classifier": {"model": cfg.classifier.model, "threshold": cfg.classifier.threshold,
@@ -278,8 +396,7 @@ def config_to_json(cfg: RoutingConfig) -> dict:
                                   for l in cfg.classifier.labels]},
         "doubling": {"rate": cfg.doubling.rate, "tag": cfg.doubling.tag,
                      "shadow": dict(cfg.doubling.shadow)},
-        "models": {t: dict(m) for t, m in cfg.models.items()},
-        "windows": {t: dict(m) for t, m in cfg.windows.items()},
+        "downstreams": [asdict(d) for d in cfg.downstreams],
     }
 
 
@@ -299,7 +416,7 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
     if cfg.lever != "rules":
         return Decision(cfg.lever, "lever", [{"rule": "Lever", "outcome": f"sending everything to {cfg.lever}", "decided": True}])
     cs = cfg.classifier
-    tracks = {l.name.lower(): l.track for l in cs.labels}
+    by_label = {l.name.lower(): l.track for l in cs.labels}
     memo = []
 
     def result():
@@ -309,9 +426,9 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
 
     def confident(r):
         return r.label is not None and r.confidence is not None and r.confidence >= cs.threshold \
-            and r.label.lower() in tracks
+            and r.label.lower() in by_label
 
-    on = any(r.kind == "classifier" and r.enabled for r in cfg.rules)
+    on = cs.upstream != "none" and any(r.kind == "classifier" and r.enabled for r in cfg.rules)
 
     def label():
         if f.tier in ("opus", "fable") or not on:
@@ -325,7 +442,7 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
         out.append(item)
         if track:
             item["outcome"] = "not reached"
-        elif not rule.enabled:
+        elif not rule.enabled or (rule.kind == "classifier" and not on):  # upstream "none": as if switched off
             item["outcome"] = "switched off"
         elif rule.kind == "dsl":
             item["outcome"] = "no match"
@@ -341,7 +458,7 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
             r = result()
             pct = f"{round((r.confidence or 0) * 100)}%"
             if confident(r):
-                track, item["decided"] = tracks[r.label.lower()], True
+                track, item["decided"] = by_label[r.label.lower()], True
                 reason, item["outcome"] = f"about:{r.label}", f"{r.label}, {pct} sure → {track}"
             elif r.label is None:
                 item["outcome"] = r.note

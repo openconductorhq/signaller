@@ -4,12 +4,15 @@ import os
 import re
 import tempfile
 import time
+import sys
+import urllib.error
 import urllib.request
-from dataclasses import replace
+from dataclasses import asdict, replace
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from prices import parse_valar
-from routing import TRACKS, WINDOWS, _sid_ok, ClassResult, Rule, config_from_json, config_to_json, route
+from routing import (MAX_DOWNSTREAMS, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, config_from_json, config_to_json,
+                     downstream, references, route, tracks, valid_id)
 from rulelang import RuleError, parse
 
 UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui")
@@ -20,6 +23,8 @@ TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
          ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8"}
 SEC = {"Content-Security-Policy": "default-src 'self'", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"}
 NOT_RE = ClassResult(None, None, "not re-classified")
+PALETTE = ("#1F8A5B", "#6B5BD6", "#C8412F", "#8A6D1F", "#1F7A8A", "#A0418A")  # new downstreams, in order, skipping used ones
+VALAR_HOST = "api.valarhq.ai"
 
 
 class Err(Exception):
@@ -93,7 +98,7 @@ def list_models(url, key, timeout=5):
 
 
 def read_models(config_dir):
-    """models.json: the last list each upstream gave us (+ valar_prices), also hand-editable for an upstream that's down."""
+    """models.json: the last list each upstream gave us (+ listed_prices), also hand-editable for an upstream that's down."""
     try:
         with open(os.path.join(config_dir, "models.json")) as f:
             saved = json.load(f)
@@ -103,6 +108,7 @@ def read_models(config_dir):
 
 
 def save_models(config_dir, **updates):
+    """Merge updates into models.json; a None value drops that key (a deleted downstream's list)."""
     # ponytail: read-merge-write; a concurrent save can lose the other's keys until the next refresh rewrites them
     saved = read_models(config_dir)
     if all(saved.get(k) == v for k, v in updates.items()):
@@ -110,11 +116,97 @@ def save_models(config_dir, **updates):
     fd, tmp = tempfile.mkstemp(dir=config_dir)
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump({**saved, **updates}, f, indent=1)
+            json.dump({k: v for k, v in {**saved, **updates}.items() if v is not None}, f, indent=1)
         os.replace(tmp, os.path.join(config_dir, "models.json"))
     except BaseException:
         os.unlink(tmp)
         raise
+
+
+def clean_url(url):
+    if not isinstance(url, str):
+        raise Err(400, "url must be text")
+    return url.strip().rstrip("/").removesuffix("/v1")
+
+
+def probe(url, key):
+    """GET {url}/v1/models (never a message): {ok, reason, models, kind}. The reason never carries the key."""
+    u = urlsplit(url)
+    out = {"ok": False, "reason": None, "models": [], "kind": "valar" if u.hostname == VALAR_HOST else "generic"}
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return {**out, "reason": "the url must start with http:// or https://"}
+    try:
+        payload = fetch_models(url, key)
+    except urllib.error.HTTPError as e:
+        return {**out, "reason": "HTTP %d" % e.code}
+    except urllib.error.URLError as e:  # the socket's reason: no headers in it
+        return {**out, "reason": "timed out" if isinstance(e.reason, TimeoutError) else str(e.reason)}
+    except TimeoutError:
+        return {**out, "reason": "timed out"}
+    except ValueError:
+        return {**out, "reason": "not a model list (the answer isn't JSON)"}
+    except Exception as e:  # type only: some messages quote the request's headers
+        return {**out, "reason": type(e).__name__}
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list) or not all(isinstance(m, dict) and isinstance(m.get("id"), str) for m in data):
+        return {**out, "reason": "not a model list (no data[].id)"}
+    try:
+        valar = bool(parse_valar(payload))
+    except Exception:
+        valar = False
+    return {"ok": True, "reason": None, "models": sorted(m["id"] for m in data), "kind": "valar" if valar else out["kind"]}
+
+
+def add_downstream(app, body):
+    """The wizard's save: kind (from a probe), windows and colour are ours to set; a failed probe still saves."""
+    if not isinstance(body, dict):
+        raise Err(400, "body must be an object")
+    cur = app.routing
+    err = valid_id(body.get("id"), tracks(cur)[1:])
+    if err:
+        raise Err(400, err)
+    if len(cur.downstreams) >= MAX_DOWNSTREAMS:
+        raise Err(409, "at most %d downstreams" % MAX_DOWNSTREAMS)
+    url, key = clean_url(body.get("url")), body.get("key") or ""
+    if urlsplit(url).scheme not in ("http", "https"):
+        raise Err(400, "the url must start with http:// or https://")
+    if not isinstance(key, str):
+        raise Err(400, "key must be text")
+    kind = probe(url, key)["kind"]
+    used = {d.color for d in cur.downstreams}
+    color = next((c for c in PALETTE if c not in used), PALETTE[len(used) % len(PALETTE)])
+    d = {"id": body["id"], "name": body.get("name"), "url": url, "kind": kind, "models": body.get("models"), "color": color,
+         "windows": dict.fromkeys(MODEL_TIERS, "asap") if kind == "valar" else None, "prices": body.get("prices")}
+    try:
+        return asdict(app.add_downstream(d, key))
+    except ValueError as e:
+        raise Err(409 if str(e).startswith("at most") else 400, str(e))
+
+
+def forget_models(app, ids):
+    """A deleted downstream's saved model list goes too: one re-added under its id must not show it."""
+    try:
+        save_models(app.config_dir, **dict.fromkeys(ids))
+    except OSError:
+        pass
+
+
+def in_use(id, refs):
+    return Err(409, "%s is still in use: %s" % (id, "; ".join(refs)), references=refs)
+
+
+def check_downstream_edits(app, new):
+    """A config PUT may edit downstreams (name, url, models, windows, prices), never add or remove one."""
+    before = {d.id: d for d in app.routing.downstreams}
+    for d in new.downstreams:
+        o = before.get(d.id)
+        if o is None:
+            raise Err(400, "downstream %s is new: add downstreams with the wizard, and ids can't be changed" % d.id)
+        for k in ("kind", "color"):
+            if getattr(d, k) != getattr(o, k):
+                raise Err(400, "downstream %s: %s can't be changed" % (d.id, k))
+    if any(downstream(new, i) is None for i in before):
+        raise Err(400, "remove downstreams with Delete on the Tracks row")
 
 
 def windows_of(valar_prices):
@@ -137,19 +229,15 @@ def filt(query):
 
 
 def state(app, query=None):
-    from claude_router import upstream
     ids, t0, t1 = filt(query or {})
     if t0 is None:  # whole session
         t0 = app.store.first_ts(ids)
-    def up(t):
-        _, url, key = upstream(app.cfg, t)
-        return {"url": urlsplit(url).netloc, "configured": bool(key)}
-    c = app.cfg
-    return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()),
-            "summary": app.store.summary(ids, t0, t1, time.time()), "banner": app.banner,
+    c, ts = app.cfg, tracks(app.routing)
+    return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time(), ts),
+            "summary": app.store.summary(ids, t0, t1, time.time(), tracks(app.routing)), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
-            "upstreams": {"valar": up("valar"), "local": up("local")},
+            "downstreams": {d.id: {"key_set": app.keys.has(d.id), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
             "recent_count": len(app.recent), "session_levers": dict(app.session_levers)}
 
 
@@ -160,9 +248,9 @@ def api(h, app, method, path, query, body):
     if path == "/ui/api/models" and method == "GET":
         from claude_router import upstream
         t = (query.get("track") or [""])[0]
-        if t not in ("valar", "local"):
-            raise Err(400, "track must be valar or local")
-        name, url, key = upstream(app.cfg, t)
+        name, url, key, ds = upstream(app, t)
+        if not ds:
+            raise Err(400, "track must be a downstream")
         saved = read_models(app.config_dir)
         try:
             if not key:
@@ -175,17 +263,18 @@ def api(h, app, method, path, query, body):
         except Err as e:
             if isinstance(saved.get(t), list) and saved[t]:
                 out = {"models": [str(m) for m in saved[t]], "stale": e.body["error"]}
-                if t == "valar" and isinstance(saved.get("valar_prices"), dict):
-                    out["windows"] = windows_of(saved["valar_prices"])
+                lp = (saved.get("listed_prices") or {}).get(t) or (t == "valar" and saved.get("valar_prices"))
+                if ds.kind == "valar" and isinstance(lp, dict):
+                    out["windows"] = windows_of(lp)
                 return out
             raise
         out, upd = {"models": ids}, {t: ids}
-        if t == "valar":
+        if ds.kind == "valar":
             try:
                 vp = parse_valar(payload)
                 if vp:
-                    upd["valar_prices"] = vp
-                    app.prices.set_valar(vp)
+                    app.prices.set_listed(t, vp)
+                    upd["listed_prices"] = app.prices.listed
                 out["windows"] = windows_of(vp)
             except Exception:
                 pass  # unparseable prices: ids still go out, every window stays offered
@@ -217,15 +306,16 @@ def api(h, app, method, path, query, body):
         sid = body.get("session") if method == "PUT" else (query.get("session") or [None])[0]
         if not _sid_ok(sid):
             raise Err(400, "session must be a Claude Code session id")
+        modes = ["rules", *tracks(app.routing)]
         if method == "PUT":
             lever = body.get("lever")
-            if lever not in (None, "rules") + TRACKS:
-                raise Err(400, "lever must be rules, anthropic, valar, local or null")
+            if lever is not None and lever not in modes:
+                raise Err(400, "lever must be one of %s, or null" % ", ".join(modes))
             app.set_session_lever(sid, lever)
         elif method != "GET":
             raise Err(405, "GET or PUT")
         own = app.session_levers.get(sid)
-        return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever}
+        return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes}
     if path == "/ui/api/name" and method == "PUT":  # /router name: what the console calls this session
         body = body if isinstance(body, dict) else {}
         sid, name = body.get("session"), body.get("name")
@@ -241,8 +331,38 @@ def api(h, app, method, path, query, body):
             new = config_from_json(body)
         except (ValueError, RecursionError) as e:
             raise Err(400, str(e) if isinstance(e, ValueError) else "rule is nested too deeply")
+        check_downstream_edits(app, new)
+        repriced = {d.id: d.prices for d in new.downstreams} != {d.id: d.prices for d in app.routing.downstreams}
         app.set_routing(new)
+        if repriced:  # rows recorded while unpriced get the new prices now, not at the hourly pass
+            try:
+                st.reprice(app.prices, new.downstreams)
+            except Exception as e:
+                print("reprice failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
         return config_to_json(new)
+    if path == "/ui/api/downstreams/probe" and method == "POST":
+        body = body if isinstance(body, dict) else {}
+        key = body.get("key") or ""
+        if not isinstance(key, str):
+            raise Err(400, "key must be text")
+        return probe(clean_url(body.get("url")), key)
+    if path == "/ui/api/downstreams" and method == "POST":
+        return 201, add_downstream(app, body)
+    m = re.fullmatch(r"/ui/api/downstreams/([^/]+)(/key)?", path)
+    if m and method in ("PUT", "DELETE") and not downstream(app.routing, m[1]):
+        raise Err(404, "no downstream named %s" % m[1])
+    if m and m[2] and method == "PUT":
+        key = body.get("key") if isinstance(body, dict) else None
+        if not isinstance(key, str) or not key.strip():
+            raise Err(400, "key must be non-empty text")
+        app.keys.set(m[1], key.strip())
+        return {"key_set": True}
+    if m and not m[2] and method == "DELETE":
+        refs = app.delete_downstream(m[1])
+        if refs:
+            raise in_use(m[1], refs)
+        forget_models(app, [m[1]])
+        return {"ok": True}
     if path == "/ui/api/preview" and method == "POST":
         return preview(app, body)
     if path == "/ui/api/turns" and method == "GET":
@@ -258,8 +378,8 @@ def api(h, app, method, path, query, body):
         return t
     if m and m[2] and method == "PUT":
         v = body.get("verdict") if isinstance(body, dict) else None
-        if not st.set_verdict(unquote(m[1]), v):
-            raise Err(404 if v in TRACKS + ("same",) else 400, "bad verdict or unknown turn")
+        if not st.set_verdict(unquote(m[1]), v, tracks(app.routing)):
+            raise Err(404 if v in tracks(app.routing) + ("same",) else 400, "bad verdict or unknown turn")
         return {"ok": True}
     raise Err(404, "not found")
 
@@ -307,4 +427,5 @@ def _handle(h, app):
         body = json.loads(raw) if raw else {}
     except ValueError:
         raise Err(400, "body is not valid JSON")
-    send_json(h, 200, api(h, app, h.command, u.path, parse_qs(u.query), body))
+    out = api(h, app, h.command, u.path, parse_qs(u.query), body)
+    send_json(h, *(out if isinstance(out, tuple) else (200, out)))
