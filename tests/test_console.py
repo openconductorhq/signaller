@@ -364,8 +364,11 @@ class DownstreamApiTest(Fixture):
 
     def test_probe_uses_stored_key(self):
         self.assertEqual(self.add(key="sk-STORED")[0], 201)
-        self.js("POST", "/ui/api/downstreams/probe", {"url": self.l.url, "id": "lemmi"})
-        self.assertEqual(self.l.seen[-1][2]["Authorization"], "Bearer sk-STORED")
+        self.js("POST", "/ui/api/downstreams/probe", {"url": self.l.url, "id": "lemmi"})  # an id never pulls the stored key
+        self.assertNotIn("sk-STORED", self.l.seen[-1][2]["Authorization"])
+        self.js("POST", "/ui/api/downstreams/probe", {"url": self.l.url, "key": "sk-TYPED"})
+        self.assertEqual(self.l.seen[-1][2]["Authorization"], "Bearer sk-TYPED")
+        self.assertEqual(self.add(id="bad", url="lemmi.example")[0], 400)  # no scheme
         self.assertEqual(self.js("PUT", "/ui/api/downstreams/lemmi/key", {"key": "sk-NEW"}), (200, {"key_set": True}))
         self.assertEqual(self.app.keys.get("lemmi"), "sk-NEW")
         self.assertEqual(self.js("PUT", "/ui/api/downstreams/lemmi/key", {"key": ""})[0], 400)
@@ -496,11 +499,11 @@ class DownstreamApiTest(Fixture):
         c = self.cfg()
         c["downstreams"] = [d for d in c["downstreams"] if d["id"] != "lemmi"]
         del c["doubling"]["shadow"]["lemmi"]
-        s, j = self.js("PUT", "/ui/api/config", c)
-        self.assertEqual((s, j["references"]), (409, ["session s1's lever"]))
-        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
-        self.assertEqual(self.js("PUT", "/ui/api/config", c)[0], 200)
-        self.assertNotIn("lemmi", self.keys_file())
+        s, j = self.js("PUT", "/ui/api/config", c)  # removal is Delete's job, never a config PUT
+        self.assertEqual(s, 400)
+        self.assertIn("Delete", j["error"])
+        self.assertIn("lemmi", [d["id"] for d in self.cfg()["downstreams"]])
+        self.assertIn("lemmi", self.keys_file())
 
     def test_price_change_reprices(self):
         self.add()

@@ -168,6 +168,8 @@ def add_downstream(app, body):
     if len(cur.downstreams) >= MAX_DOWNSTREAMS:
         raise Err(409, "at most %d downstreams" % MAX_DOWNSTREAMS)
     url, key = clean_url(body.get("url")), body.get("key") or ""
+    if urlsplit(url).scheme not in ("http", "https"):
+        raise Err(400, "the url must start with http:// or https://")
     if not isinstance(key, str):
         raise Err(400, "key must be text")
     kind = probe(url, key)["kind"]
@@ -194,7 +196,7 @@ def in_use(id, refs):
 
 
 def check_downstream_edits(app, new):
-    """A config PUT edits downstreams (name, url, models, windows, prices) or removes one nothing points at; ids of the removed."""
+    """A config PUT may edit downstreams (name, url, models, windows, prices), never add or remove one."""
     before = {d.id: d for d in app.routing.downstreams}
     for d in new.downstreams:
         o = before.get(d.id)
@@ -203,12 +205,8 @@ def check_downstream_edits(app, new):
         for k in ("kind", "color"):
             if getattr(d, k) != getattr(o, k):
                 raise Err(400, "downstream %s: %s can't be changed" % (d.id, k))
-    gone = [i for i in before if downstream(new, i) is None]
-    for i in gone:
-        refs = references(new, i, app.session_levers)
-        if refs:
-            raise in_use(i, refs)
-    return gone
+    if any(downstream(new, i) is None for i in before):
+        raise Err(400, "remove downstreams with Delete on the Tracks row")
 
 
 def windows_of(valar_prices):
@@ -333,12 +331,9 @@ def api(h, app, method, path, query, body):
             new = config_from_json(body)
         except (ValueError, RecursionError) as e:
             raise Err(400, str(e) if isinstance(e, ValueError) else "rule is nested too deeply")
-        gone = check_downstream_edits(app, new)
+        check_downstream_edits(app, new)
         repriced = {d.id: d.prices for d in new.downstreams} != {d.id: d.prices for d in app.routing.downstreams}
         app.set_routing(new)
-        for i in gone:
-            app.keys.delete(i)
-        forget_models(app, gone)
         if repriced:  # rows recorded while unpriced get the new prices now, not at the hourly pass
             try:
                 st.reprice(app.prices, new.downstreams)
@@ -347,7 +342,7 @@ def api(h, app, method, path, query, body):
         return config_to_json(new)
     if path == "/ui/api/downstreams/probe" and method == "POST":
         body = body if isinstance(body, dict) else {}
-        key = body.get("key") or (app.keys.get(body["id"]) if isinstance(body.get("id"), str) else "")
+        key = body.get("key") or ""
         if not isinstance(key, str):
             raise Err(400, "key must be text")
         return probe(clean_url(body.get("url")), key)

@@ -423,7 +423,7 @@ function trow(d) {
         if (v) act(async () => { await dsCall("PUT", `downstreams/${encodeURIComponent(t)}/key`, { key: v }, t); keyIn.value = ""; });
       } }, "Replace key"),
       el("button", { type: "button", class: "mini del", "data-k": "del:" + t, onclick: () => {
-        if (confirm(`Delete ${cur().name}? Its key goes too. Its history stays, shown as "${t}, removed".`)) act(() => dsCall("DELETE", "downstreams/" + encodeURIComponent(t), undefined, t));
+        if (confirm(`Delete ${d.name}? Its key goes too. Its history stays, shown as "${t}, removed".`)) act(() => dsCall("DELETE", "downstreams/" + encodeURIComponent(t), undefined, t));
       } }, "Delete")),
     re && el("div", { class: "err tacts", role: "alert" }, re.refs ? [`${cur().name} is still in use. Point these elsewhere first:`, el("ul", {}, re.refs.map((x) => el("li", {}, x)))] : re.msg),
     el("p", { class: "warn", role: "status", hidden: !WARN[t] }, WARN[t] || ""));
@@ -458,8 +458,8 @@ $("wPrices").replaceChildren(...wPrices);
 function wizOpen(open) {
   $("wiz").hidden = !open;
   $("addDs").setAttribute("aria-expanded", String(open));
-  if (!open) { $("addDs").focus(); return; }
   for (const id of ["wName", "wId", "wUrl", "wKey"]) $(id).value = "";
+  if (!open) { $("addDs").focus(); return; }
   for (const x of wPrices) x.querySelector("input").value = "";
   Object.assign(W, { list: null, kind: null, models: Object.fromEntries(Object.keys(TIER).map((m) => [m, ""])), idTouched: false });
   $("wOne").checked = false;

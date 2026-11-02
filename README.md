@@ -130,7 +130,7 @@ The wizard:
    test doesn't stop you saving.
 2. **Models:** the model for each tier (fable, opus, sonnet, haiku), or one model
    for all four.
-3. **Cost:** optional prices per million tokens. Left empty, it shows as unpriced.
+3. **Cost:** optional prices per million tokens (not for Valar kind). Left empty, it shows as unpriced.
 
 **Valar kind:** a service whose model list carries its own prices (or whose host
 is `api.valarhq.ai`) is added as Valar kind. It keeps Valar's extras: prices from
@@ -171,7 +171,8 @@ the routing rules, manages downstreams, and compares track answers side by side.
   decided goes to the "Otherwise" track (default Anthropic). Changes apply to
   the next request and are saved to `console.json`.
 - **Classifier:** a rule that asks a small model (Valar by default, or any downstream) what the newest human
-  message is about (labels, each with a track), once per turn and cached. **Privacy:** by default the
+  message is about (labels, each with a track), once per turn and cached. It calls an OpenAI-style `/v1/chat/completions` on its
+  upstream, so pick a downstream that serves that (Valar does; an Anthropic-only one like lemmi won't). **Privacy:** by default the
   classifier sends the newest human message's text to Valar
   (`deepseek-ai/DeepSeek-V4.1-Flash`, 2.5 s timeout, reasoning off). Switch its
   upstream to another downstream to keep that text elsewhere, or to "none" to

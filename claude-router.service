@@ -1,5 +1,5 @@
 [Unit]
-Description=claude-router: route Claude Code requests to Anthropic or local LiteLLM
+Description=claude-router: route Claude Code requests to Anthropic or other downstreams
 
 [Service]
 ExecStart=/usr/bin/python3 -E -s %h/Development/claude-router/claude_router.py

@@ -483,7 +483,7 @@ class NullStore:
     def first_ts(self, *a): return 0
     def summary(self, sessions, t0, t1, now, tracks):
         t = {"n": 0, "pct": 0, "in": 0, "out": 0, "cost": 0, "api_cost": 0, "unpriced": 0, "comparisons": 0}
-        return {"total": 0, "per_minute": 0, "tracks": {k: dict(t) for k in tracks}, "savings": 0, "rules": {}, "errors": 0,
+        return {"total": 0, "per_minute": 0, "tracks": {k: dict(t) for k in tracks}, "savings": 0, "saved_would": 0, "rules": {}, "errors": 0,
                 "tally": dict.fromkeys([*tracks, "same"], 0)}
     def turn(self, turn_id): return None
     def set_verdict(self, turn_id, verdict, tracks): return False

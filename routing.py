@@ -416,7 +416,7 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
     if cfg.lever != "rules":
         return Decision(cfg.lever, "lever", [{"rule": "Lever", "outcome": f"sending everything to {cfg.lever}", "decided": True}])
     cs = cfg.classifier
-    tracks = {l.name.lower(): l.track for l in cs.labels}
+    by_label = {l.name.lower(): l.track for l in cs.labels}
     memo = []
 
     def result():
@@ -426,7 +426,7 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
 
     def confident(r):
         return r.label is not None and r.confidence is not None and r.confidence >= cs.threshold \
-            and r.label.lower() in tracks
+            and r.label.lower() in by_label
 
     on = cs.upstream != "none" and any(r.kind == "classifier" and r.enabled for r in cfg.rules)
 
@@ -458,7 +458,7 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
             r = result()
             pct = f"{round((r.confidence or 0) * 100)}%"
             if confident(r):
-                track, item["decided"] = tracks[r.label.lower()], True
+                track, item["decided"] = by_label[r.label.lower()], True
                 reason, item["outcome"] = f"about:{r.label}", f"{r.label}, {pct} sure → {track}"
             elif r.label is None:
                 item["outcome"] = r.note
