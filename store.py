@@ -382,7 +382,12 @@ class Store:
     def list_sessions(self, t0, t1):
         rows = self._all(
             "SELECT r.session_id id, s.cwd, s.branch, s.name, s.first_ts, s.last_ts, COUNT(*) n, MAX(r.ts) last FROM requests r "
-            "LEFT JOIN sessions s ON s.id=r.session_id WHERE r.ts BETWEEN ? AND ? GROUP BY r.session_id ORDER BY last DESC", (t0, t1))
+            "LEFT JOIN sessions s ON s.id=r.session_id WHERE r.ts BETWEEN ? AND ? GROUP BY r.session_id", (t0, t1))
+        # a session just named with /router shows right away, before its next request is saved
+        rows += self._all("SELECT id, cwd, branch, name, first_ts, last_ts, 0 n, last_ts last FROM sessions WHERE name IS NOT NULL "
+                          "AND last_ts BETWEEN ? AND ? AND id NOT IN (SELECT DISTINCT session_id FROM requests WHERE ts BETWEEN ? AND ? "
+                          "AND session_id IS NOT NULL)", (t0, t1, t0, t1))
+        rows.sort(key=lambda r: r["last"] or 0, reverse=True)
         out = []
         for r in rows:
             r.pop("last")
@@ -414,7 +419,7 @@ class Store:
         c = self._conn()
         try:
             with c:
-                c.execute("INSERT INTO sessions(id,first_ts,last_ts,name) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name",
+                c.execute("INSERT INTO sessions(id,first_ts,last_ts,name) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, last_ts=MAX(last_ts,excluded.last_ts)",
                           (sid, now, now, name))
         finally:
             c.close()

@@ -918,5 +918,5 @@ renderSpan();
 loadSessions().catch(() => {}).finally(() => {
   viewChanged(true);  // also sets the departures hint for a remembered pick
   setInterval(tick, 1000);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) tick(); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { tick(); loadSessions().catch(() => {}); } });
 });

@@ -249,6 +249,8 @@ def test_list_sessions_and_filtered_reads(tmp_path):
     assert len(s.turns()) == 2
     s.set_session_name("sa", "refactor")  # /router name wins over cwd · branch; None goes back
     assert [x["label"] for x in s.list_sessions(0, now + 1) if x["id"] == "sa"] == ["refactor"]
+    s.set_session_name("sz", "fresh")  # named before any request: listed now, with no requests
+    assert [(x["id"], x["label"], x["n"]) for x in s.list_sessions(0, time.time() + 1)][0] == ("sz", "fresh", 0)
     s.set_session_name("sa", None)
     assert [x["label"] for x in s.list_sessions(0, now + 1) if x["id"] == "sa"] == ["alpha · main"]
     n = store.NullStore()
