@@ -58,6 +58,34 @@
     <p class="hint">Which model serves Claude Code's requests on each track. Anthropic always gets Claude Code's own model.</p>
     <p id="trErr" class="err" role="alert" hidden></p>
     <div class="tracks" id="trows"></div>
+    <button type="button" class="btn" id="addDs" aria-expanded="false" aria-controls="wiz">+ Add downstream</button>
+    <span id="addDsWhy" class="hint" hidden>At most 6 downstreams: delete one to add another.</span>
+    <div id="wiz" class="editor wiz" hidden>
+      <h3>Add a downstream</h3>
+      <p class="hint">Any service that accepts Anthropic's <code>/v1/messages</code>. Testing only asks for its model list; nothing is sent to a model.</p>
+      <fieldset>
+        <legend>1 · Connect</legend>
+        <label class="fld">Name <input id="wName" autocomplete="off" spellcheck="false" placeholder="lemmi"></label>
+        <label class="fld">Id <input id="wId" autocomplete="off" spellcheck="false" aria-describedby="wIdHint"></label>
+        <p id="wIdHint" class="hint">Used in rules (<code>go id</code>), the lever and <code>/router id</code>. Can't change once saved.</p>
+        <p id="wReuse" class="warn" role="status" hidden></p>
+        <label class="fld">URL <input id="wUrl" type="url" autocomplete="off" spellcheck="false" placeholder="the service's base url"></label>
+        <label class="fld">Key <input id="wKey" type="password" autocomplete="off" placeholder="sent as a bearer key; never shown again"></label>
+        <button type="button" class="btn" id="wTest">Test connection</button> <span id="wTestR" class="wtest" role="status"></span>
+      </fieldset>
+      <fieldset>
+        <legend>2 · Models</legend>
+        <label class="sfld"><input type="checkbox" id="wOne"> use one model for every tier</label>
+        <div id="wModels" class="wmodels"></div>
+      </fieldset>
+      <fieldset id="wCost">
+        <legend>3 · Cost (optional)</legend>
+        <div class="tprices" id="wPrices"></div>
+        <p class="hint">USD per 1M tokens. Leave all four blank for unpriced.</p>
+      </fieldset>
+      <p id="wErr" class="err" role="alert" hidden></p>
+      <div class="edbtns"><button type="button" class="btn primary" id="wSave">Save</button><button type="button" class="btn" id="wCancel">Cancel</button></div>
+    </div>
   </section>
 
   <div class="cols">

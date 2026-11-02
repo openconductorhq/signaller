@@ -203,12 +203,17 @@ function applyState(st) {
   if (!saving && !typing) { cfg = st.config; renderConfig(); }
   if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /router at any time
 }
-// Downstream POST/DELETE/key PUT change the config on the server: reload it, so the next config PUT starts from it.
-async function dsCall(method, path, body) {
-  const r = await api(method, path, body), st = await api("GET", "state" + qs(sessQ(), spanQ()));
+// Downstream POST/DELETE/key PUT change the config on the server: reload it (even after an error or a timeout),
+// so the next config PUT starts from it, and let the touched downstream's models load afresh.
+async function dsCall(method, path, body, id) {
+  let r, err = null;
+  try { r = await api(method, path, body, 15000); } catch (e) { err = e; }  // POST probes the url first: up to 5 s
+  ASKED.delete(id); delete MODELS[id]; delete WARN[id];
+  const st = await api("GET", "state" + qs(sessQ(), spanQ()));
   applyState(st);
   cfg = st.config;
   renderConfig(true);
+  if (err) throw err;
   return r;
 }
 
@@ -364,32 +369,63 @@ function renderYardNums(m, span) {
     : `Live traffic: ${TRACKS().map((t) => pct(t) + " " + NAME(t)).join(", ")} in the ${span}`);
 }
 
-/* tracks: one row per downstream — models per tier, Valar's windows, a generic one's prices */
+/* tracks: one row per downstream — name, models per tier, Valar's windows, a generic one's prices, key, delete */
 const TIER = { fable: "Fable", opus: "Opus", sonnet: "Sonnet", haiku: "Haiku" };
 const PK = { in: "in", out: "out", cache_read: "cache read", cache_write: "cache write" };
+const MAX_DS = 6;
 const saveDs = (t, patch) => save({ ...cfg, downstreams: cfg.downstreams.map((d) => (d.id === t ? { ...d, ...patch } : d)) }, $("trErr"));
+// Prices: all four filled (0 or more) or all four blank (unpriced); anything in between is refused.
+function readPrices(inputs) {
+  const v = inputs.map((x) => x.value.trim());
+  if (v.every((x) => x === "")) return { prices: null };
+  if (v.some((x) => x === "" || !(Number(x) >= 0))) return { error: "Fill in all four prices (0 or more), or leave all four blank for unpriced." };
+  return { prices: Object.fromEntries(Object.keys(PK).map((k, i) => [k, Number(v[i])])) };
+}
+const priceInputs = (name, vals, attrs) => Object.entries(PK).map(([pk, pn]) => el("label", {}, pn + " ",
+  el("input", { type: "number", min: 0, step: "any", value: vals ? vals[pk] : "", placeholder: "–", "aria-label": `${name} price for ${pn}, USD per 1M tokens`, ...attrs(pk) })));
+const ROWERR = {};  // track → { msg, refs } from its last key/delete call
 function renderTracks() {
   for (const d of DS()) if (!ASKED.has(d.id)) loadModels(d.id);
   $("trows").replaceChildren(...DS().map(trow));
+  const full = DS().length >= MAX_DS;
+  $("addDs").disabled = full;
+  $("addDsWhy").hidden = !full;
 }
 function trow(d) {
-  const t = d.id, k = S && S.downstreams[t], keyed = !!(k && k.key_set), valar = d.kind === "valar";
+  const t = d.id, k = S && S.downstreams[t], keyed = !!(k && k.key_set), valar = d.kind === "valar", re = ROWERR[t];
+  const cur = () => dsOf(t);  // handlers read the config as it is when they fire, not as it was drawn
+  const pErr = el("p", { class: "err", role: "alert", hidden: true }), keyIn = el("input", { type: "password", autocomplete: "off", placeholder: "Replace key",
+    "data-k": "k:" + t, "aria-label": `New key for ${d.name} (empty keeps the current one)` });
+  const act = async (fn) => {
+    delete ROWERR[t];
+    try { await fn(); } catch (e) { ROWERR[t] = { msg: e.message, refs: e.status === 409 && e.body && e.body.references }; renderConfig(true); }
+  };
   return el("div", { class: "trow", "data-t": t, style: cv(t) },
-    el("div", {}, el("div", { class: "tname" }, d.name),
-      el("div", { class: "tmeta" }, el("span", { class: "turl" }, k ? k.url : ""), " · ", el("span", { class: "tkey " + (keyed ? "ok" : "no") }, keyed ? "key set" : "no key"))),
+    el("div", {}, el("input", { class: "tname", value: d.name, spellcheck: "false", "data-k": "n:" + t, "aria-label": `Name of ${d.name}`,
+      onchange: (e) => { const v = e.target.value.trim(); if (v) saveDs(t, { name: v }); else renderConfig(true); } }),
+      el("div", { class: "tmeta" }, el("code", {}, t), " · ", el("span", { class: "turl" }, k ? k.url : ""), " · ", el("span", { class: "tkey " + (keyed ? "ok" : "no") }, keyed ? "key set" : "no key"))),
     Object.entries(TIER).map(([m, tn]) => el("label", { class: "f" }, tn + " ",
       modelPick(t, d.models[m], { "data-m": m, "data-k": `m:${t}:${m}`, "aria-label": `${d.name} model for ${m}` },
         // a model without the slot's window falls back to Now
-        (v) => saveDs(t, { models: { ...d.models, [m]: v }, ...(valar && { windows: { ...d.windows, [m]: windowsFor(v).includes(d.windows[m]) ? d.windows[m] : "asap" } }) })),
+        (v) => { const c = cur(); saveDs(t, { models: { ...c.models, [m]: v }, ...(valar && { windows: { ...c.windows, [m]: windowsFor(v).includes(c.windows[m]) ? c.windows[m] : "asap" } }) }); }),
       valar && el("span", { class: "seg win", role: "group", "aria-label": `${d.name} completion window for ${m}` },
         windowsFor(d.models[m]).map((w) => el("button", { type: "button", "data-k": `w:${t}:${m}:${w}`, "aria-pressed": String(d.windows[m] === w),
-          onclick: () => d.windows[m] !== w && saveDs(t, { windows: { ...d.windows, [m]: w } }) }, WIN[w]))))),
-    !valar && el("div", { class: "tprices" }, "USD per 1M tokens", Object.entries(PK).map(([pk, pn]) => el("label", {}, pn + " ",
-      el("input", { type: "number", min: 0, step: "any", value: d.prices ? d.prices[pk] : "", placeholder: "–", "data-k": `p:${t}:${pk}`,
-        "aria-label": `${d.name} price for ${pn}, USD per 1M tokens`, onchange: (e) => {
-          const v = [...e.target.closest(".tprices").querySelectorAll("input")].map((x) => x.value.trim());  // all empty = unpriced; a blank among numbers = 0
-          saveDs(t, { prices: v.every((x) => x === "") ? null : Object.fromEntries(Object.keys(PK).map((x, i) => [x, Math.max(0, Number(v[i]) || 0)])) });
-        } }))), !d.prices && el("span", {}, "unpriced")),
+          onclick: () => { const c = cur(); if (c.windows[m] !== w) saveDs(t, { windows: { ...c.windows, [m]: w } }); } }, WIN[w]))))),
+    !valar && el("div", { class: "tprices" }, "USD per 1M tokens", priceInputs(d.name, d.prices, (pk) => ({ "data-k": `p:${t}:${pk}`,
+      onchange: (e) => {
+        const p = readPrices([...e.target.closest(".tprices").querySelectorAll("input")]);
+        showErr(pErr, p.error || "");  // shown in place: a re-render would wipe the half-filled fields
+        if (!p.error) saveDs(t, { prices: p.prices });
+      } })), !d.prices && el("span", {}, "unpriced"), pErr),
+    el("div", { class: "tacts" }, keyIn,
+      el("button", { type: "button", class: "mini", "data-k": "ks:" + t, onclick: () => {
+        const v = keyIn.value.trim();
+        if (v) act(async () => { await dsCall("PUT", `downstreams/${encodeURIComponent(t)}/key`, { key: v }, t); keyIn.value = ""; });
+      } }, "Replace key"),
+      el("button", { type: "button", class: "mini del", "data-k": "del:" + t, onclick: () => {
+        if (confirm(`Delete ${cur().name}? Its key goes too. Its history stays, shown as "${t}, removed".`)) act(() => dsCall("DELETE", "downstreams/" + encodeURIComponent(t), undefined, t));
+      } }, "Delete")),
+    re && el("div", { class: "err tacts", role: "alert" }, re.refs ? [`${cur().name} is still in use. Point these elsewhere first:`, el("ul", {}, re.refs.map((x) => el("li", {}, x)))] : re.msg),
     el("p", { class: "warn", role: "status", hidden: !WARN[t] }, WARN[t] || ""));
 }
 const WIN = { asap: "Now", priority: "Priority", standard: "Standard" };
@@ -413,6 +449,89 @@ function loadModels(t) {
     renderConfig(true);
   }, (e) => { WARN[t] = `Couldn't load models (${e.message}). Type a model id.`; renderConfig(true); });
 }
+
+/* the wizard: connect (and test), a model per tier, prices for a generic one, save. A failed test can still be saved. */
+const W = { list: null, kind: null, models: {}, idTouched: false };  // list: model ids from the last good test
+const slug = (n) => n.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^[^a-z]+/, "").slice(0, 24).replace(/-+$/, "");
+const wPrices = priceInputs("New downstream", null, () => ({}));
+$("wPrices").replaceChildren(...wPrices);
+function wizOpen(open) {
+  $("wiz").hidden = !open;
+  $("addDs").setAttribute("aria-expanded", String(open));
+  if (!open) { $("addDs").focus(); return; }
+  for (const id of ["wName", "wId", "wUrl", "wKey"]) $(id).value = "";
+  for (const x of wPrices) x.querySelector("input").value = "";
+  Object.assign(W, { list: null, kind: null, models: Object.fromEntries(Object.keys(TIER).map((m) => [m, ""])), idTouched: false });
+  $("wOne").checked = false;
+  $("wTestR").replaceChildren();
+  $("wCost").hidden = false;
+  showErr($("wErr"), "");
+  wizReuse(); wizModels();
+  $("wName").focus();
+}
+// Stored rows under this id (it was deleted earlier) will show under the new downstream.
+function wizReuse() {
+  const id = $("wId").value.trim(), old = id && S && S.summary && Object.hasOwn(S.summary.tracks, id) && gone(id);
+  $("wReuse").hidden = !old;
+  $("wReuse").textContent = old ? `History from an earlier ${id} will show under this one.` : "";
+}
+function wizModels() {
+  const one = $("wOne").checked, pick = (m, label) => {
+    const v = W.models[m], set = (x) => { for (const k of one ? Object.keys(TIER) : [m]) W.models[k] = x; };
+    const attrs = { "aria-label": label + " model", "data-k": "wm:" + m + (one ? ":all" : "") };
+    return el("label", { class: "f" }, label + " ", W.list
+      ? el("select", { ...attrs, onchange: (e) => set(e.target.value) }, el("option", { value: "", selected: !v }, "pick a model"),
+        (v && !W.list.includes(v) ? [v, ...W.list] : W.list).map((x) => el("option", { value: x, selected: x === v }, x)))
+      : el("input", { ...attrs, value: v, spellcheck: "false", autocomplete: "off", placeholder: "model id", onchange: (e) => set(e.target.value.trim()) }));
+  };
+  keepFocus(() => $("wModels").replaceChildren(...(one ? [pick("fable", "Every tier")] : Object.entries(TIER).map(([m, tn]) => pick(m, tn)))));
+}
+$("addDs").addEventListener("click", () => wizOpen($("wiz").hidden));
+$("wCancel").addEventListener("click", () => wizOpen(false));
+$("wiz").addEventListener("keydown", (e) => { if (e.key === "Escape") wizOpen(false); });
+$("wName").addEventListener("input", () => { if (!W.idTouched) { $("wId").value = slug($("wName").value); wizReuse(); } });
+$("wId").addEventListener("input", () => { W.idTouched = true; wizReuse(); });
+$("wOne").addEventListener("change", () => {
+  if ($("wOne").checked) for (const m of Object.keys(TIER)) W.models[m] = W.models.fable;
+  wizModels();
+});
+$("wTest").addEventListener("click", async () => {
+  const r = $("wTestR");
+  r.className = "wtest";
+  r.textContent = "Testing…";
+  try {
+    const p = await api("POST", "downstreams/probe", { url: $("wUrl").value, key: $("wKey").value }, 15000);
+    const valar = p.kind === "valar" ? " · looks like Valar (it prices itself)" : "";
+    r.className = "wtest " + (p.ok ? "ok" : "no");
+    r.textContent = p.ok ? `✓ Reachable · ${plural(p.models.length, "model")}${valar}` : `✗ Not reachable: ${p.reason}. You can still save it.${valar}`;
+    W.list = p.ok && p.models.length ? p.models : null;
+    W.kind = p.kind;
+    if (W.list && W.list.length === 1) { $("wOne").checked = true; for (const m of Object.keys(TIER)) W.models[m] = W.list[0]; }
+    $("wCost").hidden = p.kind === "valar";
+    wizModels();
+  } catch (e) {
+    r.className = "wtest no";
+    r.textContent = "Couldn't test: " + e.message;
+  }
+});
+$("wSave").addEventListener("click", async () => {
+  const name = $("wName").value.trim(), id = $("wId").value.trim(), err = $("wErr");
+  if (!name) { showErr(err, "Give it a name."); $("wName").focus(); return; }
+  if (Object.values(W.models).some((m) => !m)) { showErr(err, "Pick a model for every tier."); return; }
+  const p = $("wCost").hidden ? { prices: null } : readPrices(wPrices.map((x) => x.querySelector("input")));
+  if (p.error) { showErr(err, p.error); return; }
+  $("wSave").disabled = true;
+  showErr(err, "");
+  try {
+    await dsCall("POST", "downstreams", { id, name, url: $("wUrl").value, key: $("wKey").value, models: { ...W.models }, prices: p.prices }, id);
+    $("wKey").value = "";
+    wizOpen(false);
+  } catch (e) {
+    showErr(err, e.status === 400 || e.status === 409 ? e.message : "Couldn't save: " + e.message);
+  } finally {
+    $("wSave").disabled = false;
+  }
+});
 
 /* rulebook */
 const openCls = { v: false };
@@ -676,6 +795,7 @@ function why(r) {
   if (isErr(r.status)) {
     // ponytail: "not configured" reads today's key state, not the state when the request ran
     const k = S && S.downstreams[r.track];
+    if (gone(r.track)) return `${label(r.track)} · ${r.status || "no answer"}`;
     if (r.track !== "anthropic" && r.status === 502) return `${label(r.track)} ${k && !k.key_set ? "not configured" : "down"} · 502`;
     return `${label(r.track)} error · ` + (r.status || "no answer");
   }
@@ -848,7 +968,7 @@ function tally() {
   for (const x of turns) if (x.verdict) t[x.verdict] = (t[x.verdict] || 0) + 1;
   return t;
 }
-const tallyText = () => { const t = tally(); return "So far: " + [...new Set([...TRACKS(), ...Object.keys(t)])].map((k) => `${k === "same" ? "same" : label(k)} ${t[k] || 0}`).join(" · "); };
+const tallyText = () => { const t = tally(); return "So far: " + [...new Set([...TRACKS(), ...Object.keys(t).filter((k) => k !== "same")]), "same"].map((k) => `${k === "same" ? "same" : label(k)} ${t[k] || 0}`).join(" · "); };
 
 // request id → its row, for the served side's cost (the pair stores only the shadow's); null while loading.
 // A pair can be written before its request row, so a failed fetch isn't cached: it's retried a few seconds later.

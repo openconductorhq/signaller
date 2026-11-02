@@ -351,6 +351,7 @@ class DownstreamApiTest(Fixture):
         self.assertNotIn("lemmi", st["downstreams"])
         self.assertNotIn("lemmi", st["config"]["doubling"]["shadow"])
         self.assertNotIn("lemmi", self.keys_file())
+        self.assertNotIn("lemmi", json.load(open(os.path.join(self.dir, "models.json"))))  # a re-added lemmi mustn't show this one's list
         self.assertEqual(self.js("DELETE", "/ui/api/downstreams/lemmi")[0], 404)
 
     def test_probe_detects_valar(self):

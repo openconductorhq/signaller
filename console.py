@@ -108,6 +108,7 @@ def read_models(config_dir):
 
 
 def save_models(config_dir, **updates):
+    """Merge updates into models.json; a None value drops that key (a deleted downstream's list)."""
     # ponytail: read-merge-write; a concurrent save can lose the other's keys until the next refresh rewrites them
     saved = read_models(config_dir)
     if all(saved.get(k) == v for k, v in updates.items()):
@@ -115,7 +116,7 @@ def save_models(config_dir, **updates):
     fd, tmp = tempfile.mkstemp(dir=config_dir)
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump({**saved, **updates}, f, indent=1)
+            json.dump({k: v for k, v in {**saved, **updates}.items() if v is not None}, f, indent=1)
         os.replace(tmp, os.path.join(config_dir, "models.json"))
     except BaseException:
         os.unlink(tmp)
@@ -178,6 +179,14 @@ def add_downstream(app, body):
         return asdict(app.add_downstream(d, key))
     except ValueError as e:
         raise Err(409 if str(e).startswith("at most") else 400, str(e))
+
+
+def forget_models(app, ids):
+    """A deleted downstream's saved model list goes too: one re-added under its id must not show it."""
+    try:
+        save_models(app.config_dir, **dict.fromkeys(ids))
+    except OSError:
+        pass
 
 
 def in_use(id, refs):
@@ -329,6 +338,7 @@ def api(h, app, method, path, query, body):
         app.set_routing(new)
         for i in gone:
             app.keys.delete(i)
+        forget_models(app, gone)
         if repriced:  # rows recorded while unpriced get the new prices now, not at the hourly pass
             try:
                 st.reprice(app.prices, new.downstreams)
@@ -356,6 +366,7 @@ def api(h, app, method, path, query, body):
         refs = app.delete_downstream(m[1])
         if refs:
             raise in_use(m[1], refs)
+        forget_models(app, [m[1]])
         return {"ok": True}
     if path == "/ui/api/preview" and method == "POST":
         return preview(app, body)
