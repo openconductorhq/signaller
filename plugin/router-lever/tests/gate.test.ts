@@ -11,7 +11,7 @@ test('Claude switches the lever only when the latest prompt asks for it', async 
   on('ui.status', () => ({ value: undefined }))
   on('http.fetch', (_, e) => {
     if (e.init?.method === 'PUT') puts.push(String(e.init.body))
-    return { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules' }) } }
+    return { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] }) } }
   })
   on('prompt.submit', (_, e) => ({ text: e.text }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -33,4 +33,21 @@ test('Claude switches the lever only when the latest prompt asks for it', async 
   expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toContain('Not switching')  // used up
   expect((await $.tool.call({ tool: TOOL, lever: 'rules' })).deny).toBeUndefined()
   expect(puts).toEqual([JSON.stringify({ session: 's1', lever: 'anthropic' }), JSON.stringify({ session: 's1', lever: 'rules' })])
+})
+
+test('modes come from the router: a downstream id works, a removed one is unknown', async ($, on) => {
+  on('command.register', () => ({ value: { command: 'router' } }))
+  on('tool.register', () => ({ value: { tool: TOOL } }))
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.every', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('http.fetch', () => ({ value: { ok: true, status: 200, text: JSON.stringify({ lever: 'lemmi', session: 'lemmi', global: 'rules', modes: ['rules', 'anthropic', 'lemmi'] }) } }))
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('tool.call', () => ({ result: 'engine' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  await $.prompt.submit({ text: 'do /router lemmi' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'lemmi' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: TOOL, lever: 'local' })).deny).toContain('Unknown lever')
 })
