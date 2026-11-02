@@ -12,7 +12,8 @@ import struct
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
@@ -23,6 +24,7 @@ from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from prices import Prices, parse_valar
 from routing import session_of, Features, RoutingConfig, downstream, is_routed, route as decide_route, track_model, track_window
+from keys import Keys
 from store import NullStore, Store, load_console_config, save_console_config
 
 @dataclass
@@ -30,10 +32,8 @@ class Config:
     listen_host: str
     listen_port: int
     anthropic_url: str
-    litellm_url: str
-    litellm_key: str
-    valar_url: str = "https://api.valarhq.ai"
-    valar_key: str = ""
+    env_valar: tuple[str, str] = ("", "")  # (VALAR_URL, VALAR_API_KEY): read once, by App.seed
+    resolve: Callable[[str], tuple[str, str, str]] | None = field(default=None, compare=False, repr=False)  # set by App
 
 
 def load_config(env: Mapping[str, str]) -> Config:
@@ -54,10 +54,7 @@ def load_config(env: Mapping[str, str]) -> Config:
         listen_host=host,
         listen_port=port,
         anthropic_url=env.get("CLAUDE_ROUTER_ANTHROPIC_URL", "https://api.anthropic.com"),
-        litellm_url=env.get("LITELLM_URL", "http://127.0.0.1:4000"),
-        litellm_key=env.get("LITELLM_API_KEY", ""),
-        valar_url=env.get("VALAR_URL", "https://api.valarhq.ai").rstrip("/").removesuffix("/v1"),
-        valar_key=env.get("VALAR_API_KEY", ""),
+        env_valar=(env.get("VALAR_URL", "").rstrip("/").removesuffix("/v1"), env.get("VALAR_API_KEY", "")),
     )
 
 
@@ -69,16 +66,11 @@ MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_erro
                  b'"message":"claude-router: upstream ended mid-stream"}}\n\n')
 
 
-KEY_VAR = {"valar": "VALAR_API_KEY", "local": "LITELLM_API_KEY"}
-
-
 def upstream(cfg: Config, track: str) -> tuple[str, str, str]:
     """(display name, base url, key) of a track; anthropic has no key of ours."""
-    if track == "valar":
-        return "Valar", cfg.valar_url, cfg.valar_key
-    if track == "local":
-        return "LiteLLM", cfg.litellm_url, cfg.litellm_key
-    return "Anthropic", cfg.anthropic_url, ""
+    if track == "anthropic" or not cfg.resolve:
+        return "Anthropic", cfg.anthropic_url, ""
+    return cfg.resolve(track)
 
 
 def upstream_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple[str, str]]:
@@ -163,8 +155,12 @@ class App:
         os.makedirs(config_dir, mode=0o700, exist_ok=True)
         self.cfg, self.config_dir = cfg, config_dir
         self.routing, self.banner = load_console_config(os.path.join(config_dir, "console.json"))
+        self._rlock = threading.Lock()
         self.session_levers = {}  # session id -> lever /router chose for that session only
-        self.classifier = Classifier({"valar": (cfg.valar_url, cfg.valar_key), "local": (cfg.litellm_url, cfg.litellm_key)})
+        self.keys = Keys(config_dir)
+        self.seed()
+        cfg.resolve = self._resolve
+        self.classifier = Classifier({d.id: (d.url, self.keys.get(d.id)) for d in self.routing.downstreams})
         try:
             self.store = Store(os.path.join(config_dir, "stats.db"))
         except (OSError, sqlite3.Error) as e:  # broken stats must never cost Claude Code its router
@@ -176,14 +172,30 @@ class App:
         self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
         self.prices = Prices(config_dir)
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
-        self._rlock = threading.Lock()
+
+    def _resolve(self, track: str) -> tuple[str, str, str]:
+        ds = downstream(self.routing, track)
+        return (ds.name, ds.url, self.keys.get(track)) if ds else (track, "", "")
+
+    def seed(self) -> None:
+        """First start only: Valar's url and key from the environment. Later starts ignore it, so a deleted Valar stays deleted."""
+        if "LITELLM_URL" in os.environ or "LITELLM_API_KEY" in os.environ:
+            print("LITELLM_* is no longer used; add LiteLLM as a downstream in the console", file=sys.stderr, flush=True)
+        if self.routing.seeded:
+            return
+        url, key = self.cfg.env_valar
+        dss = tuple(replace(d, url=url) if d.id == "valar" and url else d for d in self.routing.downstreams)
+        if key and downstream(self.routing, "valar"):
+            self.keys.set("valar", key)
+        self.set_routing(replace(self.routing, downstreams=dss, seeded=True))
 
     def refresh_valar_prices(self) -> None:
         """Fetch Valar's prices, keep them in memory and models.json, and price rows that were waiting. Never raises."""
-        if not self.cfg.valar_key:
+        _, url, key = upstream(self.cfg, "valar")
+        if not key:
             return
         try:
-            vp = parse_valar(console.fetch_models(self.cfg.valar_url, self.cfg.valar_key))
+            vp = parse_valar(console.fetch_models(url, key))
             if vp:  # a payload with no prices must not wipe good ones
                 self.prices.set_valar(vp)
                 console.save_models(self.config_dir, valar_prices=vp)
@@ -307,7 +319,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             try:
                 if route != "anthropic" and not key:  # never fall back to another track
                     status = 502
-                    self._error(502, "claude-router: %s not configured (%s unset)" % (name, KEY_VAR[route]))
+                    self._error(502, "claude-router: %s not configured (no key set)" % name)
                     return
                 try:
                     conn, resp = open_upstream(cfg, route, self.command, self.path, headers, body)
@@ -401,9 +413,10 @@ def main() -> None:
         sys.exit(2)
     srv = make_server(cfg, app)
     app.start_price_refresh()
-    print("listening on %s:%d; anthropic=%s valar=%s (%s) litellm=%s (%s)" % (
-        cfg.listen_host, cfg.listen_port, cfg.anthropic_url, cfg.valar_url, "key set" if cfg.valar_key else "no key",
-        cfg.litellm_url, "key set" if cfg.litellm_key else "no key"), file=sys.stderr, flush=True)
+    print("listening on %s:%d; anthropic=%s downstreams=%s" % (
+        cfg.listen_host, cfg.listen_port, cfg.anthropic_url,
+        ", ".join("%s (%s)" % (d.id, "key set" if app.keys.has(d.id) else "no key") for d in app.routing.downstreams)),
+        file=sys.stderr, flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

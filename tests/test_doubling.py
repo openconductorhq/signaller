@@ -187,10 +187,14 @@ class DoublingTest(unittest.TestCase):
         self.a, self.v, self.l = Up(), Up(), Up()
         self.start()
 
+    def doubling(self, **kw):
+        r = doubling(**kw)
+        return replace(r, downstreams=(replace(r.downstreams[0], url=self.v.url),))
+
     def start(self, valar_key="VK"):
-        self.cfg = Config("127.0.0.1", 0, self.a.url, self.l.url, "LK", self.v.url, valar_key)
+        self.cfg = Config("127.0.0.1", 0, self.a.url, (self.v.url, valar_key))
         self.app = App(self.cfg, tempfile.mkdtemp())
-        self.app.routing = doubling()
+        self.app.routing = self.doubling()
         self.srv = make_server(self.cfg, self.app)
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.port = self.srv.server_address[1]
@@ -249,12 +253,12 @@ class DoublingTest(unittest.TestCase):
         self.assertIn("shadow=valar", self.err.getvalue())
 
     def test_rate_zero_and_tag(self):
-        self.app.routing = doubling(rate=0)
+        self.app.routing = self.doubling(rate=0)
         self.post(msg("hello"))
         self.assertEqual(self.settle(), [])
         self.assertEqual(len(self.v.seen), 0)
         self.assertIn("shadow=-", self.err.getvalue())
-        self.app.routing = doubling(tag="Both")
+        self.app.routing = self.doubling(tag="Both")
         self.post(msg("plain"))
         self.post(msg("compare this #both"))
         rows = self.pairs(1)
@@ -263,7 +267,7 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(self.app.store._all("SELECT preview FROM turns")[0]["preview"], "compare this #both")
 
     def test_direction_checkbox(self):
-        self.app.routing = doubling(shadow={**SHADOW, "valar": None})
+        self.app.routing = self.doubling(shadow={**SHADOW, "valar": None})
         self.post(msg("do it", "claude-sonnet-5-5"))
         self.assertEqual(self.settle(), [])
         self.assertEqual(len(self.a.seen), 0)
@@ -272,9 +276,9 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual((rows[0]["served_track"], rows[0]["shadow_track"]), ("anthropic", "valar"))
 
     def test_served_identical_and_not_delayed(self):
-        self.app.routing = doubling(rate=0)
+        self.app.routing = self.doubling(rate=0)
         _, plain = self.post(msg("same"))
-        self.app.routing = doubling()
+        self.app.routing = self.doubling()
         self.v.delay = 1
         t = time.time()
         status, doubled = self.post(msg("same again"))
@@ -317,7 +321,7 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(self.l.seen, [])
 
     def test_shadow_none_means_off(self):
-        self.app.routing = doubling(shadow={**SHADOW, "valar": None})
+        self.app.routing = self.doubling(shadow={**SHADOW, "valar": None})
         self.post(msg("sonnet turn", "claude-sonnet-5-5"))
         self.assertEqual(self.settle(), [])
         self.assertEqual(self.a.seen, [])

@@ -116,14 +116,17 @@ class ProxyTest(unittest.TestCase):
 
     def start(self, litellm_url, classifier_url=None, valar_key="VK"):
         self.dir = tempfile.mkdtemp()
-        cfg = Config("127.0.0.1", 0, self.a.url, litellm_url, "LK", self.v.url, valar_key)
+        cfg = Config("127.0.0.1", 0, self.a.url, (self.v.url, valar_key))
         self.app = App(cfg, self.dir)
-        self.app.routing = CLASSIFIER_OFF
+        self.app.routing = replace(CLASSIFIER_OFF, downstreams=(replace(VALAR, url=self.v.url),))
         if classifier_url:
-            self.app.classifier = Classifier({"valar": (classifier_url, "VK"), "local": (classifier_url, "LK")})
+            self.app.classifier = Classifier({"valar": (classifier_url, "VK")})
         self.srv = make_server(cfg, self.app)
         threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         self.port = self.srv.server_address[1]
+
+    def set_valar_url(self, url):
+        self.app.routing = replace(self.app.routing, downstreams=(replace(self.app.routing.downstreams[0], url=url),))
 
     def tearDown(self):
         for s in (self.srv, self.a, self.v, self.l):
@@ -172,7 +175,7 @@ class ProxyTest(unittest.TestCase):
 
     def test_valar_window_header_and_row(self):
         w = {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}
-        self.app.routing = replace(CLASSIFIER_OFF, downstreams=(replace(VALAR, windows=w),))
+        self.app.routing = replace(self.app.routing, downstreams=(replace(self.app.routing.downstreams[0], windows=w),))
         self.post(body_for("claude-sonnet-5-5"), {**HDRS, "X-Valar-Completion-Window": "flex"})
         self.assertEqual(self.v.seen[0][2].get_all("X-Valar-Completion-Window"), ["standard"])
         self.post(body_for("claude-haiku-4-5"))
@@ -223,7 +226,7 @@ class ProxyTest(unittest.TestCase):
         self.start(self.l.url, valar_key="")
         status, data = self.post(body_for("claude-sonnet-5-5"))
         self.assertEqual(status, 502)
-        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Valar not configured (VALAR_API_KEY unset)")
+        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Valar not configured (no key set)")
         self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
 
     def test_valar_down_502(self):
@@ -270,7 +273,7 @@ class ProxyTest(unittest.TestCase):
         self.srv.shutdown()
         self.srv.server_close()
         self.start(self.l.url, slow.url)
-        self.app.routing = replace(BASE, classifier=replace(BASE.classifier, timeout_s=0.2))
+        self.app.routing = replace(BASE, downstreams=(replace(VALAR, url=self.v.url),), classifier=replace(BASE.classifier, timeout_s=0.2))
         t = time.time()
         self.assertEqual(self.post(body_for("claude-sonnet-5-5"))[0], 200)
         self.assertLess(time.time() - t, 0.5)
@@ -354,7 +357,7 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(self.app.prices.valar, {"VS": {"asap": [1, 0.5, 2]}})
         with open(os.path.join(self.dir, "models.json")) as f:
             self.assertEqual(json.load(f)["valar_prices"], {"VS": {"asap": [1, 0.5, 2]}})
-        self.app.cfg = replace(self.app.cfg, valar_url="http://127.0.0.1:1")
+        self.set_valar_url("http://127.0.0.1:1")
         self.app.refresh_valar_prices()  # failure is logged, never raised
         self.assertIn("valar prices", self.err.getvalue())
 
@@ -468,7 +471,7 @@ class ProxyTest(unittest.TestCase):
             self.app.store.close()
             self.dir = tempfile.mkdtemp()
             make(os.path.join(self.dir, "stats.db"))
-            cfg = Config("127.0.0.1", 0, self.a.url, self.l.url, "LK", self.v.url, "VK")
+            cfg = Config("127.0.0.1", 0, self.a.url, (self.v.url, "VK"))
             self.app = App(cfg, self.dir)
             self.assertTrue(self.app.banner.startswith("Stats are off: "), self.app.banner)
             self.srv = make_server(cfg, self.app)
@@ -476,6 +479,31 @@ class ProxyTest(unittest.TestCase):
             self.port = self.srv.server_address[1]
             self.assertEqual(self.post(body_for("claude-opus-5-5"))[0], 200)
             self.assertEqual(self.app.store.departures(), [])
+
+
+class SeedTest(unittest.TestCase):
+    def test_env_seeds_valar_once(self):
+        d = tempfile.mkdtemp()
+        cfg = Config("127.0.0.1", 0, "http://a", ("http://v.example", "k1"))
+        with contextlib.redirect_stderr(io.StringIO()):
+            app = App(cfg, d)
+            self.assertEqual(app.keys.get("valar"), "k1")
+            self.assertTrue(app.routing.seeded)
+            self.assertEqual(app.routing.downstreams[0].url, "http://v.example")
+            self.assertEqual(oct(os.stat(os.path.join(d, "downstreams.keys.json")).st_mode & 0o777), "0o600")
+            self.assertNotIn("k1", open(os.path.join(d, "console.json")).read())
+            app.store.close()
+            app.keys.delete("valar")
+            lemmi = replace(app.routing.downstreams[0], id="lemmi", kind="generic", windows=None)
+            # the person replaced Valar with another downstream
+            app.set_routing(replace(app.routing, downstreams=(lemmi,), rules=tuple(replace(r, enabled=False) for r in app.routing.rules), lever="anthropic",
+                                    classifier=replace(app.routing.classifier, upstream="none", labels=tuple(replace(l, track="anthropic") for l in app.routing.classifier.labels)),
+                                    doubling=replace(app.routing.doubling, shadow={"anthropic": None, "lemmi": None})))
+            app.store.close()
+            app = App(cfg, d)  # same env, restarted
+            self.assertEqual([x.id for x in app.routing.downstreams], ["lemmi"])
+            self.assertFalse(app.keys.has("valar"))
+            app.store.close()
 
 
 class MainTest(unittest.TestCase):
@@ -486,7 +514,7 @@ class MainTest(unittest.TestCase):
     def test_unusable_config_dir_exits_2(self):
         f = tempfile.NamedTemporaryFile()
         err = io.StringIO()
-        env = {"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_CONFIG_DIR": os.path.join(f.name, "sub")}
+        env = {"CLAUDE_ROUTER_CONFIG_DIR": os.path.join(f.name, "sub")}
         with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
             claude_router.main()
         self.assertEqual(cm.exception.code, 2)

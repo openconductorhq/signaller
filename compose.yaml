@@ -8,7 +8,6 @@ services:
     env_file: ${HOME}/.config/claude-router/env
     environment:  # wins over the env file
       CLAUDE_ROUTER_LISTEN: 0.0.0.0:8787
-      LITELLM_URL: http://host.docker.internal:4000
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ${HOME}/.config/claude-router:/config

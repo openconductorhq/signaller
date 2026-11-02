@@ -44,9 +44,9 @@ class SpeedTest(unittest.TestCase):
         url = "http://127.0.0.1:%d" % fake.server_address[1]
         quiet = contextlib.redirect_stderr(io.StringIO())
         quiet.__enter__()
-        cfg = Config("127.0.0.1", 0, url, url, "LK", url, "VK")
+        cfg = Config("127.0.0.1", 0, url, (url, "VK"))
         app = App(cfg, tempfile.mkdtemp())
-        app.routing = replace(DEFAULT_CONFIG, rules=USER_RULES + DEFAULT_CONFIG.rules)  # user rules first: worst case
+        app.routing = replace(DEFAULT_CONFIG, downstreams=(replace(DEFAULT_CONFIG.downstreams[0], url=url),), rules=USER_RULES + DEFAULT_CONFIG.rules)  # user rules first: worst case
         srv = make_server(cfg, app)
         threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 

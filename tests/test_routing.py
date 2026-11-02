@@ -383,34 +383,30 @@ class ConfigJsonTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_config_defaults(self):
-        c = load_config({"LITELLM_API_KEY": "k"})
+        c = load_config({})
         self.assertEqual((c.listen_host, c.listen_port), ("127.0.0.1", 8787))
         self.assertEqual(c.anthropic_url, "https://api.anthropic.com")
-        self.assertEqual(c.litellm_url, "http://127.0.0.1:4000")
-        self.assertEqual(c.litellm_key, "k")
-        self.assertEqual(c.valar_url, "https://api.valarhq.ai")
-        c = load_config({})
-        self.assertEqual((c.litellm_key, c.valar_key), ("", ""))
+        self.assertEqual(c.env_valar, ("", ""))
 
     def test_config_valar_url_strip(self):
         for u in ("https://api.valarhq.ai/v1/", "https://api.valarhq.ai/", "https://api.valarhq.ai/v1"):
-            self.assertEqual(load_config({"VALAR_URL": u}).valar_url, "https://api.valarhq.ai")
+            self.assertEqual(load_config({"VALAR_URL": u}).env_valar[0], "https://api.valarhq.ai")
 
     def test_config_keys_optional(self):
         c = load_config({"VALAR_API_KEY": "v"})
-        self.assertEqual((c.valar_key, c.litellm_key), ("v", ""))
+        self.assertEqual(c.env_valar, ("", "v"))
         self.assertEqual(load_config({}).listen_port, 8787)
 
     def test_config_rejects_non_loopback(self):
         for listen in ("0.0.0.0:8787", "192.168.1.5:8787", "example.com:8787"):
             with self.assertRaises(ValueError):
-                load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": listen})
+                load_config({"CLAUDE_ROUTER_LISTEN": listen})
         self.assertEqual(load_config({"CLAUDE_ROUTER_LISTEN": "0.0.0.0:8787", "CLAUDE_ROUTER_IN_CONTAINER": "1"}).listen_host, "0.0.0.0")
         with self.assertRaises(ValueError):  # only the any-address, and only in a container
             load_config({"CLAUDE_ROUTER_LISTEN": "192.168.1.5:8787", "CLAUDE_ROUTER_IN_CONTAINER": "1"})
-        c = load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": "localhost:9000"})
+        c = load_config({"CLAUDE_ROUTER_LISTEN": "localhost:9000"})
         self.assertEqual((c.listen_host, c.listen_port), ("localhost", 9000))
-        c = load_config({"LITELLM_API_KEY": "k", "CLAUDE_ROUTER_LISTEN": "[::1]:9000"})
+        c = load_config({"CLAUDE_ROUTER_LISTEN": "[::1]:9000"})
         self.assertEqual((c.listen_host, c.listen_port), ("::1", 9000))
 
 
@@ -461,6 +457,12 @@ class DownstreamTests(unittest.TestCase):
         for model, t, want in (("claude-opus-5-5", "hi", "anthropic"), ("claude-sonnet-5-5", "hi", "valar"),
                                ("claude-haiku-5-5", "hi", "valar"), ("claude-haiku-5-5", "#planning x", "anthropic")):
             self.assertEqual(route(cfg, Features.from_body(body([user(t)], model)), boom).track, want, model)
+
+    def test_v2_stray_window_key_migrates(self):
+        o = v2()
+        o["windows"]["valar"]["stray"] = "asap"
+        cfg = config_from_json(o)
+        self.assertEqual(set(cfg.downstreams[0].windows), set(MODEL_TIERS))
 
     def test_v2_local_references_repointed(self):
         o = v2()

@@ -55,7 +55,7 @@ class ConsoleTest(Fixture):
         s, j = self.js("GET", "/ui/api/state")
         self.assertEqual(s, 200)
         self.assertEqual(j["config"]["lever"], "rules")
-        self.assertEqual(j["upstreams"]["local"], {"url": self.l.url[7:], "configured": True})
+        self.assertEqual(j["upstreams"]["valar"], {"url": self.v.url[7:], "configured": True})
 
     def test_v1_with_own_origin_still_forbidden(self):
         s, _ = self.post(body_for("claude-opus-5-5"), {**HDRS, "Origin": "http://127.0.0.1:%d" % self.port})
@@ -215,7 +215,7 @@ class ConsoleTest(Fixture):
     def test_models_saved_list_when_upstream_down(self):
         self.v.models = b'{"data":[{"id":"a"}]}'
         self.js("GET", "/ui/api/models?track=valar")
-        self.app.cfg = replace(self.app.cfg, valar_url="http://127.0.0.1:1")
+        self.set_valar_url("http://127.0.0.1:1")
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual((s, j["models"]), (200, ["a"]))
         self.assertIn("Valar unreachable", j["stale"])
@@ -237,11 +237,12 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.req("GET", "/ui/api/models?track=valar", host="evil.example")[0].status, 403)
         self.assertEqual(self.req("GET", "/ui/api/models?track=valar", origin="http://evil.com")[0].status, 403)
         self.assertEqual(self.v.seen, [])
-        self.app.cfg = replace(self.app.cfg, valar_key="")
+        self.app.keys.delete("valar")
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual((s, j["error"]), (502, "Valar not configured"))
         self.assertEqual(self.v.seen, [])
-        self.app.cfg = replace(self.app.cfg, valar_key="VK", valar_url="http://127.0.0.1:1")
+        self.app.keys.set("valar", "VK")
+        self.set_valar_url("http://127.0.0.1:1")
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual(s, 502)
         self.assertNotIn("VK", json.dumps(j))
@@ -252,7 +253,7 @@ class ConsoleTest(Fixture):
         self.assertEqual(j["upstreams"]["valar"]["url"], self.v.url[7:])
         self.assertNotIn("VK", json.dumps(j))
         self.assertNotIn("LK", json.dumps(j))
-        self.app.cfg = replace(self.app.cfg, valar_key="")
+        self.app.keys.delete("valar")
         self.assertFalse(self.js("GET", "/ui/api/state")[1]["upstreams"]["valar"]["configured"])
 
     def test_verdict_api_valar(self):

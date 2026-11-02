@@ -297,7 +297,7 @@ def _v2_to_v3(obj):
             "doubling": {**d, "shadow": {t: loc(o, None) for t, o in d["shadow"].items() if t != "local"}},
             "downstreams": [{"id": "valar", "name": "Valar", "url": "https://api.valarhq.ai", "kind": "valar", "color": "#2F6DB5",
                              "models": {"fable": m["sonnet"], "opus": m["sonnet"], **{k: m[k] for k in m if k in MODEL_TIERS}},
-                             "windows": {**{t: "asap" for t in MODEL_TIERS}, **w}, "prices": None}]}, tuple(off)
+                             "windows": {t: w.get(t, "asap") for t in MODEL_TIERS}, "prices": None}]}, tuple(off)
 
 
 def _downstream(d, taken):
