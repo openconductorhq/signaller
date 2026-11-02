@@ -317,11 +317,12 @@ class Store:
         c = self._conn()
         try:
             q = lambda sql, *a: c.execute(sql, a).fetchone()[0]
-            tally = {"anthropic": 0, "valar": 0, "local": 0, "same": 0}
+            tally = {"anthropic": 0, "valar": 0, "local": 0, "same": 0}  # the long-standing keys, plus any other track seen
             for v, k in c.execute("SELECT verdict, COUNT(*) FROM turns WHERE verdict IS NOT NULL GROUP BY verdict"):
                 tally[v] = k
             return {
-                "anthropic_pct": pct("anthropic"), "valar_pct": pct("valar"), "local_pct": pct("local"), "last_hour_total": n,
+                **{"%s_pct" % t: pct(t) for t in dict.fromkeys(["anthropic", "valar", "local", *(r["track"] for r in hour)])},
+                "last_hour_total": n,
                 "per_minute": q("SELECT COUNT(*) FROM requests WHERE ts >= ?", now - 300) / 5,
                 "errors_last_hour": sum(r["status"] is not None and (r["status"] >= 500 or r["status"] == 0) for r in hour),
                 "doubled_turns_today": q("SELECT COUNT(*) FROM turns WHERE ts >= ?", midnight),
@@ -341,7 +342,8 @@ class Store:
         sc, sa = self._sess(sessions)
         return self._all("SELECT COALESCE(MIN(ts), 0) t FROM requests WHERE %s" % sc, sa)[0]["t"]
 
-    def summary(self, sessions, t0, t1, now):
+    def summary(self, sessions, t0, t1, now, tracks):
+        """tracks: the configured ones; rows of any other track still show, marked removed."""
         sc, sa = self._sess(sessions)
         span = [t0, t1]
         by = {r["track"]: r for r in self._all(
@@ -355,12 +357,14 @@ class Store:
             "WHERE %s AND r.ts BETWEEN ? AND ? GROUP BY p.shadow_track" % self._sess(sessions, "r.session_id")[0], sa + span)}
         total = sum(r["n"] for r in by.values())
         z = {"n": 0, "i": 0, "o": 0, "cost": 0, "api": 0, "sav": 0, "papi": 0, "nocost": 0}
-        tracks = {}
-        for t in TRACKS:
+        out_tracks = {}
+        for t in dict.fromkeys([*tracks, *by]):
             r = by.get(t, z)
-            tracks[t] = {"n": r["n"], "pct": round(100 * r["n"] / total) if total else 0, "in": r["i"], "out": r["o"],
-                         "cost": r["cost"], "api_cost": r["api"], "unpriced": r["nocost"] if t == "valar" else 0,
-                         "comparisons": comp.get(t, 0)}
+            out_tracks[t] = {"n": r["n"], "pct": round(100 * r["n"] / total) if total else 0, "in": r["i"], "out": r["o"],
+                             "cost": r["cost"], "api_cost": r["api"], "unpriced": r["nocost"] if t != "anthropic" else 0,
+                             "comparisons": comp.get(t, 0)}
+            if t not in tracks:
+                out_tracks[t]["removed"] = True
         rules = {}
         for r in self._all("SELECT reason, COUNT(*) n FROM requests "
                            "WHERE %s AND ts BETWEEN ? AND ? GROUP BY reason" % sc, sa + span):
@@ -371,14 +375,15 @@ class Store:
                 rules[k] = rules.get(k, 0) + r["n"]
         errors = self._all("SELECT COUNT(*) n FROM requests WHERE %s AND ts BETWEEN ? AND ? AND (status >= 500 OR status = 0)" % sc, sa + span)[0]["n"]
         recent = self._all("SELECT COUNT(*) n FROM requests WHERE %s AND ts BETWEEN ? AND ?" % sc, sa + [max(t0, now - 300), t1])[0]["n"]
-        tally = {"anthropic": 0, "valar": 0, "local": 0, "same": 0}
+        tally = dict.fromkeys([*out_tracks, "same"], 0)
         for r in self._all("SELECT verdict, COUNT(*) n FROM turns WHERE %s AND ts BETWEEN ? AND ? AND verdict IS NOT NULL GROUP BY verdict"
                            % self._sess(sessions)[0], sa + span):
             tally[r["verdict"]] = r["n"]
-        # only rows with a price: an unpriced Valar row is unknown, not free
-        savings = sum(by.get(t, z)["sav"] for t in ("valar", "local"))
-        saved_would = sum(by.get(t, z)["papi"] for t in ("valar", "local"))
-        return {"total": total, "per_minute": recent / 5, "tracks": tracks, "savings": savings, "saved_would": saved_would, "rules": rules,
+        # only rows with a price: an unpriced row is unknown, not free
+        others = [t for t in by if t != "anthropic"]
+        savings = sum(by[t]["sav"] for t in others)
+        saved_would = sum(by[t]["papi"] for t in others)
+        return {"total": total, "per_minute": recent / 5, "tracks": out_tracks, "savings": savings, "saved_would": saved_would, "rules": rules,
                 "errors": errors, "tally": tally}
 
     def list_sessions(self, t0, t1):
@@ -435,20 +440,24 @@ class Store:
         finally:
             c.close()
 
-    def reprice(self, prices):
-        """Fill `cost` on Valar rows recorded before their model's price was known; returns rows updated."""
-        rows = self._all("SELECT id, model_out, window, in_tok, out_tok, cache_read_tok, cache_write_tok FROM requests "
-                         "WHERE track='valar' AND cost IS NULL AND COALESCE(in_tok, out_tok, cache_read_tok, cache_write_tok) IS NOT NULL")
+    def reprice(self, prices, downstreams):
+        """Fill `cost` on rows recorded before their downstream had a price; never touches a cost already set. Returns rows updated."""
+        by = {d.id: d for d in downstreams if d.kind == "valar" and prices.listed.get(d.id) or d.prices}
+        if not by:
+            return 0
+        rows = self._all("SELECT id, track, model_out, window, in_tok, out_tok, cache_read_tok, cache_write_tok FROM requests "
+                         "WHERE track IN (%s) AND cost IS NULL AND COALESCE(in_tok, out_tok, cache_read_tok, cache_write_tok) IS NOT NULL"
+                         % ",".join("?" * len(by)), list(by))
         upd = []
         for r in rows:
             u = {"in": r["in_tok"], "out": r["out_tok"], "cache_read": r["cache_read_tok"], "cache_write": r["cache_write_tok"]}
-            c = prices.cost("valar", r["model_out"], r["window"], u)
+            c = prices.cost(by[r["track"]], r["model_out"], r["window"], u)
             if c is not None:
                 upd.append((c, r["id"]))
         c = self._conn()
         try:
             with c:
-                c.executemany("UPDATE requests SET cost=? WHERE id=?", upd)
+                c.executemany("UPDATE requests SET cost=? WHERE id=? AND cost IS NULL", upd)
         finally:
             c.close()
         return len(upd)
@@ -473,15 +482,15 @@ class NullStore:
     def turns(self, *a, **k): return []
     def list_sessions(self, *a, **k): return []
     def first_ts(self, *a): return 0
-    def summary(self, *a, **k):
+    def summary(self, sessions, t0, t1, now, tracks):
         t = {"n": 0, "pct": 0, "in": 0, "out": 0, "cost": 0, "api_cost": 0, "unpriced": 0, "comparisons": 0}
-        return {"total": 0, "per_minute": 0, "tracks": {k: dict(t) for k in TRACKS}, "savings": 0, "rules": {}, "errors": 0,
-                "tally": {"anthropic": 0, "valar": 0, "local": 0, "same": 0}}
+        return {"total": 0, "per_minute": 0, "tracks": {k: dict(t) for k in tracks}, "savings": 0, "rules": {}, "errors": 0,
+                "tally": dict.fromkeys([*tracks, "same"], 0)}
     def turn(self, turn_id): return None
     def set_verdict(self, turn_id, verdict): return False
     def forget_pairs(self): pass
     def set_session_name(self, sid, name): pass
-    def reprice(self, prices): return 0
+    def reprice(self, prices, downstreams): return 0
 
     def stats(self, now):
         return {"anthropic_pct": 0, "valar_pct": 0, "local_pct": 0, "last_hour_total": 0, "per_minute": 0, "errors_last_hour": 0,

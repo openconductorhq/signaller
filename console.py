@@ -93,7 +93,7 @@ def list_models(url, key, timeout=5):
 
 
 def read_models(config_dir):
-    """models.json: the last list each upstream gave us (+ valar_prices), also hand-editable for an upstream that's down."""
+    """models.json: the last list each upstream gave us (+ listed_prices), also hand-editable for an upstream that's down."""
     try:
         with open(os.path.join(config_dir, "models.json")) as f:
             saved = json.load(f)
@@ -146,7 +146,7 @@ def state(app, query=None):
         return {"url": urlsplit(url).netloc, "configured": bool(key)}
     c = app.cfg
     return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time()),
-            "summary": app.store.summary(ids, t0, t1, time.time()), "banner": app.banner,
+            "summary": app.store.summary(ids, t0, t1, time.time(), tracks(app.routing)), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
             "upstreams": {"valar": up("valar"), "local": up("local")},
@@ -175,8 +175,9 @@ def api(h, app, method, path, query, body):
         except Err as e:
             if isinstance(saved.get(t), list) and saved[t]:
                 out = {"models": [str(m) for m in saved[t]], "stale": e.body["error"]}
-                if t == "valar" and isinstance(saved.get("valar_prices"), dict):
-                    out["windows"] = windows_of(saved["valar_prices"])
+                lp = (saved.get("listed_prices") or {}).get("valar") or saved.get("valar_prices")
+                if t == "valar" and isinstance(lp, dict):
+                    out["windows"] = windows_of(lp)
                 return out
             raise
         out, upd = {"models": ids}, {t: ids}
@@ -184,8 +185,8 @@ def api(h, app, method, path, query, body):
             try:
                 vp = parse_valar(payload)
                 if vp:
-                    upd["valar_prices"] = vp
-                    app.prices.set_valar(vp)
+                    app.prices.set_listed("valar", vp)
+                    upd["listed_prices"] = app.prices.listed
                 out["windows"] = windows_of(vp)
             except Exception:
                 pass  # unparseable prices: ids still go out, every window stays offered

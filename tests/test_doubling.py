@@ -362,7 +362,7 @@ class DoublingTest(unittest.TestCase):
     def test_shadow_usage_and_cost_on_pair(self):
         w = {"fable": "asap", "opus": "priority", "sonnet": "standard", "haiku": "asap"}
         self.app.routing = replace(self.app.routing, downstreams=(replace(self.app.routing.downstreams[0], windows=w),))
-        self.app.prices.set_valar({"VS": {"priority": [1.0, 0.5, 2.0]}})
+        self.app.prices.set_listed("valar", {"VS": {"priority": [1.0, 0.5, 2.0]}})
         self.post(msg("priced turn", "claude-opus-5-5"))
         r = self.pairs(1)[0]
         self.assertEqual(r["shadow"]["window"], "priority")

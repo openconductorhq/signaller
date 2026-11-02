@@ -89,7 +89,8 @@ def test_summary_10k_rows_under_50ms(tmp_path):
         s.record_request(dict(id=i + 1, ts=now - i, track=("anthropic", "valar", "local")[i % 3], reason="rule:r%d" % (i % 5),
                               session_id="s%d" % (i % 4), cost=0.01, api_cost=0.02, in_tok=5, out_tok=5, status=200))
     s.close()
-    s.summary(None, 0, now + 1, now)
+    T = ("anthropic", "valar", "local")
+    s.summary(None, 0, now + 1, now, T)
     t = time.perf_counter()
-    s.summary(["s1", "s2"], 0, now + 1, now)
+    s.summary(["s1", "s2"], 0, now + 1, now, T)
     assert (time.perf_counter() - t) * 1000 < 50

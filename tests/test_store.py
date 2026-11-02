@@ -189,6 +189,9 @@ def test_old_db_gets_columns(tmp_path):
     c.close()
 
 
+T = ("anthropic", "valar", "local")
+
+
 def seeded(tmp_path):
     s, now = Store(str(tmp_path / "s.db")), time.time()
     s.touch_session("sa", now - 5000, "/x/alpha", "main")
@@ -214,7 +217,7 @@ def seeded(tmp_path):
 
 def test_summary(tmp_path):
     s, now = seeded(tmp_path)
-    m = s.summary(None, 0, now + 1, now)
+    m = s.summary(None, 0, now + 1, now, T)
     assert m["total"] == 7 and m["errors"] == 2 and m["per_minute"] == 6 / 5
     a, v, l = (m["tracks"][t] for t in ("anthropic", "valar", "local"))
     assert (a["n"], a["pct"], v["n"], v["pct"], l["pct"]) == (3, 43, 3, 43, 14)
@@ -223,17 +226,17 @@ def test_summary(tmp_path):
     assert m["savings"] == 0.75 + 0.5  # valar 1.0-.25 + local .5; anthropic and comparisons excluded
     assert m["rules"] == {"big": 1, "a:b": 1, "classifier": 1, "otherwise": 1, "lever": 1}
     assert m["tally"] == {"anthropic": 0, "valar": 1, "local": 0, "same": 0}
-    sa = s.summary(["sa"], 0, now + 1, now)
+    sa = s.summary(["sa"], 0, now + 1, now, T)
     assert sa["total"] == 3 and sa["savings"] == 0.75 and sa["tracks"]["local"]["n"] == 0 and sa["tally"]["valar"] == 1
-    assert s.summary(["unknown"], 0, now + 1, now)["total"] == 1
-    assert s.summary(["sb", "unknown"], 0, now + 1, now)["total"] == 4
-    span = s.summary(None, now - 3600, now + 1, now)  # drops request 1 and its comparison
+    assert s.summary(["unknown"], 0, now + 1, now, T)["total"] == 1
+    assert s.summary(["sb", "unknown"], 0, now + 1, now, T)["total"] == 4
+    span = s.summary(None, now - 3600, now + 1, now, T)  # drops request 1 and its comparison
     assert span["total"] == 6 and span["tracks"]["local"]["comparisons"] == 0 and "big" not in span["rules"]
-    assert s.summary([], 0, now + 1, now)["total"] == 0
+    assert s.summary([], 0, now + 1, now, T)["total"] == 0
     assert s.first_ts(["sb"]) == now - 50
     s2 = Store(str(tmp_path / "s.db"))  # an unpriced valar row with tokens and an api_cost is not a saving
     s2.record_request(req(8, now - 10, "valar", 200, reason="default", session_id="sb", cost=None, api_cost=9.0, in_tok=5, out_tok=5))
-    m2 = s2.summary(None, 0, now + 1, now)
+    m2 = s2.summary(None, 0, now + 1, now, T)
     assert m2["savings"] == m["savings"] and m2["saved_would"] == m["saved_would"] == 1.5
     s2.close()
 
@@ -254,4 +257,35 @@ def test_list_sessions_and_filtered_reads(tmp_path):
     s.set_session_name("sa", None)
     assert [x["label"] for x in s.list_sessions(0, now + 1) if x["id"] == "sa"] == ["alpha · main"]
     n = store.NullStore()
-    assert n.list_sessions(0, 1) == [] and n.summary(None, 0, 1, 1)["total"] == 0
+    assert n.list_sessions(0, 1) == [] and n.summary(None, 0, 1, 1, T)["total"] == 0
+
+
+def test_summary_includes_removed_tracks(tmp_path):
+    s, now = seeded(tmp_path)
+    s = Store(str(tmp_path / "s.db"))
+    s.record_request(req(8, now - 5, "lemmi", 200, reason="default", session_id="sb", cost=0.1, api_cost=0.5, in_tok=1, out_tok=1))
+    s.record_request(req(9, now - 4, "lemmi", 200, reason="default", session_id="sb", cost=None, api_cost=7.0, in_tok=1, out_tok=1))
+    s.close()
+    m = s.summary(None, 0, now + 1, now, ("anthropic", "valar"))
+    assert set(m["tracks"]) == {"anthropic", "valar", "local", "lemmi"}
+    assert {t for t, v in m["tracks"].items() if v.get("removed")} == {"local", "lemmi"}
+    assert m["tracks"]["lemmi"]["unpriced"] == 1 and m["tracks"]["lemmi"]["cost"] == 0.1
+    assert m["savings"] == 0.75 + 0.5 + 0.4  # valar .75, local .5, lemmi's priced row .4; its unpriced row adds nothing
+    assert set(m["tally"]) == {"anthropic", "valar", "local", "lemmi", "same"}
+    n = store.NullStore().summary(None, 0, 1, 1, ("anthropic", "x"))
+    assert set(n["tracks"]) == {"anthropic", "x"}
+
+
+def test_reprice_fills_only_null_costs(tmp_path):
+    from prices import Prices
+    from routing import Downstream
+    models = dict.fromkeys(("fable", "opus", "sonnet", "haiku"), "m")
+    lem = Downstream("lemmi", "Lemmi", "http://l", "generic", models, "#000", None, {"in": 1, "out": 2, "cache_read": 0, "cache_write": 0})
+    bare = Downstream("bare", "Bare", "http://b", "generic", models, "#000")
+    s, now, p = Store(str(tmp_path / "s.db")), time.time(), Prices(str(tmp_path))
+    for i, (t, c) in enumerate([("lemmi", None), ("lemmi", 9.0), ("bare", None), ("anthropic", None)], 1):
+        s.record_request(req(i, now, t, 200, cost=c, in_tok=1_000_000, out_tok=1_000_000, model_out="m"))
+    s.close()
+    assert s.reprice(p, (lem, bare)) == 1
+    assert [s.request(i)["cost"] for i in (1, 2, 3, 4)] == [3.0, 9.0, None, None]
+    assert s.reprice(p, (lem, bare)) == 0

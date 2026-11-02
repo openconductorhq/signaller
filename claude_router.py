@@ -188,25 +188,29 @@ class App:
             self.keys.set("valar", key)
         self.set_routing(replace(self.routing, downstreams=dss, seeded=True))
 
-    def refresh_valar_prices(self) -> None:
-        """Fetch Valar's prices, keep them in memory and models.json, and price rows that were waiting. Never raises."""
-        _, url, key, _ = upstream(self, "valar")
-        if not key:
-            return
+    def refresh_prices(self) -> None:
+        """Fetch each Valar-kind downstream's price list, keep it in memory and models.json, and price rows that were waiting. Never raises."""
+        for d in self.routing.downstreams:
+            _, url, key, _ = upstream(self, d.id)
+            if d.kind != "valar" or not key:
+                continue
+            try:
+                vp = parse_valar(console.fetch_models(url, key))
+                if vp:  # a payload with no prices must not wipe good ones
+                    self.prices.set_listed(d.id, vp)
+                    console.save_models(self.config_dir, listed_prices=self.prices.listed)
+            except Exception as e:  # reason only: never headers, never the key
+                print("%s prices not refreshed: %s" % (d.id, getattr(e, "reason", None) or type(e).__name__),
+                      file=sys.stderr, flush=True)
         try:
-            vp = parse_valar(console.fetch_models(url, key))
-            if vp:  # a payload with no prices must not wipe good ones
-                self.prices.set_valar(vp)
-                console.save_models(self.config_dir, valar_prices=vp)
-                self.store.reprice(self.prices)
-        except Exception as e:  # reason only: never headers, never the key
-            print("valar prices not refreshed: %s" % (getattr(e, "reason", None) or type(e).__name__),
-                  file=sys.stderr, flush=True)
+            self.store.reprice(self.prices, self.routing.downstreams)
+        except Exception as e:
+            print("reprice failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
 
     def start_price_refresh(self, every: float = 3600) -> None:
         def loop():
             while True:
-                self.refresh_valar_prices()
+                self.refresh_prices()
                 time.sleep(every)
         threading.Thread(target=loop, daemon=True).start()
 
@@ -367,7 +371,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     res = {}
                 usage = res.get("usage") or {}
                 try:  # pricing never fails the request: unknown → nulls
-                    cost, api_cost = app.prices.cost(route, out_model, window, usage), app.prices.api_cost(model, usage)
+                    cost, api_cost = app.prices.cost(ds, out_model, window, usage), app.prices.api_cost(model, usage)
                 except Exception:
                     cost = api_cost = None
                 if pair:

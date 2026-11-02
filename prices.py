@@ -33,15 +33,17 @@ def parse_valar(payload: dict) -> dict:
 
 class Prices:
     def __init__(self, config_dir: str):
-        self.dir, self.valar, self.anthropic = config_dir, {}, DEFAULT_ANTHROPIC
+        self.dir, self.listed, self.anthropic = config_dir, {}, DEFAULT_ANTHROPIC
         self.load()
 
     def load(self) -> None:
         try:
             with open(os.path.join(self.dir, "models.json")) as f:
-                self.valar = json.load(f).get("valar_prices") or {}
-        except (OSError, ValueError, AttributeError):
-            self.valar = {}
+                saved = json.load(f)
+            self.listed = {**({"valar": saved["valar_prices"]} if saved.get("valar_prices") else {}),
+                           **(saved.get("listed_prices") or {})}  # valar_prices: the pre-downstreams key
+        except (OSError, ValueError, AttributeError, TypeError):
+            self.listed = {}
         path = os.path.join(self.dir, "prices.json")
         try:
             with open(path) as f:
@@ -58,19 +60,20 @@ class Prices:
             self.anthropic = DEFAULT_ANTHROPIC
             print("prices.json unreadable, default prices in use: %s" % e, file=sys.stderr, flush=True)
 
-    def set_valar(self, prices: dict) -> None:
-        self.valar = prices  # one reference swap; readers see old or new
+    def set_listed(self, id: str, prices: dict) -> None:
+        self.listed = {**self.listed, id: prices}  # one reference swap; readers see old or new
 
-    def cost(self, track: str, model_out: str, window: str | None, usage: dict) -> float | None:
+    def cost(self, ds, model_out: str, window: str | None, usage: dict) -> float | None:
+        """What the downstream charged (None = unknown); ds None is Anthropic, the subscription."""
         if all(usage.get(k) is None for k in KEYS):
             return None
-        if track != "valar":
-            return 0.0  # Anthropic: the subscription; local: our own hardware
-        p = self.valar.get(model_out, {}).get(window)
-        if not p:
-            return None
+        if ds is None:
+            return 0.0
         u = [usage.get(k) or 0 for k in KEYS]
-        return (u[0] * p[0] + u[2] * p[1] + u[1] * p[2]) / 1e6  # Valar cache writes are free
+        if ds.kind == "valar":
+            p = self.listed.get(ds.id, {}).get(model_out, {}).get(window)
+            return (u[0] * p[0] + u[2] * p[1] + u[1] * p[2]) / 1e6 if p else None  # Valar cache writes are free
+        return sum(x * ds.prices[k] for x, k in zip(u, KEYS)) / 1e6 if ds.prices else None
 
     def api_cost(self, model_in: str, usage: dict) -> float | None:
         if all(usage.get(k) is None for k in KEYS):

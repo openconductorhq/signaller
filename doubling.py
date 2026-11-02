@@ -196,7 +196,7 @@ class Doubler:
         from claude_router import HOP, hoist_inline_tools, upstream, upstream_headers  # late: claude_router imports this module
         from routing import track_model, track_window
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
-        model_out, window = None, None
+        model_out, window, ds = None, None, None
         try:
             req = json.loads(body)
             req["stream"] = False
@@ -230,7 +230,7 @@ class Doubler:
         out["ms"] = int((time.time() - t0) * 1000)
         res = cap.result() if cap else {"text": "", "tools": [], "output_tokens": None}
         try:
-            out["cost"] = self.prices.cost(track, model_out, window, res.get("usage") or {}) if self.prices else None
+            out["cost"] = self.prices.cost(ds, model_out, window, res.get("usage") or {}) if self.prices else None
         except Exception:
             out["cost"] = None
         h.shadow({**res, **out, "error": out["error"] or res.get("error")})
