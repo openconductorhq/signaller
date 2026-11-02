@@ -513,7 +513,9 @@ class DownstreamTests(unittest.TestCase):
                          ["the lever", "session 819a0a39's lever", "rule 'Mine' line 2", "Otherwise",
                           "classifier label 'coding'", "classifier upstream", "side by side: anthropic → lemmi"])
         self.assertEqual(references(cfg, "valar", {}), ["rule 'Tags in your message' line 2", "rule 'Model the request asked for' line 2",
-                                                       "classifier label 'chit-chat'", "side by side: valar → anthropic"])
+                                                       "classifier label 'chit-chat'"])  # valar → anthropic is its own
+        own = replace(cfg, doubling=replace(cfg.doubling, shadow={**cfg.doubling.shadow, "anthropic": None, "lemmi": "anthropic"}))
+        self.assertNotIn("side by side: lemmi → anthropic", references(own, "lemmi", {}))  # its own outgoing shadow goes with it
 
     def test_seven_downstreams_rejected(self):
         o = config_to_json(DEFAULT_CONFIG)
@@ -556,6 +558,8 @@ class DownstreamTests(unittest.TestCase):
             (lambda o: o["classifier"].update(upstream="anthropic"), "classifier upstream"),
             (lambda o: o["doubling"]["shadow"].pop("lemmi"), "shadow"),
             (lambda o: o.update(lever="local"), "lever"),
+            (ds(1, color="#88888"), "color"),
+            (ds(1, color="red"), "color"),
         ]
         for f, frag in cases:
             with self.assertRaisesRegex(ValueError, frag):

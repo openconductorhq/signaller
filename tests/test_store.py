@@ -5,7 +5,7 @@ import time
 
 import store
 from routing import DEFAULT_CONFIG
-from store import Store, load_console_config, save_console_config
+from store import NullStore, Store, load_console_config, save_console_config
 
 
 def req(i, ts, track="anthropic", status=200, **kw):
@@ -31,13 +31,29 @@ def test_corrupt_config_falls_back(tmp_path):
     assert (tmp_path / "console.json.bad").exists() and not p.exists()
 
 
+T3 = ("anthropic", "valar", "local")
+
+
+def test_stats_and_verdicts_follow_tracks(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    s.record_request(req(s.next_id(), now - 5, "lemmi"))
+    s.record_request(req(s.next_id(), now - 5, "gone"))
+    s.record_turn(dict(id="t", ts=now, preview="p"))
+    s.close()
+    assert s.set_verdict("t", "lemmi", ("anthropic", "lemmi")) and not s.set_verdict("t", "valar", ("anthropic", "lemmi"))
+    st = s.stats(now, ("anthropic", "lemmi"))
+    assert (st["anthropic_pct"], st["lemmi_pct"], st["gone_pct"]) == (0, 50, 50) and "valar_pct" not in st
+    assert st["tally"] == {"anthropic": 0, "lemmi": 1, "same": 0}
+    assert NullStore().stats(now, ("anthropic", "x"))["tally"] == {"anthropic": 0, "x": 0, "same": 0}
+
+
 def test_departures_and_stats(tmp_path):
     s, now = Store(str(tmp_path / "s.db")), time.time()
     for i, (t, st) in enumerate([("anthropic", 200)] * 3 + [("local", 502)], 1):
         s.record_request(req(s.next_id(), now - 10 * i, t, st, prompt="full %d" % i))
     s.record_request(req(s.next_id(), now - 7200))
     s.close()
-    st = s.stats(now)
+    st = s.stats(now, T3)
     assert (st["anthropic_pct"], st["local_pct"], st["last_hour_total"], st["errors_last_hour"]) == (75, 25, 4, 1)
     assert [r["id"] for r in s.departures()] == [5, 4, 3, 2, 1]
     assert [r["id"] for r in s.departures(since_id=3)] == [5, 4]
@@ -77,10 +93,10 @@ def test_turns_pairs_verdict(tmp_path):
     s.close()
     assert [x["step"] for x in s.turn("a")["steps"]] == [1, 2]
     assert s.turn("b")["preview"] == "b" and s.turn("zz") is None
-    assert s.set_verdict("b", "local") and not s.set_verdict("b", "bogus") and not s.set_verdict("zz", "same")
+    assert s.set_verdict("b", "local", T3) and not s.set_verdict("b", "bogus", T3) and not s.set_verdict("zz", "same", T3)
     assert [t["id"] for t in s.turns()] == ["a", "b"]
-    assert s.stats(now)["tally"] == {"local": 1, "anthropic": 0, "valar": 0, "same": 0}
-    assert s.stats(now)["judged_today"] == 1
+    assert s.stats(now, T3)["tally"] == {"local": 1, "anthropic": 0, "valar": 0, "same": 0}
+    assert s.stats(now, T3)["judged_today"] == 1
     s.forget_pairs()
     assert s.turns() == [] and s.turn("a") is None
 
@@ -141,8 +157,8 @@ def test_null_store_is_inert():
     n.record_request(req(1, 0)); n.record_pair({}); n.record_turn({})
     assert n.dropped == 3
     assert n.departures() == [] and n.request(1) is None and n.turns() == [] and n.turn("x") is None
-    assert n.pair_for_request(1) is None and n.set_verdict("x", "local") is False
-    assert n.stats(time.time())["last_hour_total"] == 0
+    assert n.pair_for_request(1) is None and n.set_verdict("x", "local", T3) is False
+    assert n.stats(time.time(), T3)["last_hour_total"] == 0
     n.forget_pairs(); n.close()
 
 
@@ -151,7 +167,7 @@ def test_stats_three_tracks(tmp_path):
     for t in ("anthropic", "valar", "local"):
         s.record_request(req(s.next_id(), now - 5, t))
     s.close()
-    st = s.stats(now)
+    st = s.stats(now, T3)
     assert (st["anthropic_pct"], st["valar_pct"], st["local_pct"]) == (33, 33, 33)
     assert st["anthropic_pct"] + st["valar_pct"] + st["local_pct"] <= 100
 
@@ -160,8 +176,8 @@ def test_verdict_valar(tmp_path):
     s, now = Store(str(tmp_path / "s.db")), time.time()
     s.record_turn(dict(id="t", ts=now, preview="p"))
     s.close()
-    assert s.set_verdict("t", "valar") and not s.set_verdict("t", "openai")
-    assert s.stats(now)["tally"] == {"anthropic": 0, "valar": 1, "local": 0, "same": 0}
+    assert s.set_verdict("t", "valar", T3) and not s.set_verdict("t", "openai", T3)
+    assert s.stats(now, T3)["tally"] == {"anthropic": 0, "valar": 1, "local": 0, "same": 0}
 
 
 def test_old_db_gets_columns(tmp_path):

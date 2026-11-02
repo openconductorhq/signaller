@@ -16,7 +16,6 @@ import time
 import sessions as sess
 from routing import DEFAULT_CONFIG, config_from_json, config_to_json
 
-TRACKS = ("anthropic", "valar", "local")  # tracks stored rows may carry; per-downstream in a later task
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,
@@ -308,7 +307,7 @@ class Store:
         r = self._all("SELECT * FROM pairs WHERE request_id=? ORDER BY id DESC LIMIT 1", (request_id,))
         return r[0] if r else None
 
-    def stats(self, now):
+    def stats(self, now, tracks):
         hour = self._all("SELECT track, status FROM requests WHERE ts >= ?", (now - 3600,))
         n = len(hour)
         pct = lambda t: round(100 * sum(r["track"] == t for r in hour) / n) if n else 0
@@ -317,11 +316,11 @@ class Store:
         c = self._conn()
         try:
             q = lambda sql, *a: c.execute(sql, a).fetchone()[0]
-            tally = {"anthropic": 0, "valar": 0, "local": 0, "same": 0}  # the long-standing keys, plus any other track seen
+            tally = dict.fromkeys([*tracks, "same"], 0)  # plus any other track judged before it was removed
             for v, k in c.execute("SELECT verdict, COUNT(*) FROM turns WHERE verdict IS NOT NULL GROUP BY verdict"):
                 tally[v] = k
             return {
-                **{"%s_pct" % t: pct(t) for t in dict.fromkeys(["anthropic", "valar", "local", *(r["track"] for r in hour)])},
+                **{"%s_pct" % t: pct(t) for t in dict.fromkeys([*tracks, *(r["track"] for r in hour)])},
                 "last_hour_total": n,
                 "per_minute": q("SELECT COUNT(*) FROM requests WHERE ts >= ?", now - 300) / 5,
                 "errors_last_hour": sum(r["status"] is not None and (r["status"] >= 500 or r["status"] == 0) for r in hour),
@@ -410,8 +409,8 @@ class Store:
         r[0]["steps"] = self._all("SELECT * FROM pairs WHERE turn_id=? ORDER BY step", (turn_id,))
         return r[0]
 
-    def set_verdict(self, turn_id, verdict):
-        if verdict not in TRACKS + ("same",):
+    def set_verdict(self, turn_id, verdict, tracks):
+        if verdict not in (*tracks, "same"):
             return False
         c = self._conn()
         try:
@@ -487,11 +486,11 @@ class NullStore:
         return {"total": 0, "per_minute": 0, "tracks": {k: dict(t) for k in tracks}, "savings": 0, "rules": {}, "errors": 0,
                 "tally": dict.fromkeys([*tracks, "same"], 0)}
     def turn(self, turn_id): return None
-    def set_verdict(self, turn_id, verdict): return False
+    def set_verdict(self, turn_id, verdict, tracks): return False
     def forget_pairs(self): pass
     def set_session_name(self, sid, name): pass
     def reprice(self, prices, downstreams): return 0
 
-    def stats(self, now):
-        return {"anthropic_pct": 0, "valar_pct": 0, "local_pct": 0, "last_hour_total": 0, "per_minute": 0, "errors_last_hour": 0,
-                "doubled_turns_today": 0, "judged_today": 0, "tally": {"anthropic": 0, "valar": 0, "local": 0, "same": 0}}
+    def stats(self, now, tracks):
+        return {**{"%s_pct" % t: 0 for t in tracks}, "last_hour_total": 0, "per_minute": 0, "errors_last_hour": 0,
+                "doubled_turns_today": 0, "judged_today": 0, "tally": dict.fromkeys([*tracks, "same"], 0)}

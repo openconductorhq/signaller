@@ -22,7 +22,8 @@ from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from prices import Prices, parse_valar
-from routing import session_of, Downstream, Features, RoutingConfig, downstream, is_routed, route as decide_route, track_model, track_window
+from routing import (session_of, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
+                     references, route as decide_route, track_model, track_window)
 from keys import Keys
 from store import NullStore, Store, load_console_config, save_console_config
 
@@ -155,6 +156,9 @@ class App:
         os.makedirs(config_dir, mode=0o700, exist_ok=True)
         self.cfg, self.config_dir = cfg, config_dir
         self.routing, self.banner = load_console_config(os.path.join(config_dir, "console.json"))
+        if self.routing.migrated_off:  # seed() below saves the migrated config, so this shows on the upgrade start only
+            self.banner = " ".join(filter(None, [self.banner, "Switched off because they sent traffic to Local, which is gone: %s."
+                                                 % ", ".join(self.routing.migrated_off)]))
         self._rlock = threading.Lock()
         self.session_levers = {}  # session id -> lever /router chose for that session only
         self.keys = Keys(config_dir)
@@ -223,8 +227,36 @@ class App:
 
     def set_routing(self, new: RoutingConfig) -> None:
         with self._rlock:  # file and memory must agree under concurrent PUTs
-            save_console_config(os.path.join(self.config_dir, "console.json"), new)
-            self.routing = new  # single reference assignment; requests read it once
+            self._put(new)
+
+    def _put(self, new: RoutingConfig) -> None:  # caller holds _rlock
+        save_console_config(os.path.join(self.config_dir, "console.json"), new)
+        self.routing = new  # single reference assignment; requests read it once
+
+    def add_downstream(self, d: dict, key: str) -> Downstream:
+        """Append a downstream (its config JSON) with no shadow of its own, and its key. ValueError if the config would be invalid."""
+        with self._rlock:
+            j = config_to_json(self.routing)
+            j["downstreams"].append(d)
+            j["doubling"]["shadow"][d["id"]] = None
+            new = config_from_json(j)
+            self._put(new)
+            if key:
+                self.keys.set(d["id"], key)
+            return new.downstreams[-1]
+
+    def delete_downstream(self, id: str) -> list[str]:
+        """Remove a downstream, its own shadow and its key; if anything still points at it, remove nothing and return those."""
+        with self._rlock:
+            refs = references(self.routing, id, self.session_levers)
+            if refs:
+                return refs
+            j = config_to_json(self.routing)
+            j["downstreams"] = [d for d in j["downstreams"] if d["id"] != id]
+            del j["doubling"]["shadow"][id]
+            self._put(config_from_json(j))
+            self.keys.delete(id)
+            return []
 
 
 def default_config_dir() -> str:

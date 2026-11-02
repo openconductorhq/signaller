@@ -13,6 +13,7 @@ TAG_RE = re.compile(r"(?<!\w)#(\w+)", re.I)
 TEXT_CAP = 20_000
 MAX_DOWNSTREAMS = 6
 ID_RE = re.compile(r"[a-z][a-z0-9-]{0,23}")
+COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}")
 RESERVED_IDS = {"anthropic", "rules", "reset", "name"} | KEYWORDS | set(FIELDS)
 PRICE_KEYS = ("in", "out", "cache_read", "cache_write")
 
@@ -214,7 +215,7 @@ def references(cfg: RoutingConfig, id: str, session_levers: Mapping[str, str]) -
     out += ["Otherwise"] if cfg.otherwise == id else []
     out += [f"classifier label '{l.name}'" for l in cfg.classifier.labels if l.track == id]
     out += ["classifier upstream"] if cfg.classifier.upstream == id else []
-    out += [f"side by side: {t} → {o}" for t, o in cfg.doubling.shadow.items() if o is not None and id in (t, o)]
+    out += [f"side by side: {t} → {o}" for t, o in cfg.doubling.shadow.items() if o == id]  # its own shadow[id] goes with it
     return out
 
 
@@ -310,6 +311,8 @@ def _downstream(d, taken):
     for k in ("name", "url", "color"):
         if not isinstance(d[k], str) or not d[k]:
             raise ValueError(f"downstream {i}: {k} must be non-empty text")
+    if not COLOR_RE.fullmatch(d["color"]):
+        raise ValueError(f"downstream {i}: color must be #RRGGBB")
     m = d["models"]
     if not isinstance(m, dict) or set(m) != set(MODEL_TIERS) or not all(isinstance(v, str) and v for v in m.values()):
         raise ValueError(f"downstream {i}: models must name a model for each of fable, opus, sonnet, haiku")

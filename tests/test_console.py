@@ -5,6 +5,16 @@ import unittest
 from dataclasses import replace
 from http.client import HTTPConnection
 
+import contextlib
+import io
+import shutil
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
+
+from claude_router import App, Config
+from routing import MODEL_TIERS
 from tests import test_proxy
 from tests.test_proxy import body_for, HDRS
 
@@ -148,7 +158,8 @@ class ConsoleTest(Fixture):
         self.assertEqual(r.status, 200)
 
     def test_session_lever_applies_to_that_session_only(self):
-        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules"})
+        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules",
+                                                                         "modes": ["rules", "anthropic", "valar"]})
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})[1]["lever"], "valar")
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "bogus"})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "unknown", "lever": "valar"})[0], 400)
@@ -219,8 +230,7 @@ class ConsoleTest(Fixture):
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual((s, j["models"]), (200, ["a"]))
         self.assertIn("Valar unreachable", j["stale"])
-        s, j = self.js("GET", "/ui/api/models?track=local")  # nothing saved for local yet
-        self.assertEqual(s, 502)
+        self.assertEqual(self.js("GET", "/ui/api/models?track=local")[0], 400)  # not a downstream any more
 
     def test_models_sec_fetch_site(self):
         self.v.models = b'{"data":[{"id":"a"}]}'
@@ -280,6 +290,256 @@ class ConsoleTest(Fixture):
         for p in ("/ui/api/state?from=abc", "/ui/api/state?to=x", "/ui/api/sessions?from=abc"):
             s, j = self.js("GET", p)
             self.assertEqual((s, j["error"]), (400, "from/to must be numbers or 'session'"))
+
+
+def serve(do_GET):
+    """A throwaway upstream whose GET does what the test says."""
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), type("H", (BaseHTTPRequestHandler,), {"do_GET": do_GET, "log_message": lambda *a: None}))
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    return srv, "http://127.0.0.1:%d" % srv.server_address[1]
+
+
+PRICED = json.dumps({"data": [{"id": "fast-model", "pricing": [
+    {"tier": "realtime", "input_per_1m_tokens": 2, "cached_input_per_1m_tokens": 0.2, "output_per_1m_tokens": 9}]}]}).encode()
+ONE = b'{"data":[{"id":"deepseek-v4.1-flash"}]}'
+
+
+class DownstreamApiTest(Fixture):
+    req, js = ConsoleTest.req, ConsoleTest.js
+
+    def add(self, id="lemmi", url=None, key="LMK", **kw):
+        self.l.models = self.l.models if self.l.models != b"{}" else ONE
+        d = {"id": id, "name": id.title(), "url": url or self.l.url + "/v1/", "models": dict.fromkeys(MODEL_TIERS, "deepseek-v4.1-flash"),
+             **({"key": key} if key else {}), **kw}
+        return self.js("POST", "/ui/api/downstreams", d)
+
+    def cfg(self):
+        return self.js("GET", "/ui/api/state")[1]["config"]
+
+    def keys_file(self):
+        with open(os.path.join(self.dir, "downstreams.keys.json")) as f:
+            return json.load(f)
+
+    def test_add_probe_delete_downstream(self):
+        self.l.models = ONE
+        s, j = self.js("POST", "/ui/api/downstreams/probe", {"url": self.l.url + "/v1", "key": "LMK"})
+        self.assertEqual((s, j), (200, {"ok": True, "reason": None, "models": ["deepseek-v4.1-flash"], "kind": "generic"}))
+        self.assertEqual(self.l.seen[-1][:2], ("GET", "/v1/models"))
+        self.assertEqual(self.l.seen[-1][2]["Authorization"], "Bearer LMK")
+        s, j = self.add()
+        self.assertEqual(s, 201, j)
+        self.assertEqual((j["id"], j["kind"], j["url"], j["windows"]), ("lemmi", "generic", self.l.url, None))
+        self.assertNotIn("key", j)
+        st = self.js("GET", "/ui/api/state")[1]
+        self.assertEqual(st["downstreams"]["lemmi"], {"key_set": True, "url": self.l.url[7:]})
+        self.assertEqual(st["config"]["doubling"]["shadow"]["lemmi"], None)
+        self.assertEqual(self.js("GET", "/ui/api/models?track=lemmi")[1], {"models": ["deepseek-v4.1-flash"]})
+        self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "lemmi"})[1]["lever"], "lemmi")
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
+        self.assertEqual(self.js("PUT", "/ui/api/config", {**self.cfg(), "lever": "lemmi"})[0], 200)
+        s, j = self.js("DELETE", "/ui/api/downstreams/lemmi")
+        self.assertEqual(s, 409)
+        self.assertIn("the lever", j["references"])
+        self.assertIn("the lever", j["error"])
+        self.assertEqual(self.js("PUT", "/ui/api/config", {**self.cfg(), "lever": "rules"})[0], 200)
+        self.assertEqual(self.js("DELETE", "/ui/api/downstreams/lemmi"), (200, {"ok": True}))
+        st = self.js("GET", "/ui/api/state")[1]
+        self.assertNotIn("lemmi", st["downstreams"])
+        self.assertNotIn("lemmi", st["config"]["doubling"]["shadow"])
+        self.assertNotIn("lemmi", self.keys_file())
+        self.assertEqual(self.js("DELETE", "/ui/api/downstreams/lemmi")[0], 404)
+
+    def test_probe_detects_valar(self):
+        self.l.models = PRICED
+        s, j = self.js("POST", "/ui/api/downstreams/probe", {"url": self.l.url, "key": "x"})
+        self.assertEqual((j["ok"], j["kind"], j["models"]), (True, "valar", ["fast-model"]))
+        with mock.patch("console.fetch_models", side_effect=OSError("down")):  # by host, even unreachable
+            s, j = self.js("POST", "/ui/api/downstreams/probe", {"url": "https://api.valarhq.ai/v1", "key": "x"})
+        self.assertEqual((s, j["ok"], j["kind"], j["models"]), (200, False, "valar", []))
+
+    def test_probe_uses_stored_key(self):
+        self.assertEqual(self.add(key="sk-STORED")[0], 201)
+        self.js("POST", "/ui/api/downstreams/probe", {"url": self.l.url, "id": "lemmi"})
+        self.assertEqual(self.l.seen[-1][2]["Authorization"], "Bearer sk-STORED")
+        self.assertEqual(self.js("PUT", "/ui/api/downstreams/lemmi/key", {"key": "sk-NEW"}), (200, {"key_set": True}))
+        self.assertEqual(self.app.keys.get("lemmi"), "sk-NEW")
+        self.assertEqual(self.js("PUT", "/ui/api/downstreams/lemmi/key", {"key": ""})[0], 400)
+        self.assertEqual(self.js("PUT", "/ui/api/downstreams/nope/key", {"key": "k"})[0], 404)
+        self.assertEqual(self.req("PUT", "/ui/api/downstreams/lemmi/key", {"key": "k"}, origin=None)[0].status, 403)
+        self.assertEqual(self.req("DELETE", "/ui/api/downstreams/lemmi", origin=None)[0].status, 403)
+        self.assertEqual(self.req("POST", "/ui/api/downstreams/probe", {"url": self.l.url}, origin="http://evil.com")[0].status, 403)
+
+    def test_no_key_in_any_response(self):
+        self.assertEqual(self.add(key="sk-SECRET")[0], 201)
+        out = [self.req("GET", "/ui/api/state")[1]]
+        out.append(self.req("PUT", "/ui/api/config", self.cfg())[1])
+        out.append(self.req("GET", "/ui/api/models?track=lemmi")[1])
+        out.append(self.req("POST", "/ui/api/downstreams/probe", {"url": self.l.url, "id": "lemmi"})[1])
+        out.append(self.req("PUT", "/ui/api/lever", {"session": "s1", "lever": "lemmi"})[1])
+        out.append(self.req("GET", "/ui/api/lever?session=s1")[1])
+        r, d = self.req("POST", "/ui/api/downstreams", {"id": "Bad", "name": "x", "url": self.l.url, "models": {}, "key": "sk-SECRET"})
+        self.assertEqual(r.status, 400)
+        out.append(d)
+        r, d = self.req("DELETE", "/ui/api/downstreams/lemmi")
+        self.assertEqual(r.status, 409)
+        out.append(d)
+        self.set_lemmi_url("http://127.0.0.1:1")
+        out.append(self.req("GET", "/ui/api/models?track=lemmi")[1])
+        out.append(self.req("POST", "/ui/api/downstreams/probe", {"url": "http://127.0.0.1:1", "id": "lemmi"})[1])
+        for d in out:
+            self.assertNotIn(b"sk-SECRET", d)
+        with open(os.path.join(self.dir, "console.json")) as f:
+            self.assertNotIn("sk-SECRET", f.read())
+        self.assertNotIn("sk-SECRET", self.err.getvalue())
+
+    def set_lemmi_url(self, url):
+        cfg = self.cfg()
+        next(d for d in cfg["downstreams"] if d["id"] == "lemmi")["url"] = url
+        self.assertEqual(self.js("PUT", "/ui/api/config", cfg)[0], 200)
+
+    def test_delete_blocked_by_session_lever(self):
+        self.add()
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "lemmi"})
+        s, j = self.js("DELETE", "/ui/api/downstreams/lemmi")
+        self.assertEqual((s, j["references"]), (409, ["session s1's lever"]))
+        self.assertIn("lemmi", self.js("GET", "/ui/api/state")[1]["downstreams"])
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
+        self.assertEqual(self.js("DELETE", "/ui/api/downstreams/lemmi")[0], 200)
+
+    def test_probe_bad_endpoints(self):
+        def slow(h):
+            time.sleep(10)
+        def moved(h):
+            h.send_response(302)
+            h.send_header("Location", self.l.url + "/v1/models")
+            h.end_headers()
+        def html(h):
+            h.send_response(200)
+            h.send_header("Content-Type", "text/html")
+            h.end_headers()
+            h.wfile.write(b"<html>hi</html>")
+        for f, frag in ((slow, "timed out"), (moved, "302"), (html, "not a model list")):
+            srv, url = serve(f)
+            self.addCleanup(srv.server_close)
+            self.addCleanup(srv.shutdown)
+            t = time.time()
+            s, j = self.js("POST", "/ui/api/downstreams/probe", {"url": url, "key": "k"}) if f is not slow else \
+                self.js_slow("POST", "/ui/api/downstreams/probe", {"url": url, "key": "k"})
+            self.assertLess(time.time() - t, 6)
+            self.assertEqual((s, j["ok"], j["models"], j["kind"]), (200, False, [], "generic"), f.__name__)
+            self.assertIn(frag, j["reason"], f.__name__)
+        self.assertEqual(self.l.seen, [])  # the redirect was not followed
+        self.assertEqual(self.js("POST", "/ui/api/downstreams/probe", {"url": "file:///etc/passwd"})[1]["ok"], False)
+        self.assertEqual(self.js("POST", "/ui/api/downstreams/probe", {"url": 5})[0], 400)
+
+    def js_slow(self, method, path, body):
+        c = HTTPConnection("127.0.0.1", self.port, timeout=8)
+        c.request(method, path, json.dumps(body), {"Origin": "http://127.0.0.1:%d" % self.port})
+        r = c.getresponse()
+        return r.status, json.loads(r.read())
+
+    def test_lever_modes(self):
+        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["modes"], ["rules", "anthropic", "valar"])
+        self.add()
+        s, j = self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "lemmi"})
+        self.assertEqual((s, j["lever"], j["modes"]), (200, "lemmi", ["rules", "anthropic", "valar", "lemmi"]))
+        s, j = self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "local"})
+        self.assertEqual(s, 400)
+        self.assertIn("lemmi", j["error"])
+
+    def test_post_sets_server_side_fields(self):
+        self.l.models = PRICED
+        s, j = self.add("fast", prices={"in": 1, "out": 1, "cache_read": 0, "cache_write": 0})
+        self.assertEqual(s, 201, j)
+        self.assertEqual((j["kind"], j["windows"], j["color"], j["url"], j["prices"]),
+                         ("valar", dict.fromkeys(MODEL_TIERS, "asap"), "#1F8A5B", self.l.url, None))
+        self.l.models = ONE
+        s, j = self.add(prices={"in": 1, "out": 2, "cache_read": 0.1, "cache_write": 0})
+        self.assertEqual((s, j["kind"], j["color"], j["windows"], j["prices"]["out"]), (201, "generic", "#6B5BD6", None, 2.0))
+        self.assertEqual(self.js("DELETE", "/ui/api/downstreams/fast")[0], 200)
+        self.assertEqual(self.add("third", key=None)[1]["color"], "#1F8A5B")  # first free colour
+        self.assertFalse(self.js("GET", "/ui/api/state")[1]["downstreams"]["third"]["key_set"])
+        for bad, frag in (("Bad", "lowercase"), ("rules", "reserved"), ("lemmi", "already")):
+            s, j = self.add(bad)
+            self.assertEqual(s, 400, bad)
+            self.assertIn(frag, j["error"], bad)
+        self.assertEqual(self.add("nomodels", models={"opus": "x"})[0], 400)
+        self.assertEqual(self.add("noname", name="")[0], 400)
+        for i in range(3):
+            self.assertEqual(self.add("d%d" % i)[0], 201)
+        s, j = self.add("seventh")
+        self.assertEqual((s, j["error"]), (409, "at most 6 downstreams"))
+
+    def test_put_config_downstream_changes(self):
+        self.add()
+        cfg = self.cfg()
+        lem = lambda c: next(d for d in c["downstreams"] if d["id"] == "lemmi")
+        for k, v in (("kind", "valar"), ("color", "#000000"), ("id", "lemmy")):
+            c = self.cfg()
+            lem(c)[k] = v
+            if k == "kind":
+                lem(c)["windows"] = dict.fromkeys(MODEL_TIERS, "asap")
+            if k == "id":
+                c["doubling"]["shadow"]["lemmy"] = c["doubling"]["shadow"].pop("lemmi")
+            s, j = self.js("PUT", "/ui/api/config", c)
+            self.assertEqual(s, 400, k)
+            self.assertIn(k if k != "id" else "add", j["error"], k)
+        c = self.cfg()
+        lem(c)["name"] = "Lemmi 2"
+        self.assertEqual(self.js("PUT", "/ui/api/config", c)[0], 200)  # other edits go through
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "lemmi"})
+        c = self.cfg()
+        c["downstreams"] = [d for d in c["downstreams"] if d["id"] != "lemmi"]
+        del c["doubling"]["shadow"]["lemmi"]
+        s, j = self.js("PUT", "/ui/api/config", c)
+        self.assertEqual((s, j["references"]), (409, ["session s1's lever"]))
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
+        self.assertEqual(self.js("PUT", "/ui/api/config", c)[0], 200)
+        self.assertNotIn("lemmi", self.keys_file())
+
+    def test_price_change_reprices(self):
+        self.add()
+        now = time.time()
+        self.app.store.record_request({"id": 901, "ts": now, "track": "lemmi", "status": 200, "model_out": "deepseek-v4.1-flash",
+                                       "in_tok": 1_000_000, "out_tok": 0, "cache_read_tok": 0, "cache_write_tok": 0})
+        self.app.store.close()
+        self.app.store.__init__(self.app.store.path)
+        self.assertIsNone(self.app.store.request(901)["cost"])
+        c = self.cfg()
+        next(d for d in c["downstreams"] if d["id"] == "lemmi")["prices"] = {"in": 3, "out": 1, "cache_read": 0, "cache_write": 0}
+        self.assertEqual(self.js("PUT", "/ui/api/config", c)[0], 200)
+        self.assertAlmostEqual(self.app.store.request(901)["cost"], 3.0)
+
+    def test_verdict_any_downstream(self):
+        self.add()
+        self.app.store.record_turn({"id": "t3", "ts": time.time(), "preview": "p", "verdict": None})
+        self.app.store.close()
+        self.app.store.__init__(self.app.store.path)
+        self.assertEqual(self.js("PUT", "/ui/api/turns/t3/verdict", {"verdict": "lemmi"})[0], 200)
+        self.assertEqual(self.js("PUT", "/ui/api/turns/t3/verdict", {"verdict": "local"})[0], 400)
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["stats"]["tally"]["lemmi"], 1)
+
+
+class MigrationBannerTest(unittest.TestCase):
+    def test_banner_names_switched_off_rules_and_migration_saved_once(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        with open(os.path.join(os.path.dirname(__file__), "fixtures", "console_v2.json")) as f:
+            o = json.load(f)
+        o["rules"].insert(1, {"name": "Mine", "kind": "dsl", "enabled": True, "text": "when tag is x go local", "builtin": None})
+        with open(os.path.join(d, "console.json"), "w") as f:
+            json.dump(o, f)
+        with contextlib.redirect_stderr(io.StringIO()):
+            app = App(Config("127.0.0.1", 0, "http://a"), d)
+            app.store.close()
+            self.assertIn("Mine", app.banner)
+            with open(os.path.join(d, "console.json")) as f:
+                self.assertEqual(json.load(f)["version"], 3)
+            again = App(Config("127.0.0.1", 0, "http://a"), d)
+            again.store.close()
+        self.assertIsNone(again.banner)
+        self.assertFalse(next(r for r in again.routing.rules if r.name == "Mine").enabled)
 
 
 class ListModelsRedirectTest(unittest.TestCase):

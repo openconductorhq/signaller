@@ -84,7 +84,7 @@ class PricesTest(unittest.TestCase):
 
     def test_listed_prices_are_per_downstream(self):
         self.p.set_listed("v2", {"x": {"asap": [3, 0, 0]}})
-        self.assertAlmostEqual(self.p.cost(VALAR._replace_id("v2") if False else Downstream("v2", "V2", "u", "valar", MODELS, "#0", dict.fromkeys(MODELS, "asap")), "x", "asap", {"in": M}), 3.0)
+        self.assertAlmostEqual(self.p.cost(Downstream("v2", "V2", "u", "valar", MODELS, "#0", dict.fromkeys(MODELS, "asap")), "x", "asap", {"in": M}), 3.0)
         self.assertIsNone(self.p.cost(VALAR, "x", "asap", {"in": M}))
 
     def test_old_valar_prices_key_loads(self):
