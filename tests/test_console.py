@@ -209,10 +209,10 @@ class ConsoleTest(Fixture):
             for n in files:
                 if n != "OFL.txt":
                     with open(os.path.join(root, n), "rb") as f:
-                        data = f.read()
+                        data = f.read().replace(b'xmlns="http://www.w3.org/2000/svg"', b"")  # a namespace name, never fetched
                     self.assertNotIn(b"http://", data, n)
                     self.assertNotIn(b"https://", data, n)
-        for path, ctype in (("/ui/app.js", "text/javascript"), ("/ui/app.css", "text/css"),
+        for path, ctype in (("/ui/app.js", "text/javascript"), ("/ui/app.css", "text/css"), ("/ui/favicon.svg", "image/svg+xml"),
                             ("/ui/fonts/barlow-condensed-latin-600-normal.woff2", "font/woff2")):
             r, _ = self.req("GET", path, origin=None)
             self.assertEqual(r.status, 200, path)

@@ -20,7 +20,7 @@ LOOPBACK_HOST_RE = re.compile(r"(127\.0\.0\.1|localhost|\[::1\])(:\d+)?", re.I)
 MAX_BODY = 1 << 20
 BAD = (ValueError, TypeError, OverflowError, RecursionError)
 TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
-         ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8"}
+         ".js": "text/javascript; charset=utf-8", ".woff2": "font/woff2", ".svg": "image/svg+xml", ".txt": "text/plain; charset=utf-8"}
 SEC = {"Content-Security-Policy": "default-src 'self'", "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff"}
 NOT_RE = ClassResult(None, None, "not re-classified")
 PALETTE = ("#1F8A5B", "#6B5BD6", "#C8412F", "#8A6D1F", "#1F7A8A", "#A0418A")  # new downstreams, in order, skipping used ones

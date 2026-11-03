@@ -50,10 +50,11 @@ const usd = (v) => "$" + (!v ? "0" : v < 0.1 ? v.toFixed(3) : v.toFixed(2));
 const tok = (n) => !n ? "0" : n >= 1e5 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 // What a request cost, for a departure or a side-by-side card; null when there's nothing to say.
-function priced(track, cost, api) {
+function priced(track, cost, api, named) {  // named: say which downstream (where nothing else on screen does)
   if (track === "anthropic") return api != null ? usd(api) + " at API prices" : null;
-  if (cost == null) return "unpriced";
-  return usd(cost) + (api != null ? ` (would be ${usd(api)} on Anthropic)` : "");
+  const on = named ? " on " + NAME(track) : "";
+  if (cost == null) return "unpriced" + on;
+  return usd(cost) + on + (api != null ? ` (would be ${usd(api)} on Anthropic)` : "");
 }
 
 function showErr(node, msg) { node.textContent = msg; node.hidden = !msg; }
@@ -848,10 +849,11 @@ function explain(d) {
   const ex = Array.isArray(d.explanation) ? d.explanation : [];
   const out = [el("ol", {}, ex.map((it) => el("li", {}, it.rule, " — ",
     it.outcome === "not reached" ? el("s", {}, it.outcome) : it.decided ? el("b", {}, it.outcome) : it.outcome)))];
-  out.push(el("div", { class: "facts" }, `${d.model_in} → ${d.model_out} · status ${d.status || "none"} · first byte ${fmtMs(d.ttfb_ms)} · total ${fmtMs(d.ms)}`));
-  const money = priced(d.track, d.cost, d.api_cost);
-  out.push(el("div", { class: "facts" }, ["session " + fullLabel(d.session_id), d.model_out,
-    d.in_tok != null && `${tok(d.in_tok)} in / ${tok(d.out_tok)} out`].filter(Boolean).join(" · "), money && [" · ", el("b", {}, money)]));
+  const money = priced(d.track, d.cost, d.api_cost, true);
+  out.push(el("div", { class: "facts" }, `${d.model_in} → ${d.model_out} · status ${d.status || "none"} · first byte ${fmtMs(d.ttfb_ms)} · total ${fmtMs(d.ms)}`,
+    money && [" · ", el("b", {}, money)]));
+  out.push(el("div", { class: "facts" }, ["session " + fullLabel(d.session_id),
+    d.in_tok != null && `${tok(d.in_tok)} in / ${tok(d.out_tok)} out`].filter(Boolean).join(" · ")));
   if (d.prompt) out.push(el("pre", { class: "prompt" }, d.prompt));
   if (d.turn_id) {
     let s = null;
