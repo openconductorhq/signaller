@@ -58,6 +58,8 @@ def test_departures_and_stats(tmp_path):
     assert [r["id"] for r in s.departures()] == [5, 4, 3, 2, 1]
     assert [r["id"] for r in s.departures(since_id=3)] == [5, 4]
     assert [r["id"] for r in s.departures(before_id=3)] == [2, 1]
+    assert [r["id"] for r in s.departures(t0=now - 3600)] == [4, 3, 2, 1]  # the span: id 5 is two hours old
+    assert [r["id"] for r in s.departures(before_id=3, t0=now - 15, t1=now)] == [1]
     assert s.request(4)["track"] == "local" and s.request(99) is None
     assert s.request(4)["prompt"] == "full 4" and s.request(5)["prompt"] is None
     assert Store(str(tmp_path / "s.db")).next_id() == 6

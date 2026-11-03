@@ -301,9 +301,13 @@ class Store:
         parts = (["%s IN (%s)" % (col, ",".join("?" * len(ids)))] if ids else []) + (["%s IS NULL" % col] if "unknown" in sessions else [])
         return "(%s)" % " OR ".join(parts) if parts else "0", ids
 
-    def departures(self, since_id=None, before_id=None, limit=200, sessions=None):
+    def departures(self, since_id=None, before_id=None, limit=200, sessions=None, t0=None, t1=None):
         sc, sa = self._sess(sessions)
         w, a = [sc], sa
+        if t0 is not None:
+            w.append("ts >= ?"); a.append(t0)
+        if t1 is not None:
+            w.append("ts <= ?"); a.append(t1)
         if since_id is not None:
             w.append("id > ?"); a.append(since_id)
         if before_id is not None:

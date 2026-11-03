@@ -142,15 +142,13 @@ async function forgetSession(x) {
   }
 }
 function setPick(ids) { view.pick = ids; saveView(); renderSess(); if (cfg) renderLever(); viewChanged(true); }
-// A new pick restarts departures and side by side; a new span only changes the yard and the cost cards.
+// A new pick or span restarts departures (and side by side).
 function viewChanged(pickToo) {
   viewGen++;
   if (pickToo) {
     $("deps").replaceChildren();
     lastId = 0; minId = null; firstLoad = true; $("older").hidden = true;
     turns = []; curTurn = null; turnData = null; turnKey = ""; ticks = 0;
-    const n = view.pick.length;
-    $("depFrom").textContent = n ? `Every request from the ${n === 1 ? "picked session" : n + " picked sessions"}` : "Every request";
   }
   busy = false;  // the reply in flight is for the old view; it's dropped by viewGen
   tick();
@@ -164,10 +162,10 @@ for (const b of $("span").children) b.addEventListener("click", () => {
   if (b.dataset.v === view.span) return;
   view.span = b.dataset.v;
   if (view.span === "custom" && !view.from) { const now = Date.now() / 1000; view.from = toLocal(now - 3600); view.to = toLocal(now); }
-  saveView(); renderSpan(); viewChanged(false); loadSessions().catch(() => {});
+  saveView(); renderSpan(); viewChanged(true); loadSessions().catch(() => {});
 });
 for (const id of ["cFrom", "cTo"]) $(id).addEventListener("change", () => {
-  view[id === "cFrom" ? "from" : "to"] = $(id).value; saveView(); viewChanged(false); loadSessions().catch(() => {});
+  view[id === "cFrom" ? "from" : "to"] = $(id).value; saveView(); viewChanged(true); loadSessions().catch(() => {});
 });
 
 /* ---------- state + polling ---------- */
@@ -179,7 +177,7 @@ async function tick() {
   const gen = viewGen;
   try {
     const [st, deps] = await Promise.all([api("GET", "state" + qs(sessQ(), spanQ())),
-      api("GET", "departures" + qs(sessQ(), lastId && "since=" + Math.max(0, lastId - OVERLAP)))]);
+      api("GET", "departures" + qs(sessQ(), spanQ(), lastId && "since=" + Math.max(0, lastId - OVERLAP)))]);
     if (gen !== viewGen) return;
     $("offline").hidden = true;
     applyState(st);
@@ -197,6 +195,8 @@ async function tick() {
 
 function applyState(st) {
   S = st;
+  const n = view.pick.length;  // departures list the span's requests, paged back with "Load older"
+  $("depFrom").textContent = `${plural(st.summary.total, "request")}${n ? ` from the ${n === 1 ? "picked session" : n + " picked sessions"}` : ""} · ${spanText()}`;
   const s = st.stats;
   $("banner").hidden = !st.banner;
   $("banner").textContent = st.banner || "";
@@ -898,7 +898,7 @@ function addDeps(rows) {
 $("older").addEventListener("click", async () => {
   const g = viewGen;
   try {
-    const rows = await api("GET", "departures" + qs(sessQ(), "before=" + minId));
+    const rows = await api("GET", "departures" + qs(sessQ(), spanQ(), "before=" + minId));
     if (g !== viewGen) return;  // the pick changed: these rows belong to the old list
     $("deps").append(...rows.map((r) => { const n = depRow(r); n.classList.add("older"); return n; }));
     if (rows.length) minId = rows[rows.length - 1].id;

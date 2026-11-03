@@ -285,7 +285,8 @@ def api(h, app, method, path, query, body):
         return out
     if path == "/ui/api/departures" and method == "GET":
         q = {k: int(v[0]) for k, v in query.items() if k in ("since", "before")}
-        return st.departures(q.get("since"), q.get("before"), 200, filt(query)[0])
+        ids, t0, t1 = filt(query)  # the picked span ("whole session": no lower bound) and sessions
+        return st.departures(q.get("since"), q.get("before"), 200, ids, t0, t1)
     if path == "/ui/api/sessions" and method == "GET":
         ids, t0, t1 = filt(query)
         return st.list_sessions(t0 if t0 is not None else st.first_ts(None), t1)
