@@ -165,7 +165,8 @@ class App:
         self.seed()
         self.classifier = Classifier(self._classifier_upstream)
         try:
-            self.store = Store(os.path.join(config_dir, "stats.db"))
+            # CLAUDE_ROUTER_STATS_DIR: SQLite needs a real local disk, not a folder shared from the host (see compose.yaml)
+            self.store = Store(os.path.join(os.path.expanduser(os.environ.get("CLAUDE_ROUTER_STATS_DIR") or config_dir), "stats.db"))
         except (OSError, sqlite3.Error) as e:  # broken stats must never cost Claude Code its router
             print("stats off: %s" % e, file=sys.stderr, flush=True)
             self.store = NullStore()

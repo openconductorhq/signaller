@@ -1,4 +1,4 @@
-# docker compose up -d --build   (config and stats stay in ~/.config/claude-router)
+# docker compose up -d --build   (config stays in ~/.config/claude-router; stats in the "stats" volume)
 services:
   router:
     build: .
@@ -11,4 +11,8 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ${HOME}/.config/claude-router:/config
+      # stats.db on the VM's own disk: SQLite over a host-shared folder (virtiofs) corrupted it twice
+      - stats:/data
       - ${HOME}/.claude/projects:/claude/projects:ro  # session labels (cwd, branch) only
+volumes:
+  stats:

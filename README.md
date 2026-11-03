@@ -1,50 +1,17 @@
 # claude-router
 
-A loopback HTTP proxy that sits at Claude Code's `ANTHROPIC_BASE_URL`. It sends
-each request to Anthropic (untouched, using your own login) or to a downstream
-you added in the console (credentials swapped, model renamed). Valar is the
-first one. Python 3 standard library only, in a single file.
+A loopback HTTP proxy that sits at Claude Code's `ANTHROPIC_BASE_URL`. Each
+request goes either to Anthropic (untouched, on your own login) or to a
+**downstream**: any Anthropic-compatible service you add in the console. On a
+downstream the router swaps in that service's key and renames the model. A
+console at `/ui` shows live traffic and cost, and it is where you edit the rules
+and manage downstreams. Python 3 standard library only.
 
 ```
-claude ──ANTHROPIC_BASE_URL──▶ claude-router (127.0.0.1:8787) ──┬─▶ https://api.anthropic.com  (your auth, untouched)
-                                                                ├─▶ https://api.valarhq.ai      (Valar key, model renamed)
-                                                                └─▶ any downstream you add      (its key, model renamed)
+claude ──ANTHROPIC_BASE_URL──▶ claude-router (127.0.0.1:8787) ──┬─▶ api.anthropic.com   (your auth, untouched)
+                                                                ├─▶ Valar               (its key, model renamed)
+                                                                └─▶ any downstream      (its key, model renamed)
 ```
-
-## Routing
-
-Applies to `POST /v1/messages` and `/v1/messages/count_tokens`. Everything
-else, including any body that can't be parsed, goes to Anthropic unchanged.
-The console's rulebook decides; a fresh config ships this default (first
-match wins):
-
-| Signal | Track |
-|--------|-------|
-| tag `#planning` | Anthropic |
-| tag `#execution` | Valar |
-| tier opus or fable | Anthropic |
-| tier sonnet, haiku or other | Valar |
-| classifier label planning, design & review | Anthropic |
-| classifier label coding, chit-chat | Valar |
-| otherwise | Anthropic |
-
-Tags are matched as whole words, case-insensitive. Text inside
-`<system-reminder>` and messages that contain only tool results are skipped. A
-tag lasts for the whole turn and lapses at the next human message. Inside a
-subagent, the "human message" is the prompt the parent wrote, so you can put a
-tag there to force where a subagent runs.
-
-On a downstream's route the model is renamed from its own model map. For
-Valar, `sonnet` becomes `zai-org/GLM-5.3` and `haiku` becomes
-`deepseek-ai/DeepSeek-V4.1-Flash-1017`. The maps are edited on the console page
-(Tracks panel), not by env vars. Your
-`Authorization`/`x-api-key` and the `oauth-2025-04-20` beta are removed, and the
-downstream's key is added. A downstream with no key, or that is down, answers
-502 and never falls back to another track.
-
-Each request is logged as one line on stderr:
-`time route= reason= model=in[→out] status= ms= stream=`. Bodies, prompts and
-keys are never logged.
 
 ## Install
 
@@ -53,184 +20,147 @@ keys are never logged.
 ```
 mkdir -p ~/.config/claude-router
 cp env.example ~/.config/claude-router/env
-chmod 600 ~/.config/claude-router/env      # then set VALAR_API_KEY if you use Valar (read once, see Downstreams)
+chmod 600 ~/.config/claude-router/env      # set VALAR_API_KEY here if you use Valar (read once, see Downstreams)
 docker compose up -d --build
 ```
 
-`compose.yaml` publishes the router on `127.0.0.1:8787` only, keeps config and
-stats in `~/.config/claude-router`, reads `~/.claude/projects` read-only for
-session labels. Inside the
-container the router listens on `0.0.0.0`, which it allows only with
-`CLAUDE_ROUTER_IN_CONTAINER=1` (set by the image). Logs: `docker compose logs -f`.
-The image runs as uid 1000; on Linux, if your uid differs, add
-`user: "<uid>:<gid>"` to the service.
+- **Network:** `compose.yaml` publishes the router on `127.0.0.1:8787` only.
+  Inside the container it listens on `0.0.0.0`, which the router allows only
+  with `CLAUDE_ROUTER_IN_CONTAINER=1` (set by the image).
+- **Files:** config lives in `~/.config/claude-router`. Stats live in the
+  `stats` Docker volume, not in that folder (see [Data](#data)).
+- **Session labels:** `~/.claude/projects` is mounted read-only to label
+  sessions.
+- **User:** the image runs as uid 1000. On Linux, if your uid differs, add
+  `user: "<uid>:<gid>"` to the service.
+
+To rebuild after pulling changes, run `docker compose up -d --build`. Logs:
+`docker compose logs -f`.
 
 ### As a systemd user service
 
 ```
 mkdir -p ~/.config/claude-router
 cp env.example ~/.config/claude-router/env
-chmod 600 ~/.config/claude-router/env      # then set VALAR_API_KEY if you use Valar (read once, see Downstreams)
+chmod 600 ~/.config/claude-router/env
 mkdir -p ~/.config/systemd/user
 ln -s $PWD/claude-router.service ~/.config/systemd/user/
 systemctl --user enable --now claude-router
 ```
 
-The unit runs Python with `-E -s` (ignores `PYTHON*` env vars and the user site
-directory), so only the standard library is ever loaded.
+The unit runs Python with `-E -s`, which ignores `PYTHON*` env vars and the user
+site directory, so only the standard library is ever loaded. Logs:
+`journalctl --user -u claude-router -f`.
 
-The router won't start if `CLAUDE_ROUTER_LISTEN` isn't a loopback address; it
-exits with code 2. `VALAR_URL` defaults to `https://api.valarhq.ai` (a trailing
-`/` or `/v1` is stripped). `VALAR_URL` and `VALAR_API_KEY` are optional and only
-seed the Valar downstream once (see [Downstreams](#downstreams)). `LITELLM_*`,
-`CLAUDE_ROUTER_LOCAL_SONNET` and `CLAUDE_ROUTER_LOCAL_HAIKU` are no longer
-used: add LiteLLM as a downstream in the console, and model names live there.
+### Turn it on in Claude Code
 
-To turn it on in Claude Code, add this to `~/.claude/settings.json`:
+Add this to `~/.claude/settings.json`:
 
 ```json
 "env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"}
 ```
 
-- **Bypass:** `ANTHROPIC_BASE_URL= claude`
-- **Router down:** every Claude Code session fails to connect. Use the bypass
-  above, or restart the router.
-- **Logs:** `journalctl --user -u claude-router -f`
+- **Bypass for one session:** `ANTHROPIC_BASE_URL= claude`
+- **Router down:** every Claude Code session fails to connect. Use the bypass,
+  or restart the router.
 
-### `/router` in Claude Code
+### Environment
 
-The `router-lever` plugin in `plugin/` adds `/router` (show the mode),
-`/router rules|anthropic|<downstream id>` (switch it for this session only; its
-subagents follow), `/router reset` (back to the global lever) and
-`/router name <text>` (what the console calls this session; `/router name` alone
-clears it; kept in `stats.db`), answered
-without a model turn, and puts `router: <mode> (this session|global)` in the
-status line (checked every 15 s). Other sessions keep the console's lever. A
-session's own lever lives in the router's memory, so a router restart drops it.
-Claude can switch it too, through the plugin's `router_lever` tool, but only
-when you typed `/router <mode>` in a message ("do /router anthropic", or a plan
-with "/router rules" at a later step). Each one you type allows one switch to
-that mode; anything else is refused. It talks to the console
-API (`/ui/api/lever`) on `127.0.0.1:8787`. Install:
+These are read from `~/.config/claude-router/env`; `env.example` lists them.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `CLAUDE_ROUTER_LISTEN` | `127.0.0.1:8787` | Must be a loopback address, or the router exits with code 2 (outside a container). |
+| `CLAUDE_ROUTER_ANTHROPIC_URL` | `https://api.anthropic.com` | Where the Anthropic track goes. |
+| `CLAUDE_ROUTER_CONFIG_DIR` | `~/.config/claude-router` | Config files (see [Data](#data)). |
+| `CLAUDE_ROUTER_STATS_DIR` | the config dir | Where `stats.db` lives. The image sets it to `/data` (the `stats` volume). |
+| `VALAR_URL`, `VALAR_API_KEY` | `https://api.valarhq.ai` | Used once, to seed the Valar downstream. |
+
+`LITELLM_*`, `CLAUDE_ROUTER_LOCAL_SONNET` and `CLAUDE_ROUTER_LOCAL_HAIKU` are no
+longer used. To keep using LiteLLM, add it as a downstream.
+
+## `/router` in Claude Code
+
+The `router-lever` plugin (in `plugin/`) adds `/router`. It answers without a
+model turn, and the status line shows `router: <mode> (this session|global)`,
+checked every 15 s.
+
+| Command | What it does |
+|---------|--------------|
+| `/router` | Show the mode. |
+| `/router rules\|anthropic\|<downstream id>` | Switch this session only; its subagents follow. Other sessions keep the console's lever. |
+| `/router reset` | Go back to the global lever. |
+| `/router name <text>` | Name this session in the console. `/router name` alone clears the name. |
+
+A session's own lever lives in the router's memory, so a router restart drops
+it.
+
+Claude can switch the lever too, through the plugin's `router_lever` tool, but
+only when you typed `/router <mode>` in a message. That can be "do /router
+anthropic", or a plan with "/router rules" at a later step. Each one you type
+allows one switch to that mode; any other switch is refused.
+
+The plugin talks to `127.0.0.1:8787` only. Install:
 
 ```
 /plugin install router-lever --marketplace wilfoa/claude-router
 ```
 
-## Downstreams
+## Routing
 
-A downstream is any Anthropic-compatible service the router can send traffic
-to. Add one in the console (Tracks panel, "+ Add downstream"). At most 6, and
-any can be deleted, including the last one.
+Routing applies to `POST /v1/messages` and `/v1/messages/count_tokens`.
+Everything else, including a body that can't be parsed, goes to Anthropic
+unchanged.
 
-The wizard:
+**The lever** decides first:
+- **Anthropic** or **a downstream:** everything goes to that track (reason
+  `lever`).
+- **Rules:** the Rulebook decides.
 
-1. **Connect:** a name, an id (suggested from the name; it can't change later),
-   the URL and the key. "Test connection" lists the service's models. A failed
-   test doesn't stop you saving.
-2. **Models:** the model for each tier (fable, opus, sonnet, haiku), or one model
-   for all four.
-3. **Cost:** optional prices per million tokens (not for Valar kind). Left empty, it shows as unpriced.
+**The Rulebook:** rules are checked in order and the first one that decides
+wins. If none decides, the request goes to "Otherwise" (Anthropic by default).
+A fresh config ships these rules:
 
-**Valar kind:** a service whose model list carries its own prices (or whose host
-is `api.valarhq.ai`) is added as Valar kind. It keeps Valar's extras: prices from
-its list, the Now/Priority/Standard window pickers, and the Valar request
-fixes. Other downstreams are generic.
+| Rule | Sends |
+|------|-------|
+| Tools only Anthropic can run | requests carrying a server-side tool (web search, web fetch, code execution) → Anthropic |
+| Tags in your message | `#planning` → Anthropic, `#execution` → Valar |
+| What the prompt is about | the classifier: planning and design & review → Anthropic; coding and chit-chat → Valar |
+| Model the request asked for | opus or fable → Anthropic; sonnet, haiku or other → Valar |
 
-**Keys** are in `downstreams.keys.json` (mode 0600), never in `console.json` or
-the page. Replace a key from the downstream's row; an empty field keeps it.
+**Tags** match whole words, case-insensitive:
+- **Skipped text:** text inside `<system-reminder>` and messages that hold only
+  tool results.
+- **How long one lasts:** the whole turn. It lapses at the next human message.
+- **Subagents:** inside a subagent, the "human message" is the prompt the parent
+  wrote. A tag there forces where that subagent runs.
 
-**Delete** is blocked while anything still uses the downstream: the lever, a
-session's lever, a rule, "Otherwise", a classifier label, the classifier
-upstream, or a shadow direction. The message lists what; change those first.
-Deleting also removes its key and saved model list.
+**On a downstream** the router changes four things:
+- **Model:** renamed from the downstream's model map.
+- **Your credentials:** your `Authorization`/`x-api-key` and the
+  `oauth-2025-04-20` beta are removed.
+- **Its credentials:** the downstream's key is added.
+- **Failures:** a downstream with no key, or one that is down, answers 502. It
+  never falls back to another track.
 
-**Env seed:** on the first start of this version, `VALAR_URL` and `VALAR_API_KEY`
-fill in the Valar downstream. After that the env is ignored, so a deleted Valar
-stays deleted. Old Local/LiteLLM settings are dropped; rules that sent traffic
-there are switched off, and the console banner names them.
-
-In history (Departures, cost, side by side), a deleted downstream's past
-requests show as "<id>, removed". Adding one back under the same id picks that
-history up again.
-
-## Console
-
-Open `http://127.0.0.1:8787/ui` (loopback only). It shows live traffic, edits
-the routing rules, manages downstreams, and compares track answers side by side.
-
-- **Lever:** Anthropic, Rules, or one of your downstreams. Anthropic and each
-  downstream send everything to that track (reason `lever`). Rules uses the Rulebook. With one
-  session picked, the lever shows and sets that session's own lever (the same one
-  `/router` sets, updated live), with "back to global" to drop it.
-- **Tracks panel:** one row per downstream: state (key set or not), the model
-  map, prices, rename, replace key and Delete; "+ Add downstream" opens the wizard
-  (see [Downstreams](#downstreams)). The classifier's upstream and model are here
-  too. Edits apply to the next request and are saved to `console.json`.
-- **Rulebook:** rules are checked in order, first one that decides wins. Nothing
-  decided goes to the "Otherwise" track (default Anthropic). Changes apply to
-  the next request and are saved to `console.json`.
-- **Classifier:** a rule that asks a small model (Valar by default, or any downstream) what the newest human
-  message is about (labels, each with a track), once per turn and cached. It calls an OpenAI-style `/v1/chat/completions` on its
-  upstream, so pick a downstream that serves that (Valar does; an Anthropic-only one like lemmi won't). **Privacy:** by default the
-  classifier sends the newest human message's text to Valar
-  (`deepseek-ai/DeepSeek-V4.1-Flash`, 2.5 s timeout, reasoning off). Switch its
-  upstream to another downstream to keep that text elsewhere, or to "none" to
-  switch the classifier off (its rule then decides nothing). It never runs on opus. If it times out or isn't confident, the rule passes and
-  the explanation says why. Reason shows as `about:<label>`.
-- **Doubling:** sends a copy of a request to the other track and stores both
-  answers. Claude Code only ever sees the answer from the track the rules chose.
-  Settings are rate (default 0%, so nothing is doubled until you raise it), an
-  optional tag (e.g. `both`: only turns with `#both`), and directions (which
-  track shadows each track; default Anthropic and Valar shadow each other, and
-  a downstream you add shadows nothing until you set it). It picks whole turns: every
-  `POST /v1/messages` of a chosen turn is doubled. Copies cost Max quota (to
-  Anthropic) or credit on the downstream they go to. At most two copies per
-  destination run at once; a step that finds its direction full is marked "skipped, busy".
-  Judge pairs in Side by side; "Forget all pairs" deletes them.
-
-### Sessions and cost
-
-Chips at the top of the page filter by Claude Code session; the time control
-sets the span (last 15 min, last hour, whole session, or a range).
-
-- **Chips:** "All" means every session. Click chips to pick one or more; click
-  "All" to clear the pick. The picked sessions and the span are remembered in
-  the browser.
-- **Span:** the diagram, the cost cards and the rule counts follow both the
-  pick and the span. Departures and Side by side follow only the pick; they stay
-  live feeds and ignore the span.
-- **Labels:** a session is labeled `folder · branch`, read from Claude Code's
-  transcripts at `<claude dir>/projects/*/<session id>.jsonl` (`CLAUDE_CONFIG_DIR`
-  is respected). Only `cwd` and `gitBranch` are read. Subagents count toward
-  their parent session. Requests with no session id show as "unknown session".
-- **Cost:** Anthropic shows what the traffic would cost at API prices, even on
-  a flat plan. Valar is priced from its own `/v1/models` prices. Any other
-  downstream is priced from the prices you give it in the wizard or Tracks row;
-  with none, it counts as $0 and shows as unpriced. The savings card is an estimate (shown with "≈") because other models
-  count tokens differently. Side-by-side comparison requests count in cost but
-  not in savings.
-- **Valar completion window:** (Valar-kind downstreams only) each model slot (Fable, Opus, Sonnet,
-  Haiku) can run in Now, Priority or Standard. Priority costs 75% of Now and
-  Standard 50%, but they are slow: measured 2026-10-29 on Kimi-K3 with a tiny
-  streamed request, Now took about 2 s and Priority and Standard about 11-13 s.
-  So Now is the default. Flex isn't offered: it doesn't stream.
-- **Old history:** requests recorded before this release have no session or
-  cost.
+**Logging:** each request is one line on stderr:
+`time route= reason= model=in[→out] status= ms= stream=`. Bodies, prompts and
+keys are never logged.
 
 ### Rule language
 
-A rule is one or more lines: `when <condition> go anthropic|<downstream id>`. The first
-matching line decides; no match passes to the next rule.
+A rule is one or more lines of `when <condition> go anthropic|<downstream id>`.
+The first matching line decides; if no line matches, the next rule runs.
 
 | Field | Value |
 |-------|-------|
 | `text` | the latest human message (first 20 000 chars) |
 | `tag` | every `#word` in `text` (`tag is plan` means "has this tag") |
-| `tier` | `opus`, `sonnet`, `haiku` or `other`, from the model id |
+| `tier` | `opus`, `fable`, `sonnet`, `haiku` or `other`, from the model id |
 | `model` | the full model id |
 | `tokens` | rough size: request bytes / 4 (`100k` means 100 000) |
-| `subagent` | yes/no, from `cc_is_subagent=true` in the first system block (undocumented marker, may break) |
+| `subagent` | yes/no, from `cc_is_subagent=true` in the first system block (an undocumented marker, so it may break) |
+| `servertool` | yes/no: the request carries a tool that runs on Anthropic's side |
 | `label` | the classifier's label for this turn, or `none` |
 
 | Operator | Meaning |
@@ -243,151 +173,220 @@ matching line decides; no match passes to the next rule.
 
 ```
 when tag is plan go anthropic
-when tier is sonnet or tier is haiku go valar
+when not subagent and tier is opus go anthropic
+when subagent and (tier is sonnet or tier is haiku) go valar
 when text contains "migration" and tier is sonnet go anthropic
 when tokens > 120k go anthropic
-when not subagent and text matches /^(hi|thanks)\b/i go valar
 ```
 
-Using `label` makes the classifier run for that request (if it's switched on;
-otherwise `label` is `none`). The editor previews a rule against your last 200
-requests (kept in memory only, so after a restart it covers only newer ones).
+A rule that uses `label` makes the classifier run for that request. If the
+classifier is switched off, `label` is `none`.
 
-### Switching tracks mid-conversation
+The editor previews a rule against your last 200 requests. These are kept in
+memory only, so after a restart the preview covers only newer requests.
 
-Same limitation as [Main session on a downstream](#main-session-on-a-downstream-accepted-limitation) below, easier to hit now: once a conversation has had
-non-Anthropic turns (lever on a downstream, `#execution`, or a rule or
-the classifier sending the main session to one), sending it back to Anthropic may be rejected.
-The router does no history cleaning. If it fails, start a new session. A doubled
-copy that Anthropic rejects only shows up as an error on its pair.
+## Downstreams
 
-### Files
+A downstream is any Anthropic-compatible service the router can send traffic
+to. Add one in the console with "+ Add downstream" in the Tracks panel. You can
+have at most 6, and any of them can be deleted, including the last one.
 
-In `~/.config/claude-router/` (override with `CLAUDE_ROUTER_CONFIG_DIR`), mode 0600:
+**The wizard:**
+1. **Connect:** a name, an id (suggested from the name; it can't change later),
+   the URL and the key. "Test connection" lists the service's models. A failed
+   test doesn't stop you saving.
+2. **Models:** the model for each tier (fable, opus, sonnet, haiku), or one
+   model for all four.
+3. **Cost:** optional prices per million tokens. Left empty, the downstream
+   shows as unpriced. Valar-kind downstreams skip this step.
+
+**Valar kind:** a downstream counts as Valar kind if its model list carries its
+own prices, or its host is `api.valarhq.ai`. It keeps Valar's extras:
+- prices taken from its model list
+- the Now / Priority / Standard window pickers
+- Valar's request fixes, such as moving inline tool definitions into top-level
+  `tools`
+
+Every other downstream is generic.
+
+**Keys** live in `downstreams.keys.json` (mode 0600). They never reach
+`console.json`, the page, the API or the logs. To replace a key, use the
+downstream's row; leaving the field empty keeps the current key.
+
+**Delete** is refused while anything still uses the downstream. The message
+says which:
+- the lever, or a session's own lever
+- a rule or "Otherwise"
+- a classifier label or the classifier's upstream
+- a doubling direction
+
+Deleting a downstream also removes its key and its saved model list.
+
+**Env seed:** on the first start after the upgrade to downstreams, `VALAR_URL`
+and `VALAR_API_KEY` fill in the Valar downstream. After that the env is ignored,
+so a deleted Valar stays deleted.
+
+**History:** a deleted downstream's past requests show as "<id>, removed".
+Adding one back under the same id picks that history up again.
+
+## Console
+
+Open `http://127.0.0.1:8787/ui` (loopback only).
+
+- **Lever:** Anthropic, Rules, or one of your downstreams. With one session
+  picked, the lever shows and sets that session's own lever (the same one
+  `/router` sets, updated live). "back to global" drops it.
+- **Tracks:** one row per downstream. Each row shows whether a key is set, the
+  model map and the prices, with Rename, Replace key and Delete. The classifier's
+  upstream and model are set here too.
+- **Rulebook:** add, edit and switch off rules. A new rule goes on top. Each
+  rule shows how many requests it decided in the span.
+- **Classifier:** a rule that asks a small model which label the newest human
+  message fits, once per turn, cached.
+  - **What it calls:** an OpenAI-style `/v1/chat/completions`, so its upstream
+    must serve that. Valar does; an Anthropic-only downstream doesn't.
+  - **Default:** Valar's `deepseek-ai/DeepSeek-V4.1-Flash`, 2.5 s timeout,
+    reasoning off. It never runs on opus.
+  - **When it can't decide:** if it times out or isn't confident, the rule
+    passes and the explanation says why.
+  - **Reason:** shows as `about:<label>`.
+  - **Privacy:** it sends the newest human message's text to its upstream. Pick
+    another upstream to keep that text elsewhere, or "none" to switch the
+    classifier off.
+- **Doubling:** sends a copy of a request to another track and stores both
+  answers. Claude Code only ever sees the answer from the track the rules chose.
+  - **Settings:** a rate (0% by default, so nothing is doubled until you raise
+    it), an optional tag (e.g. `both`: only turns with `#both`), and directions
+    (which track shadows each track).
+  - **Whole turns:** every `POST /v1/messages` of a chosen turn is doubled.
+  - **Cost:** copies use Max quota (on Anthropic) or credit (on a downstream).
+  - **Limit:** at most two copies per destination run at once. A step that
+    finds its direction full is marked "skipped, busy".
+  - **Judging:** compare pairs in Side by side. "Forget all pairs" deletes them.
+
+### Sessions, span and cost
+
+Pills at the top filter by Claude Code session. The time control sets the span:
+last 15 min, last hour, last 24 h, whole session, or a custom range. The pick and
+the span are remembered in the browser.
+
+- **Pills:**
+  - **Picking:** "All" means every session. Click pills to pick one or more, and
+    "All" to clear the pick.
+  - **Which show:** only sessions with activity in the span, the first 8 plus
+    "+ N more".
+  - **Labels:** `folder · branch`, read from Claude Code's transcripts
+    (`cwd` and `gitBranch` only), or the name set with `/router name`. Subagents
+    count toward their parent session. Requests with no session id show as
+    "unknown session".
+- **Deleting a session:** the ✕ on a pill deletes that session's history:
+  its requests, prompts, side-by-side pairs and name. A session that is still
+  running comes back with no history on its next request. Its own lever, if set,
+  is kept.
+- **What follows the pick and span:** the diagram, the cost cards, the rule
+  counts and Departures.
+- **Departures:** every request in the span, newest first.
+  - **Paging:** 200 load at first; "Load older" pages back to the start of the
+    span.
+  - **Heading:** shows how many requests the span holds.
+  - **Opening a request:** shows which rule decided, the models, status,
+    timing, and what it cost on the track it went to.
+- **Side by side:** follows the pick only.
+- **Cost:**
+  - **Anthropic:** what the traffic would cost at API prices, even on a flat
+    plan.
+  - **Valar:** priced from its own `/v1/models` prices.
+  - **Other downstreams:** priced from the prices you gave them. With none,
+    they count as $0 and show as unpriced.
+  - **Savings:** "≈", what the downstream requests would have cost on Anthropic
+    minus what they cost. It is an estimate because other models count tokens
+    differently. Side-by-side copies count in cost but not in savings.
+- **Valar completion window:** for Valar-kind downstreams, each tier can run in
+  Now, Priority or Standard. Priority costs 75% of Now and Standard 50%, but
+  they are slow: measured 2026-10-29, about 2 s for Now against 11-13 s for the
+  other two. So Now is the default. Flex isn't offered because it doesn't
+  stream.
+
+## Data
+
+**Config:** these files live in `~/.config/claude-router/` (or
+`CLAUDE_ROUTER_CONFIG_DIR`), mode 0600:
 
 - `console.json`: the routing config. If it's unreadable at startup, the router
-  uses defaults, keeps the bad file as `console.json.bad` and shows a banner.
-- `prices.json`: Anthropic API prices per tier (fable, opus, sonnet, haiku),
-  used for the "at API prices" estimates. Written with defaults on first run;
-  edit it to match current prices.
-- `downstreams.keys.json`: the downstreams' keys, by id (see Downstreams).
-- `models.json`: each downstream's model list. Valar's also carries each
-  model's prices from `/v1/models` (refreshed at startup and hourly).
-- `stats.db`: SQLite stats. It stores each request's latest user message in
-  full (as compressed edits of earlier ones from the same session, so a growing
-  conversation costs only its new turns) and the doubled answers (text and tool
-  calls), locally. Never headers or keys. Requests are pruned after 30 days; pairs and verdicts stay
+  uses defaults, keeps the bad file as `console.json.bad`, and shows a banner.
+- `downstreams.keys.json`: the downstreams' keys, by id.
+- `models.json`: each downstream's model list. Valar's also carries each model's
+  prices (refreshed at startup and hourly).
+- `prices.json`: Anthropic API prices per tier, used for the "at API prices"
+  figures. It is written with defaults on first run; edit it if prices change.
+
+**`stats.db`** is the SQLite stats database. It lives in `CLAUDE_ROUTER_STATS_DIR`,
+which is the `stats` volume in Docker.
+- **What it holds:** per request, the routing decision, models, tokens and
+  cost. It also stores the latest user message in full, saved as compressed
+  edits of earlier ones from the same session, and the doubled answers. Never
+  headers or keys.
+- **Retention:** requests are pruned after 30 days. Pairs and verdicts stay
   until "Forget all pairs".
+- **Why a volume:** SQLite corrupts over a folder shared from the host, such as
+  Colima's or Docker Desktop's virtiofs. That happened twice before the database
+  moved to a volume. Never point `CLAUDE_ROUTER_STATS_DIR` at a bind mount.
+- **Inspecting or backing it up:** don't open the live file from the host.
+  Copy it out:
+  ```
+  docker compose cp router:/data/stats.db ./stats-backup.db
+  ```
+- **The volume belongs to the Docker VM:** `colima delete` or a Docker "purge
+  data" removes it. Back it up first.
+- **If the router can't open it:** stats switch off (a banner says why) and
+  routing carries on.
 
-ValarCode (Valar's own agent product) was evaluated and rejected: this router
-only uses Valar's Anthropic-compatible API.
+## Limitations
 
-### Console acceptance
+**A main session on a downstream:** `#execution` or `/model sonnet` works in the
+main session. But later requests to Anthropic then carry assistant turns that
+the downstream's model generated, such as thinking blocks without valid
+Anthropic signatures. Anthropic may reject those, which breaks that
+conversation. The router does no history cleaning.
+- **Rule of thumb:** keep the main session on Anthropic, and send subagents to
+  downstreams.
+- **Switching mid-conversation:** the same applies when you switch the lever or
+  a rule back to Anthropic partway through. If a conversation fails after a
+  switch, start a new one.
+- **Doubled copies:** one that Anthropic rejects only shows up as an error on
+  its pair.
 
-1. Lever to a downstream, `claude -p "hi"` goes there (see the Departures feed);
-   lever back to Rules.
-2. Add the rule `when text contains "zebra" go <downstream id>`. The preview shows
-   matches. `claude -p "zebra"` goes to that downstream.
-3. With the classifier on against a real downstream, a haiku subagent prompt
-   "fix the failing test" shows `about: coding` (or a timeout note) in its
-   explanation.
-4. Doubling rate 100%, tag `both`: `claude -p "#both use a haiku subagent to say hi"`
-   puts a turn in Side by side, and a verdict saves.
-5. With reduced motion set in the OS, there are no moving dots.
+## Development
 
-## Main session on a downstream (accepted limitation)
-
-`#execution` or `/model sonnet` works in the main session. The catch is that later
-requests to Anthropic then carry assistant turns the downstream's model generated,
-such as thinking blocks without valid Anthropic signatures, and Anthropic may
-reject them, which breaks that conversation. The router does no history
-cleaning. **Keep the main session on opus. Use `#execution` in the main session
-only for throwaway conversations.** Tags are mainly for steering subagents. A
-main session started on sonnet runs entirely on Valar (default rulebook).
-
-## Manual acceptance
-
-Start the router with at least one downstream added, then run (a Valar downstream is assumed below; the routes in the results are from the earlier local setup):
-
-1. `claude -p "hi"`: expect `route=anthropic reason=tier`.
-2. `claude -p "#execution say hi"`: expect `route=valar`, status 200.
-3. `claude -p "use a general-purpose subagent with model haiku to say hi"`:
-   expect opus lines on anthropic and haiku lines on valar.
-4. Run a real superpowers plan with `subagent-driven-development`. The
-   implementers should hit valar while the orchestrator stays on Anthropic.
-
-### Results (2026-10-16, Claude Code with Max OAuth, LiteLLM → local vLLM gemma-4-26B)
-
-Ran with `ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude -p ...` and the
-router on 127.0.0.1:8787.
-
-1. Pass.
-   ```
-   route=anthropic reason=passthrough model=- status=200 ms=196 stream=False
-   route=anthropic reason=tier model=claude-opus-5-5 status=200 ms=1528 stream=True
-   ```
-2. Pass. Slow, because the local model has to process Claude Code's full prompt.
-   ```
-   route=local reason=tag:local model=claude-opus-5-5→claude-sonnet-4-6 status=200 ms=123635 stream=True
-   ```
-3. Pass. The subagent replied "hi".
-   ```
-   route=anthropic reason=tier model=claude-opus-5-5 status=200 ms=2283 stream=True
-   route=local reason=tier model=claude-haiku-5-5→claude-haiku-4-5-20251001 status=200 ms=17634 stream=True
-   route=anthropic reason=tier model=claude-opus-5-5 status=200 ms=1461 stream=True
-   ```
-4. Not run yet; this is the user's to do after enabling.
-
-Notes:
-- LiteLLM accepted `Authorization: Bearer`, so no header change was needed.
-  It also accepted Claude Code's betas, so `anthropic-beta` is passed through
-  without the oauth beta. It already has `drop_params: true`.
-- The key is the container's `LITELLM_MASTER_KEY`. The `master_key` in
-  `~/litellm/config.yaml` is a placeholder; the live config is
-  `config.runtime.yaml`.
-- The run used the default model groups (`claude-sonnet-4-6`,
-  `claude-haiku-4-5-20251001`). If your LiteLLM uses different group names,
-  set `CLAUDE_ROUTER_LOCAL_SONNET` / `CLAUDE_ROUTER_LOCAL_HAIKU`.
-
-### Results: Valar track (2026-10-28, Claude Code, real Valar, LiteLLM not running)
-
-Router on 127.0.0.1:8799 with a scratch config dir; keys not logged.
-
-1. `claude -p "hi"`: pass.
-   ```
-   route=anthropic reason="rule:Model the request asked for:1" model=claude-opus-5-5 status=200 ms=1728 stream=True
-   ```
-2. `claude -p "#execution say hi"`: pass (200), but the first Valar attempt
-   returned 400 and Claude Code's retry got 200.
-   ```
-   route=valar reason="rule:Tags in your message:3" model=claude-opus-5-5→zai-org/GLM-5.3 status=400 ms=988 stream=True
-   route=valar reason="rule:Tags in your message:3" model=claude-opus-5-5→zai-org/GLM-5.3 status=200 ms=3086 stream=True
-   ```
-3. Haiku subagent: pass (routed by the classifier, `about:chit-chat`, within
-   the time limit); same 400-then-200 pattern.
-   ```
-   route=anthropic reason="rule:Model the request asked for:1" model=claude-opus-5-5 status=200 ms=3693 stream=True
-   route=valar reason=about:chit-chat model=claude-haiku-5-5→deepseek-ai/DeepSeek-V4.1-Flash-1017 status=400 ms=2835 stream=True
-   route=valar reason=about:chit-chat model=claude-haiku-5-5→deepseek-ai/DeepSeek-V4.1-Flash-1017 status=200 ms=3680 stream=True
-   ```
-4. `claude -p "#local hi"`: pass. LiteLLM unreachable, 502 on every attempt
-   (Claude Code retried), no other route (anthropic lines were only
-   `passthrough` housekeeping).
-   ```
-   route=local reason="rule:Tags in your message:2" model=claude-opus-5-5→claude-sonnet-4-6 status=502 ms=2 stream=True
-   ```
-5. Sonnet subagent with the classifier on: pass, `about:chit-chat`.
-   ```
-   route=valar reason=about:chit-chat model=claude-sonnet-5-5→zai-org/GLM-5.3 status=200 ms=1958 stream=True
-   ```
-
-The first-attempt 400s (items 2 and 3) were Valar rejecting Claude Code's
-inline-tools `tool_addition` content blocks ("This request contains a content
-block of type tool_addition, which the Messages API does not define"); Claude
-Code's retry dropped those blocks, and the tools they carried with them. On
-the valar route the router now moves those tool definitions into top-level
-`tools` and drops the blocks (never on the Anthropic route). Re-run of
-`claude -p "#execution say hi"`: a single Valar request, no 400.
 ```
-route=valar reason="rule:Tags in your message:3" model=claude-opus-5-5→zai-org/GLM-5.3 status=200 ms=2681 stream=True
+pytest -q tests                      # the router (stdlib only; pytest just runs it)
+claude plugin test plugin/router-lever
 ```
+
+| File | Role |
+|------|------|
+| `claude_router.py` | the HTTP proxy, the `App` and startup |
+| `routing.py` | config model (v3), request features, rule evaluation and explanations |
+| `rulelang.py` | the `when … go …` parser, pure (no eval) |
+| `classifier.py` | the classifier rule's model call, cached per turn |
+| `doubling.py` | shadow copies and pairs |
+| `prices.py` | cost on the serving track and at Anthropic API prices |
+| `keys.py` | `downstreams.keys.json` |
+| `sessions.py` | session labels from Claude Code transcripts |
+| `store.py` | `console.json` load/save and the SQLite stats store (one writer thread) |
+| `console.py` | `/ui` static files and the JSON API, loopback Host/Origin checks |
+| `ui/` | the console: vanilla JS and CSS, no build step, strict CSP |
+| `plugin/router-lever/` | the Claude Code plugin (`/router`, `router_lever` tool) |
+
+Design specs and plans are in `docs/superpowers/`. `AGENTS.md` has the
+conventions for working on this repo.
+
+### Manual check after a change
+
+1. `claude -p "hi"`: the departure shows Anthropic, by the rule "Model the
+   request asked for".
+2. `claude -p "#execution say hi"`: it goes to Valar, status 200.
+3. `claude -p "use a general-purpose subagent with model haiku to say hi"`: the
+   opus requests go to Anthropic and the haiku ones to Valar.
+4. Lever to a downstream: `claude -p "hi"` goes there. Put it back to Rules.
+5. With reduced motion set in the OS, the diagram has no moving dots.
