@@ -180,6 +180,17 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": 5})[0], 400)
         self.assertEqual(self.req("PUT", "/ui/api/name", {"session": "s1", "name": "x"}, origin=None)[0].status, 403)
 
+    def test_forget_session(self):
+        self.js("PUT", "/ui/api/name", {"session": "s1", "name": "doomed"})
+        self.app.sessions._known.add("s1")
+        self.assertIn("s1", [x["id"] for x in self.js("GET", "/ui/api/sessions?from=0")[1]])
+        self.assertEqual(self.js("DELETE", "/ui/api/sessions/s1"), (200, {"ok": True}))
+        self.assertNotIn("s1", [x["id"] for x in self.js("GET", "/ui/api/sessions?from=0")[1]])
+        self.assertNotIn("s1", self.app.sessions._known)  # an active session finds its cwd · branch again
+        self.assertEqual(self.js("DELETE", "/ui/api/sessions/unknown")[0], 200)
+        self.assertEqual(self.req("DELETE", "/ui/api/sessions/a.b")[0].status, 400)
+        self.assertEqual(self.req("DELETE", "/ui/api/sessions/s1", origin=None)[0].status, 403)
+
     def test_preview_ignores_lever(self):
         self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "add schema migration"}]}))
         self.logged(1)

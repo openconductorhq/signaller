@@ -214,6 +214,13 @@ class Store:
     def record_pair(self, row): self._put(("pairs", row))
     def record_turn(self, row): self._put(("turns", row))
 
+    def forget_session(self, sid, timeout=10):
+        """Delete a session's requests, turns, pairs and prompts (an X on its chip). Runs on the writer thread so it
+        can't race a prompt being chained onto one it deletes. "unknown" is the requests with no session id."""
+        done = threading.Event()
+        self._q.put(("forget", (None if sid == "unknown" else sid, done)))
+        return done.wait(timeout)
+
     def touch_session(self, id, ts, cwd=None, branch=None):
         self._put(("sessions", {"id": id, "ts": ts, "cwd": cwd, "branch": branch}))
 
@@ -249,9 +256,19 @@ class Store:
         c.close()
 
     def _write(self, c, items, last_prune):
+        done = []
         with c:
             for t, row in items:
-                if t == "sessions":
+                if t == "forget":
+                    sid, ev = row
+                    c.execute("DELETE FROM pairs WHERE request_id IN (SELECT id FROM requests WHERE session_id IS ?) "
+                              "OR turn_id IN (SELECT id FROM turns WHERE session_id IS ?)", (sid, sid))
+                    for tbl, col in (("requests", "session_id"), ("turns", "session_id"), ("sessions", "id")):
+                        c.execute("DELETE FROM %s WHERE %s IS ?" % (tbl, col), (sid,))
+                    Prompts.prune(c)
+                    self._prompts.recent.pop(sid, None)
+                    done.append(ev)
+                elif t == "sessions":
                     c.execute(UPSERT_SESSION, row)
                 else:
                     if t == "requests" and row.get("prompt"):
@@ -261,6 +278,8 @@ class Store:
                 c.execute("DELETE FROM sessions WHERE last_ts < ?", (time.time() - RETAIN,))
                 c.execute("DELETE FROM requests WHERE ts < ?", (time.time() - RETAIN,))
                 Prompts.prune(c)
+        for ev in done:
+            ev.set()
 
     def _drop(self):
         with self._dlock:
@@ -489,6 +508,7 @@ class NullStore:
     def set_verdict(self, turn_id, verdict, tracks): return False
     def forget_pairs(self): pass
     def set_session_name(self, sid, name): pass
+    def forget_session(self, sid): return True
     def reprice(self, prices, downstreams): return 0
 
     def stats(self, now, tracks):

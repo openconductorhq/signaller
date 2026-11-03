@@ -67,6 +67,11 @@ class SessionDirectory:
         except Exception:
             pass
 
+    def forget(self, sid):
+        """The session's history was deleted: look its transcript up again when it next sends a request."""
+        self._known.discard(sid)
+        self._tried.pop(sid, None)
+
     def _work(self):
         while True:
             sid, ts = self._q.get()

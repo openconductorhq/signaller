@@ -316,6 +316,15 @@ def api(h, app, method, path, query, body):
             raise Err(405, "GET or PUT")
         own = app.session_levers.get(sid)
         return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes}
+    m = re.fullmatch(r"/ui/api/sessions/([^/]+)", path)
+    if m and method == "DELETE":  # the X on a session chip: its history goes; a live session starts again from zero
+        sid = unquote(m[1])
+        if sid != "unknown" and not _sid_ok(sid):
+            raise Err(400, "session must be a Claude Code session id")
+        if not st.forget_session(sid):
+            raise Err(503, "the stats database is busy; try again")
+        app.sessions.forget(sid)
+        return {"ok": True}
     if path == "/ui/api/name" and method == "PUT":  # /router name: what the console calls this session
         body = body if isinstance(body, dict) else {}
         sid, name = body.get("session"), body.get("name")

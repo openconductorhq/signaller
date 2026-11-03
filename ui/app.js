@@ -119,11 +119,26 @@ function renderSess() {
   const chip = (attrs, ...kids) => el("button", { type: "button", class: "sc", ...attrs }, ...kids);
   keepFocus(() => $("sess").replaceChildren(el("span", { class: "lbl" }, "Showing"),
     chip({ class: "sc all", "aria-pressed": String(!picked.size), "data-k": "sc:all", onclick: () => setPick([]) }, `All ${plural(all.length, "session")}`),
-    ...shown.map((x) => chip({ "aria-pressed": String(picked.has(x.id)), "data-k": "sc:" + x.id, title: x.id,
+    ...shown.map((x) => el("span", { class: "scw" }, chip({ "aria-pressed": String(picked.has(x.id)), "data-k": "sc:" + x.id, title: x.id,
       onclick: () => setPick(picked.has(x.id) ? view.pick.filter((y) => y !== x.id) : [...view.pick, x.id]) },
-      x.label, el("small", {}, x.last_ts ? hm(x.last_ts) : ""))),
+      x.label, el("small", {}, x.last_ts ? hm(x.last_ts) : "")),
+      el("button", { type: "button", class: "scx", "data-k": "scx:" + x.id, title: "Delete this session's history",
+        "aria-label": `Delete ${x.label}'s history`, onclick: () => forgetSession(x) }, "×"))),
     all.length > shown.length || moreOpen && all.length > 8 ? chip({ class: "sc more", "data-k": "sc:more", "aria-expanded": String(moreOpen),
       onclick: () => { moreOpen = !moreOpen; renderSess(); } }, moreOpen ? "fewer" : `+ ${all.length - shown.length} more`) : ""));
+  // prompt and turn tags drawn before a session was named (or listed) catch up
+  for (const t of document.querySelectorAll(".stag[data-sid]")) t.textContent = shortLabel(t.dataset.sid || null);
+}
+async function forgetSession(x) {
+  if (!confirm(`Delete the history of ${x.label}? Its requests, prompts and pairs go. If it's still running, it starts again with no history.`)) return;
+  try {
+    await api("DELETE", "sessions/" + encodeURIComponent(x.id), undefined, 15000);
+    if (view.pick.includes(x.id)) { view.pick = view.pick.filter((y) => y !== x.id); saveView(); }
+    viewChanged(true);
+    await loadSessions();
+  } catch (e) {
+    alert("Couldn't delete the session: " + e.message);
+  }
 }
 function setPick(ids) { view.pick = ids; saveView(); renderSess(); if (cfg) renderLever(); viewChanged(true); }
 // A new pick restarts departures and side by side; a new span only changes the yard and the cost cards.
@@ -806,7 +821,7 @@ function depRow(r) {
   const head = el("div", { class: "dephead", role: "button", tabindex: 0, "aria-expanded": "false", "data-k": "dep:" + r.id },
     el("time", { datetime: new Date(r.ts * 1000).toISOString() }, hms(r.ts)),
     el("span", { class: "sw" + (err ? " x" : ""), style: cv(r.track), role: "img", "aria-label": err ? "error" : label(r.track) }),
-    el("span", { class: "what" }, el("span", { class: "stag" }, shortLabel(r.session_id)), r.preview || "(no text)"),
+    el("span", { class: "what" }, el("span", { class: "stag", "data-sid": r.session_id || "" }, shortLabel(r.session_id)), r.preview || "(no text)"),
     el("span", { class: "why" + (err ? " x" : "") }, why(r), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄")));
   const row = el("div", { class: "dep", "data-id": r.id }, head), toggle = () => toggleDep(row, head, r);
   head.addEventListener("click", toggle);
@@ -1031,7 +1046,7 @@ function renderTurn() {
     const verdicts = [...pairT.map((t) => [t, label(t)]), ["same", "About the same"]];
     box.replaceChildren(
       el("div", { class: "turnhead" },
-        el("span", { class: "q", title: d.preview }, el("span", { class: "stag" }, shortLabel(d.session_id)), `“${d.preview || "(no text)"}”`),
+        el("span", { class: "q", title: d.preview }, el("span", { class: "stag", "data-sid": d.session_id || "" }, shortLabel(d.session_id)), `“${d.preview || "(no text)"}”`),
         d.ts && el("span", { class: "hint" }, hms(d.ts)),
         el("span", { class: "nav", role: "group", "aria-label": "Steps" },
           nav("‹", "sprev", stepIdx <= 0, () => { stepIdx--; renderTurn(); }),

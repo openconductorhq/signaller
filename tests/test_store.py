@@ -305,3 +305,20 @@ def test_reprice_fills_only_null_costs(tmp_path):
     assert s.reprice(p, (lem, bare)) == 1
     assert [s.request(i)["cost"] for i in (1, 2, 3, 4)] == [3.0, 9.0, None, None]
     assert s.reprice(p, (lem, bare)) == 0
+
+
+def test_forget_session(tmp_path):
+    s, now = seeded(tmp_path)
+    s = Store(str(tmp_path / "s.db"))
+    s.record_request(req(8, now - 10, "anthropic", 200, session_id="sa", prompt="hello there, a long enough prompt"))
+    s.record_request(req(9, now - 9, "anthropic", 200, session_id="sb", prompt="another session's prompt text"))
+    assert s.forget_session("sa")
+    assert [x["id"] for x in s.list_sessions(0, now + 1)] == ["sb", "unknown"]
+    assert {r["id"] for r in s.departures()} == {3, 4, 5, 7, 9}
+    assert [t["id"] for t in s.turns()] == ["t2"]
+    assert s.request(9)["prompt"] == "another session's prompt text"
+    assert s._all("SELECT COUNT(*) n FROM prompts")[0]["n"] == 1 and s._all("SELECT COUNT(*) n FROM pairs")[0]["n"] == 0
+    s.record_request(req(10, now - 1, "anthropic", 200, session_id="sa"))  # still active: back with zero history
+    s.close()
+    assert [(x["id"], x["n"]) for x in s.list_sessions(0, now + 1) if x["id"] == "sa"] == [("sa", 1)]
+    assert store.NullStore().forget_session("sa") is True

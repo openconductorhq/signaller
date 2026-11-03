@@ -51,6 +51,8 @@ h3{font-size:20px;margin:0 0 10px;font-weight:600;letter-spacing:.3px}
 .sc{font-size:12.5px;border-radius:7px;padding:5px 10px;background:#fff;border:1px solid var(--line);font-family:var(--mono);cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sc small{color:var(--muted);font-family:"IBM Plex Sans",sans-serif;margin-left:6px}
 .sc[aria-pressed=true]{background:var(--ink);color:#fff;border-color:var(--ink)}.sc[aria-pressed=true] small{color:#C9D3D8}
+.scw{display:inline-flex;max-width:100%}.scw .sc{border-radius:7px 0 0 7px;border-right:0;min-width:0}
+.scx{border:1px solid var(--line);border-radius:0 7px 7px 0;background:#fff;color:var(--muted);padding:0 7px;cursor:pointer;font-size:13px}.scx:hover,.scx:focus-visible{color:#B42318;border-color:#B42318}
 .sc.all,.sc.more{font-family:inherit;font-weight:600}.sc.more{color:var(--muted)}
 .tf{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .tf .seg{flex-wrap:wrap}.tf .seg button[aria-pressed=true]{color:var(--ink)}
