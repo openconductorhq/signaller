@@ -35,6 +35,94 @@ test('Claude switches the lever only when the latest prompt asks for it', async 
   expect(puts).toEqual([JSON.stringify({ session: 's1', lever: 'anthropic' }), JSON.stringify({ session: 's1', lever: 'rules' })])
 })
 
+test('the settings form is gated like the lever: one write per typed /router, of exactly those values', async ($, on) => {
+  const puts: string[] = []
+  on('command.register', () => ({ value: { command: 'router' } }))
+  on('tool.register', () => ({ value: { tool: TOOL } }))
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.every', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('http.fetch', (_, e) => {
+    const body = e.init?.method === 'PUT' ? String(e.init.body) : ''
+    if (body.includes('"downstream"')) {
+      puts.push(body)
+      const b = JSON.parse(body)
+      return { value: { ok: true, status: 200, text: JSON.stringify({
+        lines: b.reset ? [] : [{ when: '', downstream: b.downstream, tier: b.tier ?? null, set: b.set, value: b.value }],
+        collisions: [{ line: 2, by: 1, text: 'line 2 is shadowed by line 1' }],
+      }) } }
+    }
+    return { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] }) } }
+  })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('tool.call', () => ({ result: 'engine' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  await $.prompt.submit({ text: 'please leave the window alone' })
+  expect((await $.tool.call({ tool: TOOL, settings: 'valar window priority' })).deny).toContain('Not setting')  // never asked
+
+  await $.prompt.submit({ text: 'do /router valar window priority' })
+  const ok = await $.tool.call({ tool: TOOL, settings: 'valar window priority' })
+  expect(ok.deny).toBeUndefined()
+  expect(ok.result).toContain('claude-router: valar window priority for this session')
+  expect(ok.result).toContain('line 2 is shadowed by line 1')
+  expect((await $.tool.call({ tool: TOOL, settings: 'valar window priority' })).deny).toContain('Not setting')  // used up
+
+  await $.prompt.submit({ text: 'do /router valar window standard' })  // a different value grants only itself
+  expect((await $.tool.call({ tool: TOOL, settings: 'valar window priority' })).deny).toContain('Not setting')
+
+  await $.prompt.submit({ text: 'do /router valar opus window priority' })  // the tier is part of the grant
+  const tier = await $.tool.call({ tool: TOOL, settings: 'valar opus window priority' })
+  expect(tier.deny).toBeUndefined()
+  expect(tier.result).toContain('for this session (opus)')
+  expect(JSON.parse(puts[puts.length - 1]!).tier).toBe('opus')
+})
+
+test('a typed settings form is no lever grant; the value keeps its case on its way to the router', async ($, on) => {
+  const puts: string[] = []
+  on('command.register', () => ({ value: { command: 'router' } }))
+  on('tool.register', () => ({ value: { tool: TOOL } }))
+  on('session.id', () => ({ value: 's1' }))
+  on('clock.every', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('http.fetch', (_, e) => {
+    const body = e.init?.method === 'PUT' ? String(e.init.body) : ''
+    if (body.includes('"downstream"')) {
+      puts.push(body)
+      const b = JSON.parse(body)
+      return { value: { ok: true, status: 200, text: JSON.stringify({ lines: [], collisions: [] }) } }
+    }
+    return { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] }) } }
+  })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('tool.call', () => ({ result: 'engine' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  await $.prompt.submit({ text: 'do /router valar window priority' })  // a settings form grants only that write
+  expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')
+
+  await $.prompt.submit({ text: 'do /router valar' })  // one word: still the lever switch
+  expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toBeUndefined()
+
+  await $.prompt.submit({ text: 'do /router reset' })  // one word reset: still the lever reset
+  expect((await $.tool.call({ tool: TOOL, lever: 'reset' })).deny).toBeUndefined()
+
+  await $.prompt.submit({ text: 'do /router valar model Glm-5.4' })  // the value's case survives
+  const ok = await $.tool.call({ tool: TOOL, settings: 'valar model Glm-5.4' })
+  expect(ok.deny).toBeUndefined()
+  expect(JSON.parse(puts[puts.length - 1]!).value).toBe('Glm-5.4')
+
+  await $.prompt.submit({ text: 'do /router valar reset' })  // reset through the gate
+  const cleared = await $.tool.call({ tool: TOOL, settings: 'valar reset' })
+  expect(cleared.deny).toBeUndefined()
+  expect(cleared.result).toContain("this session's valar settings cleared")
+
+  expect((await $.tool.call({ tool: TOOL, settings: 'lemmi window priority' })).deny).toContain('Unknown downstream')
+  expect(puts.every(p => !p.includes('lemmi'))).toBe(true)  // unknown downstream: no request
+})
+
 test('modes come from the router: a downstream id works, a removed one is unknown', async ($, on) => {
   on('command.register', () => ({ value: { command: 'router' } }))
   on('tool.register', () => ({ value: { tool: TOOL } }))

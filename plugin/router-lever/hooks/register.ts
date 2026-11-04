@@ -3,10 +3,13 @@ import type { EngineInterface, Register } from 'claude-code'
 const BASE = 'http://127.0.0.1:8787'
 const LEVER = `${BASE}/ui/api/lever`
 const NAME = `${BASE}/ui/api/name`
+const SETTINGS = `${BASE}/ui/api/settings`
 let MODES = ['rules', 'anthropic'] // the router's list, refreshed by every lever answer
 const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the console takes writes from its own origin only
 
 type Lever = { lever: string; session: string | null; global: string; modes?: string[] }
+type Line = { downstream: string; tier: string | null; set: string; value: string }
+type Form = { ds: string; tier: string | null; key: 'window' | 'model'; value: string } | { ds: string; reset: true }
 
 // this session's lever: its own if /router set one, else the router's global one
 const lever = async ($: EngineInterface, set?: { lever: string | null }): Promise<Lever> => {
@@ -28,19 +31,63 @@ const rename = async ($: EngineInterface, name: string): Promise<string | null> 
   return JSON.parse(r.text).name
 }
 
-// Claude may switch the lever only on the person's say-so: each "/router <mode>" they type, in any
-// prompt (e.g. a multi-step plan), allows Claude one switch to that mode. Later prompts don't erase it.
-// Kept in memory; a reload forgets them, which only denies.
+// a settings form: "<downstream> [<tier>] window|model <value>", or "<downstream> reset". Downstream,
+// tier and key match without case; the value keeps its case, model ids are case-sensitive.
+const TAIL = '([a-z0-9_-]+)(?:\\s+(fable|opus|sonnet|haiku))?\\s+(?:(window|model)\\s+(\\S+)|(reset))'
+const FORM = new RegExp(`^${TAIL}$`, 'i') // the command's arguments, and the tool's settings input
+const form = (m: RegExpExecArray): Form => {
+  const ds = m[1]!.toLowerCase()
+  return m[5] ? { ds, reset: true } : { ds, tier: m[2]?.toLowerCase() ?? null, key: m[3]!.toLowerCase() as 'window' | 'model', value: m[4]! }
+}
+const parseForm = (s: string): Form | null => {
+  const m = FORM.exec(s.trim())
+  return m ? form(m) : null
+}
+const canon = (f: Form): string => ('reset' in f ? `${f.ds} reset` : `${f.ds} ${f.tier ?? '*'} ${f.key} ${f.value}`)
+const downstreams = () => MODES.filter(m => m !== 'rules' && m !== 'anthropic')
+
+// Claude may switch the lever or change settings only on the person's say-so: each "/router <mode>" they
+// type, in any prompt (e.g. a multi-step plan), allows Claude one switch to that mode. A typed settings
+// form instead allows exactly one write of exactly those values — and never also a lever switch to that
+// downstream. Later prompts don't erase either. Kept in memory; a reload forgets them, which only denies.
 const granted: string[] = []
+const grantedSettings: string[] = []
 const GRANT = /(?:^|\s)\/router\s+([a-z0-9_-]+)/gi
+const GRANT_SETTINGS = new RegExp(`(?:^|\\s)\\/router\\s+${TAIL}`, 'gi') // the same form, as typed in a prompt
 const grant = (text: string) => {
+  const settingsForms = new Set<number>()
+  for (const m of text.matchAll(GRANT_SETTINGS)) {
+    settingsForms.add(m.index!) // both regexes start at the same place: the "/router" they share
+    grantedSettings.push(canon(form(m)))
+  }
   for (const m of text.matchAll(GRANT)) {
+    if (settingsForms.has(m.index!)) continue // that "/router <word>" was the start of a settings form
     granted.push(m[1]!.toLowerCase()) // checked against the router's modes when used: they may not be known yet
   }
 }
-const use = (want: string) => {
-  const i = granted.indexOf(want)
-  return i >= 0 && granted.splice(i, 1).length > 0
+const take = (list: string[], want: string) => {
+  const i = list.indexOf(want)
+  return i >= 0 && list.splice(i, 1).length > 0
+}
+const use = (want: string) => take(granted, want)
+const useSettings = (want: string) => take(grantedSettings, want)
+
+// set (or reset) this session's settings line; the reply lists the session's resulting lines and any collisions
+const setSettings = async ($: EngineInterface, f: Form): Promise<{ ok: boolean; text: string }> => {
+  const session = await $.session.id()
+  const body = 'reset' in f
+    ? { session, downstream: f.ds, reset: true }
+    : { session, downstream: f.ds, tier: f.tier, set: f.key, value: f.value }
+  try {
+    const r = await $.http.fetch(SETTINGS, { method: 'PUT', headers: HEADERS, body: JSON.stringify(body) })
+    if (!r.ok) return { ok: false, text: `claude-router answered ${r.status}: ${r.text.slice(0, 200)}` }
+    const back = JSON.parse(r.text) as { lines: Line[]; collisions: { text: string }[] }
+    if ('reset' in f) return { ok: true, text: `claude-router: this session's ${f.ds} settings cleared` }
+    const lines = back.lines.map(l => `claude-router: ${l.downstream} ${l.set} ${l.value} for this session${l.tier ? ` (${l.tier})` : ''}`)
+    return { ok: true, text: [...lines, ...back.collisions.map(c => c.text)].join('\n') }
+  } catch (err) {
+    return { ok: false, text: `claude-router isn't reachable at ${BASE}: ${(err as Error).message}` }
+  }
 }
 
 // switch (or with no mode, read) the lever; the reply text either way, ok false when the router is down
@@ -62,8 +109,10 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'router',
-      description: "Show or switch this session's claude-router mode; reset goes back to the global one; name <text> labels it in the console",
-      argumentHint: '[mode|reset|name <text>]',
+      description:
+        "Show or switch this session's claude-router mode; reset goes back to the global one; " +
+        '<downstream> [<tier>] window|model <value> sets this session’s settings line, <downstream> reset clears them; name <text> labels it in the console',
+      argumentHint: '[mode|reset|name <text>|<downstream> [tier] window|model <value>]',
       immediate: true,
     })
     // the same switch for Claude itself: mcp__router-lever__router_lever
@@ -72,11 +121,12 @@ export const register: Register = on => {
       description:
         "Show or switch claude-router's lever for this Claude Code session (its subagents follow). " +
         'lever: rules (follow the rulebook), anthropic, or a downstream id (send everything there), reset (back to the global lever); omit it to only read the current one. ' +
-        'Never switch on your own initiative: only when the person tells you to with "/router <mode>" in a message (e.g. "do /router anthropic", or a plan with "/router rules" at a later step). ' +
-        'Each "/router <mode>" they typed allows one switch to that mode; others are refused.',
+        'settings: "<downstream> [<tier>] window|model <value>" sets this session’s window or model on a downstream (tier: fable, opus, sonnet or haiku); "<downstream> reset" clears this session’s lines for it. ' +
+        'Never switch on your own initiative: only when the person tells you to with "/router <mode>" or "/router <downstream> [<tier>] window|model <value>" in a message (e.g. "do /router anthropic", or a plan with "/router rules" at a later step). ' +
+        'Each form they typed allows one use of exactly that form; others are refused.',
       inputSchema: {
         type: 'object',
-        properties: { lever: { type: 'string' } },
+        properties: { lever: { type: 'string' }, settings: { type: 'string' } },
         additionalProperties: false,
       },
       isDeferred: false,
@@ -88,6 +138,19 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'mcp__router-lever__router_lever' }, async ($, e) => {
+    const settings = (e as { settings?: string }).settings
+    if (settings !== undefined) {
+      const f = parseForm(settings)
+      if (!f) return { deny: `Unknown settings "${settings}". Use "<downstream> [<tier>] window|model <value>", or "<downstream> reset".` }
+      if (!downstreams().includes(f.ds))
+        return { deny: `Unknown downstream "${f.ds}". The router's downstreams: ${downstreams().join(', ') || 'none yet'}.` }
+      const c = canon(f)
+      if (!useSettings(c))
+        return { deny: `Not setting: the person hasn't typed "/router ${settings}" for this change (each one they type allows one). Only set a line when they tell you to that way; they can also type /router ${settings} themselves.` }
+      const r = await setSettings($, f)
+      if (!r.ok) grantedSettings.push(c) // the write didn't happen: the person's say-so still stands
+      return r.ok ? { result: r.text } : { deny: r.text }
+    }
     const want = (e as { lever?: string }).lever
     if (want && want !== 'reset' && !MODES.includes(want)) return { deny: `Unknown lever "${want}". Use one of: ${MODES.join(', ')}, or reset.` }
     if (want && !use(want))
@@ -111,6 +174,12 @@ export const register: Register = on => {
       } catch (err) {
         return { text: `claude-router isn't reachable at ${BASE}: ${(err as Error).message}` }
       }
+    }
+    const f = parseForm(args)
+    if (f) {
+      if (!downstreams().includes(f.ds))
+        return { text: `Unknown downstream "${f.ds}". The router's downstreams: ${downstreams().join(', ') || 'none yet'}.` }
+      return { text: (await setSettings($, f)).text }
     }
     const want = args.toLowerCase()
     if (want && want !== 'reset' && !MODES.includes(want))
