@@ -8,11 +8,14 @@ services:
     env_file: ${HOME}/.config/claude-router/env
     environment:  # wins over the env file
       CLAUDE_ROUTER_LISTEN: 0.0.0.0:8787
+      # the settings lines' `hour` field reads the container's local time; this picks the zone (empty: /etc/localtime below)
+      TZ: ${TZ:-}
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
       - ${HOME}/.config/claude-router:/config
       # stats.db on the VM's own disk: SQLite over a host-shared folder (virtiofs) corrupted it twice
       - stats:/data
       - ${HOME}/.claude/projects:/claude/projects:ro  # session labels (cwd, branch) only
+      - /etc/localtime:/etc/localtime:ro  # the container clock — and so the settings `hour` field — follows the host's zone
 volumes:
   stats:

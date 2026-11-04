@@ -251,8 +251,33 @@ class App:
         def loop():
             while True:
                 self.refresh_prices()
+                self.prune_settings()
                 time.sleep(every)
         threading.Thread(target=loop, daemon=True).start()
+
+    def set_settings_for_session(self, sid: str, ds_id: str, tier: str | None, key: str, value: str | None,
+                                 reset: bool = False) -> None:
+        """Set (or with reset, clear) one session's settings lines, under the lock. ValueError if the result would
+        not load (upsert_session itself doesn't validate); nothing is saved then."""
+        with self._rlock:
+            st = overrides.reset_session(self.routing.settings, sid, ds_id) if reset else \
+                overrides.upsert_session(self.routing.settings, sid, ds_id, tier, key, value)
+            new = replace(self.routing, settings=st)
+            overrides.settings_from_json(overrides.settings_to_json(st), new.downstreams)  # raises ValueError
+            self._put(new)
+
+    def prune_settings(self) -> None:
+        """Drop session ids not seen for a week from settings lines. Never raises; saves only when something went."""
+        try:
+            ids = {i for s in self.routing.settings for i in (overrides.is_session_line(s) or ())}
+            if isinstance(self.store, NullStore) or not ids:
+                return
+            last = self.store.session_last_seen(sorted(ids))
+            new = overrides.prune(self.routing.settings, last.get, time.time())
+            if new != self.routing.settings:
+                self.set_routing(replace(self.routing, settings=new))
+        except Exception as e:
+            print("settings prune failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
         # ponytail: memory only, a restart drops them (the status line shows it); one small entry per session that used /router
@@ -491,6 +516,7 @@ def main() -> None:
         sys.exit(2)
     srv = make_server(cfg, app)
     app.start_price_refresh()
+    app.prune_settings()  # once now, then hourly with the price refresh
     print("listening on %s:%d; anthropic=%s downstreams=%s" % (
         cfg.listen_host, cfg.listen_port, cfg.anthropic_url,
         ", ".join("%s (%s)" % (d.id, "key set" if app.keys.has(d.id) else "no key") for d in app.routing.downstreams)),

@@ -430,6 +430,12 @@ class Store:
             out.append(r)
         return out
 
+    def session_last_seen(self, ids):
+        """id -> last_ts for the given session ids; ids are matched lowered, so settings lines' lowered ids hit."""
+        rows = self._all("SELECT id, last_ts FROM sessions WHERE lower(id) IN (%s)" % ",".join("?" * len(ids)),
+                         [i.lower() for i in ids])
+        return {r["id"].lower(): r["last_ts"] for r in rows if r["last_ts"] is not None}
+
     def turn(self, turn_id):
         r = self._all("SELECT * FROM turns WHERE id=?", (turn_id,))
         if not r:
@@ -520,6 +526,7 @@ class NullStore:
     def set_session_name(self, sid, name): pass
     def forget_session(self, sid): return True
     def reprice(self, prices, downstreams): return 0
+    def session_last_seen(self, ids): return {}
 
     def stats(self, now, tracks):
         return {**{"%s_pct" % t: 0 for t in tracks}, "last_hour_total": 0, "per_minute": 0, "errors_last_hour": 0,

@@ -13,6 +13,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
+import overrides
 from claude_router import App, Config
 from routing import MODEL_TIERS
 from tests import test_proxy
@@ -179,6 +180,49 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "unknown", "name": "x"})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": 5})[0], 400)
         self.assertEqual(self.req("PUT", "/ui/api/name", {"session": "s1", "name": "x"}, origin=None)[0].status, 403)
+
+    def test_session_settings_endpoint(self):
+        put = lambda b: self.js("PUT", "/ui/api/settings", b)
+        line = {"session": "S1", "downstream": "valar", "tier": None, "set": "window", "value": "priority"}
+        s, j = put(line)
+        self.assertEqual(s, 200)
+        self.assertEqual([(x["when"], x["value"]) for x in j["lines"]], [("session is s1", "priority")])  # the sid is lowered
+        self.assertEqual(j["collisions"], [])
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["config"]["settings"][0]["value"], "priority")  # the line is at the top
+        s, j = put({**line, "value": "asap"})  # the same key updates in place, so still one line
+        self.assertEqual([x["value"] for x in j["lines"]], ["asap"])
+        s, j = put({"session": "s1", "downstream": "valar", "reset": True})
+        self.assertEqual((s, j["lines"]), (200, []))
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["config"]["settings"], [])
+        self.assertEqual(self.req("PUT", "/ui/api/settings", line, origin=None)[0].status, 403)
+        self.assertEqual(put({**line, "value": "bogus"})[0], 400)
+        self.assertEqual(put({**line, "set": "junk"})[0], 400)
+        self.assertEqual(put({**line, "tier": "junk"})[0], 400)
+        self.assertEqual(put({**line, "session": "a.b"})[0], 400)
+        self.assertEqual(put({**line, "downstream": "nope"})[0], 400)
+
+    def test_state_has_collisions_and_clock(self):
+        self.app.routing = replace(self.app.routing, settings=overrides.settings_from_json(
+            [{"when": "", "downstream": "valar", "tier": None, "set": "window", "value": "asap"},
+             {"when": "session is s1", "downstream": "valar", "tier": None, "set": "window", "value": "priority"}],
+            self.app.routing.downstreams))
+        j = self.js("GET", "/ui/api/state")[1]
+        self.assertEqual([(c["line"], c["by"]) for c in j["collisions"]], [(2, 1)])  # s1's line is shadowed by the always line
+        self.assertEqual(set(j["clock"]), {"now", "tz", "hour"})
+        self.assertIsInstance(j["clock"]["hour"], int)
+
+    def test_prune_settings_drops_stale_sessions(self):
+        self.app.store.touch_session("stale", time.time() - 8 * 86400)
+        self.app.store.touch_session("fresh", time.time())
+        self.app.store.close()
+        self.app.routing = replace(self.app.routing, settings=overrides.settings_from_json(
+            [{"when": "session is stale", "downstream": "valar", "tier": None, "set": "window", "value": "priority"},
+             {"when": "session is fresh", "downstream": "valar", "tier": None, "set": "window", "value": "asap"}],
+            self.app.routing.downstreams))
+        self.app.prune_settings()
+        self.assertEqual([s.when for s in self.app.routing.settings], ["session is fresh"])
+        with open(os.path.join(self.dir, "console.json")) as f:  # the pruned config was saved
+            self.assertEqual([x["when"] for x in json.load(f)["settings"]], ["session is fresh"])
 
     def test_forget_session(self):
         self.js("PUT", "/ui/api/name", {"session": "s1", "name": "doomed"})

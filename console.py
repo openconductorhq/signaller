@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from keys import write_json
 from prices import parse_valar
+import overrides
 from routing import (MAX_DOWNSTREAMS, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, untagged, config_from_json, config_to_json,
                      downstream, route, tracks, valid_id)
 from rulelang import RuleError, parse
@@ -227,7 +228,9 @@ def state(app, query=None):
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
             "downstreams": {d.id: {"key_set": app.keys.has(d.id), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
-            "recent_count": len(app.recent), "session_levers": dict(app.session_levers)}
+            "recent_count": len(app.recent), "session_levers": dict(app.session_levers),
+            "collisions": overrides.collisions(app.routing.settings),
+            "clock": {"now": time.time(), "tz": time.strftime("%Z"), "hour": time.localtime().tm_hour}}
 
 
 def api(h, app, method, path, query, body):
@@ -325,6 +328,26 @@ def api(h, app, method, path, query, body):
         name = " ".join((name or "").split())[:80] or None
         st.set_session_name(sid, name)
         return {"session": sid, "name": name}
+    if path == "/ui/api/settings" and method == "PUT":  # one session's window/model overrides on a downstream
+        body = body if isinstance(body, dict) else {}
+        sid, ds = body.get("session"), body.get("downstream")
+        if not _sid_ok(sid):
+            raise Err(400, "session must be a Claude Code session id")
+        if not downstream(app.routing, ds):
+            raise Err(400, "no downstream named %r" % ds)
+        reset, tier, key = bool(body.get("reset")), body.get("tier"), body.get("set")
+        if not reset:
+            if key not in ("window", "model"):
+                raise Err(400, "set must be window or model")
+            if tier is not None and (not isinstance(tier, str) or tier not in MODEL_TIERS):
+                raise Err(400, "tier must be one of " + ", ".join(MODEL_TIERS) + " or null")
+        try:
+            app.set_settings_for_session(sid, ds, tier, key, body.get("value"), reset=reset)
+        except ValueError as e:  # the round-trip inside set_settings_for_session judged the result; nothing was saved
+            raise Err(400, str(e))
+        low = sid.lower()
+        hits = [s for s in app.routing.settings if low in (overrides.is_session_line(s) or frozenset())]
+        return {"lines": overrides.settings_to_json(hits), "collisions": overrides.collisions(app.routing.settings)}
     if path == "/ui/api/config" and method == "PUT":
         try:
             new = config_from_json(body)

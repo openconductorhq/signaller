@@ -214,6 +214,14 @@ def test_old_db_gets_columns(tmp_path):
 T = ("anthropic", "valar", "local")
 
 
+def test_session_last_seen(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    s.touch_session("MixedCase", now - 100)
+    s.close()
+    assert s.session_last_seen(["mixedcase", "gone"]) == {"mixedcase": now - 100}  # lowered: settings lines hold lowered ids
+    assert NullStore().session_last_seen(["x"]) == {}
+
+
 def seeded(tmp_path):
     s, now = Store(str(tmp_path / "s.db")), time.time()
     s.touch_session("sa", now - 5000, "/x/alpha", "main")
