@@ -239,15 +239,20 @@ async function dsCall(method, path, body, id) {
 function renderMoney(m, sfx) {
   const t = m.tracks, io = (x) => `${tok(x.in)} in / ${tok(x.out)} out`, ds = Object.keys(t).filter((k) => k !== "anthropic"),
     cached = (x) => { const s = x.in + (x.cache_read || 0) + (x.cache_write || 0); return s ? Math.round(100 * (x.cache_read || 0) / s) + "% cached" : ""; },
+    lat = (x) => x.latency ? `latency: ${fmtMs(x.latency.ttfb)} first byte · ${fmtMs(x.latency.ms)} total · ${x.latency.n} request${x.latency.n === 1 ? "" : "s"}` : "",
+    latT = (x) => x.latency ? `median of ${x.latency.n} answered requests · mean ${fmtMs(Math.round(x.latency.ttfb_mean))} first byte / ${fmtMs(Math.round(x.latency.ms_mean))} total · errors excluded` : "",
     split = (x) => `${tok(x.in)} uncached · ${tok(x.cache_read || 0)} read from cache · ${tok(x.cache_write || 0)} written to cache`;
   $("money").style.setProperty("--cols", ds.length <= 3 ? `repeat(${ds.length + 1},minmax(0,1fr)) 1.3fr` : "repeat(4,minmax(0,1fr))");
   $("money").replaceChildren($("money").firstElementChild, ...ds.map((k) => { const v = t[k]; return el("div", { class: "mcell", style: cv(k) },
     el("div", { class: "k" }, label(k), el("span", { class: "sfx" })), el("div", { class: "n" }, usd(v.cost + v.comparisons)),
-    el("div", { class: "t", title: split(v) }, [io(v), cached(v), v.unpriced > 0 && "partly unpriced", v.comparisons > 0 && `incl. ${usd(v.comparisons)} comparisons`].filter(Boolean).join(" · "))); }), $("mcS"));
+    el("div", { class: "t", title: split(v) }, [io(v), cached(v), v.unpriced > 0 && "partly unpriced", v.comparisons > 0 && `incl. ${usd(v.comparisons)} comparisons`].filter(Boolean).join(" · ")),
+    v.latency && el("div", { class: "t", title: latT(v) }, lat(v))); }), $("mcS"));
   for (const e of document.querySelectorAll("#money .sfx")) e.textContent = sfx;
   $("nA").textContent = usd(t.anthropic.api_cost);
   $("mA").textContent = [io(t.anthropic), cached(t.anthropic)].filter(Boolean).join(" · ");
   $("mA").title = split(t.anthropic);
+  $("lA").textContent = lat(t.anthropic);
+  $("lA").title = latT(t.anthropic);
   $("nS").textContent = "≈ " + usd(m.savings);
   $("mS").textContent = `${ds.map(NAME).join(" + ") || "Downstream"} requests would have cost ${usd(m.saved_would)} on Anthropic`;
 }
@@ -828,7 +833,8 @@ function depRow(r) {
     el("time", { datetime: new Date(r.ts * 1000).toISOString() }, hms(r.ts)),
     el("span", { class: "sw" + (err ? " x" : ""), style: cv(r.track), role: "img", "aria-label": err ? "error" : label(r.track) }),
     el("span", { class: "what" }, el("span", { class: "stag", "data-sid": r.session_id || "" }, shortLabel(r.session_id)), r.preview || "(no text)"),
-    el("span", { class: "why" + (err ? " x" : "") }, why(r), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄")));
+    el("span", { class: "why" + (err ? " x" : "") }, why(r), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄"),
+      r.ms != null && el("span", { class: "lat", title: `first byte ${fmtMs(r.ttfb_ms)} · total ${fmtMs(r.ms)}` }, "latency: " + fmtMs(r.ms))));
   const row = el("div", { class: "dep", "data-id": r.id }, head), toggle = () => toggleDep(row, head, r);
   head.addEventListener("click", toggle);
   head.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });

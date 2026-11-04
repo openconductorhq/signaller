@@ -338,3 +338,15 @@ def test_forget_session(tmp_path):
     s.close()
     assert [(x["id"], x["n"]) for x in s.list_sessions(0, now + 1) if x["id"] == "sa"] == [("sa", 1)]
     assert store.NullStore().forget_session("sa") is True
+
+
+def test_summary_latency(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    for i, (t, st, f, ms) in enumerate([("valar", 200, 1000, 4000), ("valar", 200, 3000, 6000), ("valar", 200, 2000, 125000),
+                                        ("valar", 502, 1, 1), ("anthropic", 200, 500, 900)], 1):
+        s.record_request(req(i, now - 10, t, st, ttfb_ms=f, ms=ms))
+    s.close()
+    m = s.summary(None, 0, now + 1, now, T)["tracks"]
+    v = m["valar"]["latency"]  # the 502 is left out; medians resist the 125 s outlier
+    assert (v["n"], v["ttfb"], v["ms"], v["ttfb_mean"]) == (3, 2000, 6000, 2000)
+    assert m["anthropic"]["latency"]["n"] == 1 and m["local"]["latency"] is None

@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import sqlite3
+import statistics
 import sys
 import threading
 import zlib
@@ -149,6 +150,12 @@ def save_console_config(path, cfg):
     d = os.path.dirname(os.path.abspath(path))
     os.makedirs(d, mode=0o700, exist_ok=True)
     write_json(path, config_to_json(cfg), indent=2)
+
+
+def latency(first: list, total: list) -> dict:
+    """Median (and mean) first-byte and total ms of a track's answered requests; n is the sample size."""
+    return {"n": len(total), "ttfb": statistics.median(first), "ms": statistics.median(total),
+            "ttfb_mean": statistics.fmean(first), "ms_mean": statistics.fmean(total)}
 
 
 class Store:
@@ -367,6 +374,13 @@ class Store:
         comp = {r["shadow_track"]: r["c"] for r in self._all(
             "SELECT p.shadow_track, COALESCE(SUM(p.shadow_cost),0) c FROM pairs p JOIN requests r ON r.id=p.request_id "
             "WHERE %s AND r.ts BETWEEN ? AND ? GROUP BY p.shadow_track" % self._sess(sessions, "r.session_id")[0], sa + span)}
+        # ponytail: medians in Python over every answered row of the span; a SQL percentile if spans get huge
+        lat = {}
+        for r in self._all("SELECT track, ttfb_ms f, ms t FROM requests WHERE %s AND ts BETWEEN ? AND ? "
+                           "AND status BETWEEN 200 AND 299 AND ms IS NOT NULL" % sc, sa + span):
+            x = lat.setdefault(r["track"], ([], []))
+            x[0].append(r["f"] if r["f"] is not None else r["t"])
+            x[1].append(r["t"])
         total = sum(r["n"] for r in by.values())
         z = {"n": 0, "i": 0, "o": 0, "cr": 0, "cw": 0, "cost": 0, "api": 0, "sav": 0, "papi": 0, "nocost": 0}
         out_tracks = {}
@@ -374,7 +388,8 @@ class Store:
             r = by.get(t, z)
             out_tracks[t] = {"n": r["n"], "pct": round(100 * r["n"] / total) if total else 0, "in": r["i"], "out": r["o"],
                              "cost": r["cost"], "api_cost": r["api"], "unpriced": r["nocost"] if t != "anthropic" else 0,
-                             "comparisons": comp.get(t, 0), "cache_read": r["cr"], "cache_write": r["cw"]}
+                             "comparisons": comp.get(t, 0), "cache_read": r["cr"], "cache_write": r["cw"],
+                             "latency": latency(*lat[t]) if t in lat else None}
             if t not in tracks:
                 out_tracks[t]["removed"] = True
         rules = {}
@@ -495,7 +510,8 @@ class NullStore:
     def list_sessions(self, *a, **k): return []
     def first_ts(self, *a): return 0
     def summary(self, sessions, t0, t1, now, tracks):
-        t = {"n": 0, "pct": 0, "in": 0, "out": 0, "cost": 0, "api_cost": 0, "unpriced": 0, "comparisons": 0, "cache_read": 0, "cache_write": 0}
+        t = {"n": 0, "pct": 0, "in": 0, "out": 0, "cost": 0, "api_cost": 0, "unpriced": 0, "comparisons": 0, "cache_read": 0, "cache_write": 0,
+             "latency": None}
         return {"total": 0, "per_minute": 0, "tracks": {k: dict(t) for k in tracks}, "savings": 0, "saved_would": 0, "rules": {}, "errors": 0,
                 "tally": dict.fromkeys([*tracks, "same"], 0)}
     def turn(self, turn_id): return None
