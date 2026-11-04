@@ -195,7 +195,7 @@ async function tick() {
 
 function applyState(st) {
   S = st;
-  if (st.clock) $("sttClock").textContent = "Router time " + hm(st.clock.now) + " (" + st.clock.tz + ")";  // a wrong zone must be visible
+  if (st.clock) $("sttClock").textContent = "Router time " + (st.clock.hm || hm(st.clock.now)) + " (" + st.clock.tz + ")";  // hm: the router's own wall clock, what "hour" means; a wrong zone must be visible
   const n = view.pick.length;  // departures list the span's requests, paged back with "Load older"
   $("depFrom").textContent = `${plural(st.summary.total, "request")}${n ? ` from the ${n === 1 ? "picked session" : n + " picked sessions"}` : ""} · ${spanText()}`;
   const s = st.stats;

@@ -206,10 +206,12 @@ class ConsoleTest(Fixture):
             [{"when": "", "downstream": "valar", "tier": None, "set": "window", "value": "asap"},
              {"when": "session is s1", "downstream": "valar", "tier": None, "set": "window", "value": "priority"}],
             self.app.routing.downstreams))
+        before = time.strftime("%H:%M")
         j = self.js("GET", "/ui/api/state")[1]
         self.assertEqual([(c["line"], c["by"]) for c in j["collisions"]], [(2, 1)])  # s1's line is shadowed by the always line
-        self.assertEqual(set(j["clock"]), {"now", "tz", "hour"})
+        self.assertEqual(set(j["clock"]), {"now", "tz", "hour", "hm"})
         self.assertIsInstance(j["clock"]["hour"], int)
+        self.assertIn(j["clock"]["hm"], {before, time.strftime("%H:%M")})  # the router's own wall clock; a minute may roll between the request and here
 
     def test_prune_settings_drops_stale_sessions(self):
         self.app.store.touch_session("stale", time.time() - 8 * 86400)

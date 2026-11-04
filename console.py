@@ -230,7 +230,8 @@ def state(app, query=None):
             "downstreams": {d.id: {"key_set": app.keys.has(d.id), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
             "recent_count": len(app.recent), "session_levers": dict(app.session_levers),
             "collisions": overrides.collisions(app.routing.settings),
-            "clock": {"now": time.time(), "tz": time.strftime("%Z"), "hour": time.localtime().tm_hour}}
+            "clock": {"now": time.time(), "tz": time.strftime("%Z"), "hour": time.localtime().tm_hour,
+                      "hm": time.strftime("%H:%M")}}
 
 
 def api(h, app, method, path, query, body):
