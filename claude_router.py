@@ -340,6 +340,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
                 f = Features.from_body(body, req) if is_routed(self.command, self.path) else None
+                if f is not None:
+                    f.session, f.hour = any_sid, time.localtime(t0).tm_hour
                 d = decide_route(routing, f, app.classifier) if f else None
             except Exception as e:
                 self._error(500, "claude-router: routing failed")

@@ -148,6 +148,14 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((d.track, d.reason), ("valar", "lever"))
         self.assertEqual(d.explanation, [{"rule": "Lever", "outcome": "sending everything to valar", "decided": True}])
 
+    def test_hour_rule(self):
+        cfg = replace(OFF, rules=(Rule("H", "dsl", True, "when hour < 7 go valar"),))
+        f = Features.from_body(body([user("hi")]))
+        f.hour = 3
+        self.assertEqual(route(cfg, f, boom).track, "valar")
+        f.hour = 12
+        self.assertEqual(route(cfg, f, boom).track, "anthropic")
+
     def test_first_match_and_explanation(self):
         d = self.go(OFF, [user("#execution")])
         self.assertEqual(d.reason, "rule:Tags in your message:2")

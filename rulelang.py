@@ -3,7 +3,8 @@ import re
 from dataclasses import dataclass
 
 FIELDS = {"text": "text", "tag": "tags", "tier": "word", "model": "text",
-          "tokens": "number", "subagent": "bool", "servertool": "bool", "label": "word"}
+          "tokens": "number", "subagent": "bool", "servertool": "bool", "label": "word",
+          "session": "word", "hour": "number"}
 KEYWORDS = {"when", "go", "and", "or", "not", "is", "contains", "matches"}
 _TOK = re.compile(r'\s*(?:(?P<op>>=|<=|>|<)|(?P<par>[()])|(?P<word>#?[A-Za-z0-9_.-]+)|(?P<str>")|(?P<re>/))')
 MAX_TERMS = 200  # comparisons + nots per line; keeps evaluate's recursion far from Python's limit
@@ -169,6 +170,17 @@ class _P:
         if typ == "tags":
             val = val.lstrip("#")
         return ("cmp", field, o, val.lower())
+
+
+def parse_cond(text):
+    """One condition tree from a single line, or None when blank. Same grammar as between `when` and `go`."""
+    if not text.strip():
+        return None
+    p = _P(_lex(text, 1), 1)
+    c = p.or_()
+    if p.peek():
+        p.err("unexpected text after condition")
+    return c
 
 
 def parse(src):

@@ -157,7 +157,7 @@ def track_window(model: str, ds: Downstream) -> str | None:
 
 
 class Features:
-    def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None):
+    def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None, session=None, hour=None):
         self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
         self.step = step  # the tool results this request carries back (display only; routing uses text)
         self.prompt = untagged(text)  # uncapped and as sent upstream (no leading tags), for display
