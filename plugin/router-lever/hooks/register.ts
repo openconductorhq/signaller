@@ -32,8 +32,10 @@ const rename = async ($: EngineInterface, name: string): Promise<string | null> 
 }
 
 // a settings form: "<downstream> [<tier>] window|model <value>", or "<downstream> reset". Downstream,
-// tier and key match without case; the value keeps its case, model ids are case-sensitive.
-const TAIL = '([a-z0-9_-]+)(?:\\s+(fable|opus|sonnet|haiku))?\\s+(?:(window|model)\\s+(\\S+)|(reset))'
+// tier and key match without case; the value keeps its case, model ids are case-sensitive. The value ends
+// before trailing punctuation (a sentence's "." is not part of a model id) and "reset" must be a whole
+// word ("resetting" is not a settings form).
+const TAIL = '([a-z0-9_-]+)(?:\\s+(fable|opus|sonnet|haiku))?\\s+(?:(window|model)\\s+(\\S+?)(?=[.,;:!?)]*(?:\\s|$))[.,;:!?)]*|(reset)(?![a-z0-9_-]))'
 const FORM = new RegExp(`^${TAIL}$`, 'i') // the command's arguments, and the tool's settings input
 const form = (m: RegExpExecArray): Form => {
   const ds = m[1]!.toLowerCase()
@@ -54,12 +56,15 @@ const granted: string[] = []
 const grantedSettings: string[] = []
 const GRANT = /(?:^|\s)\/router\s+([a-z0-9_-]+)/gi
 const GRANT_SETTINGS = new RegExp(`(?:^|\\s)\\/router\\s+${TAIL}`, 'gi') // the same form, as typed in a prompt
+// "/router <downstream> reset…" with more than the word "reset" there is a settings attempt that grants nothing
+const RESETISH = /(?:^|\s)\/router\s+[a-z0-9_-]+(?:\s+(?:fable|opus|sonnet|haiku))?\s+reset[a-z0-9_-]*/gi
 const grant = (text: string) => {
   const settingsForms = new Set<number>()
   for (const m of text.matchAll(GRANT_SETTINGS)) {
     settingsForms.add(m.index!) // both regexes start at the same place: the "/router" they share
     grantedSettings.push(canon(form(m)))
   }
+  for (const m of text.matchAll(RESETISH)) settingsForms.add(m.index!) // "resetting" and friends: an attempt, no grant
   for (const m of text.matchAll(GRANT)) {
     if (settingsForms.has(m.index!)) continue // that "/router <word>" was the start of a settings form
     granted.push(m[1]!.toLowerCase()) // checked against the router's modes when used: they may not be known yet

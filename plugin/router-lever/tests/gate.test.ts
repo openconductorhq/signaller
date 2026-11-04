@@ -50,7 +50,7 @@ test('the settings form is gated like the lever: one write per typed /router, of
       const b = JSON.parse(body)
       return { value: { ok: true, status: 200, text: JSON.stringify({
         lines: b.reset ? [] : [{ when: '', downstream: b.downstream, tier: b.tier ?? null, set: b.set, value: b.value }],
-        collisions: [{ line: 2, by: 1, text: 'line 2 is shadowed by line 1' }],
+        collisions: [{ line: 2, by: 1, text: 'line 2 overlaps line 1 (line 1 wins where both match)' }],
       }) } }
     }
     return { value: { ok: true, status: 200, text: LEVER } }
@@ -63,7 +63,7 @@ test('the settings form is gated like the lever: one write per typed /router, of
   const ok = await $.tool.call({ tool: TOOL, settings: 'valar window priority' })
   expect(ok.deny).toBeUndefined()
   expect(ok.result).toContain('claude-router: valar window priority for this session')
-  expect(ok.result).toContain('line 2 is shadowed by line 1')
+  expect(ok.result).toContain('line 2 overlaps line 1 (line 1 wins where both match)')
   expect((await $.tool.call({ tool: TOOL, settings: 'valar window priority' })).deny).toContain('Not setting')  // used up
 
   await $.prompt.submit({ text: 'do /router valar window standard' })  // a different value grants only itself
@@ -117,4 +117,25 @@ test('modes come from the router: a downstream id works, a removed one is unknow
   await $.prompt.submit({ text: 'do /router lemmi' })
   expect((await $.tool.call({ tool: TOOL, lever: 'lemmi' })).deny).toBeUndefined()
   expect((await $.tool.call({ tool: TOOL, lever: 'local' })).deny).toContain('Unknown lever')
+})
+
+test('a settings value stops before trailing punctuation, and reset is a whole word', async ($, on) => {
+  const puts: string[] = []
+  await stub($, on, (e) => {
+    const body = e.init?.method === 'PUT' ? String(e.init.body) : ''
+    if (body.includes('"downstream"')) {
+      puts.push(body)
+      return { value: { ok: true, status: 200, text: JSON.stringify({ lines: [], collisions: [] }) } }
+    }
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+
+  await $.prompt.submit({ text: 'please /router valar model glm-5.4.' })
+  const ok = await $.tool.call({ tool: TOOL, settings: 'valar model glm-5.4' })
+  expect(ok.deny).toBeUndefined()
+  expect(JSON.parse(puts[puts.length - 1]!).value).toBe('glm-5.4')  // the sentence's "." is not part of the value
+
+  await $.prompt.submit({ text: '/router valar resetting' })  // "resetting" is not "reset": nothing is granted
+  expect((await $.tool.call({ tool: TOOL, settings: 'valar reset' })).deny).toContain('Not setting')
+  expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')
 })
