@@ -6,14 +6,14 @@ import sys
 from routing import tier_of
 
 VALAR_TIERS = {"realtime": "asap", "priority": "priority", "standard": "standard"}  # flex/batch: never sent
-_SONNET = {"in": 2.0, "out": 10.0, "cache_read": 0.20, "cache_write": 2.5}
-# USD per 1M tokens. Cache write = 1.25 x input.
+_SONNET = {"in": 2.0, "out": 10.0, "cache_read": 0.20, "cache_write": 2.5, "cache_write_1h": 4.0}
+# USD per 1M tokens. Cache write = 1.25 x input (5-minute entries), 2 x input (1-hour entries).
 # ponytail: Haiku's higher rate for >100K-token prompts is ignored; api_cost is an estimate.
 DEFAULT_ANTHROPIC = {
-    "fable": {"in": 10.0, "out": 50.0, "cache_read": 0.25, "cache_write": 12.5},
-    "opus": {"in": 4.0, "out": 20.0, "cache_read": 0.20, "cache_write": 5.0},
+    "fable": {"in": 10.0, "out": 50.0, "cache_read": 0.25, "cache_write": 12.5, "cache_write_1h": 20.0},
+    "opus": {"in": 4.0, "out": 20.0, "cache_read": 0.20, "cache_write": 5.0, "cache_write_1h": 8.0},
     "sonnet": _SONNET,
-    "haiku": {"in": 0.10, "out": 0.50, "cache_read": 0.01, "cache_write": 0.125},
+    "haiku": {"in": 0.10, "out": 0.50, "cache_read": 0.01, "cache_write": 0.125, "cache_write_1h": 0.2},
     "other": dict(_SONNET),
 }
 KEYS = ("in", "out", "cache_read", "cache_write")
@@ -73,10 +73,15 @@ class Prices:
         if ds.kind == "valar":
             p = self.listed.get(ds.id, {}).get(model_out, {}).get(window)
             return (u[0] * p[0] + u[2] * p[1] + u[1] * p[2]) / 1e6 if p else None  # Valar cache writes are free
+        # ponytail: generic downstreams price 1h writes at their one cache_write rate
         return sum(x * ds.prices[k] for x, k in zip(u, KEYS)) / 1e6 if ds.prices else None
 
     def api_cost(self, model_in: str, usage: dict) -> float | None:
         if all(usage.get(k) is None for k in KEYS):
             return None
         row = self.anthropic.get(tier_of(model_in)) or self.anthropic["sonnet"]
-        return sum((usage.get(k) or 0) * row[k] for k in KEYS) / 1e6
+        w = usage.get("cache_write") or 0
+        h = min(usage.get("cache_write_1h") or 0, w)
+        return ((usage.get("in") or 0) * row["in"] + (usage.get("out") or 0) * row["out"]
+                + (usage.get("cache_read") or 0) * row["cache_read"]
+                + (w - h) * row["cache_write"] + h * row.get("cache_write_1h", 2 * row["in"])) / 1e6

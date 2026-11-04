@@ -64,6 +64,21 @@ class PricesTest(unittest.TestCase):
             json.dump({**prices.DEFAULT_ANTHROPIC, "opus": {"in": 1, "out": 0, "cache_read": 0, "cache_write": 0}}, f)
         self.assertAlmostEqual(Prices(self.dir).api_cost("claude-opus-5-5", {"in": M, "out": M}), 1.0)
 
+    def test_api_cost_1h(self):
+        self.assertAlmostEqual(self.p.api_cost("claude-opus-5-5", {"cache_write": M, "cache_write_1h": M}), 8.0)
+        self.assertAlmostEqual(self.p.api_cost("claude-opus-5-5", {"cache_write": M}), 5.0)
+        self.assertAlmostEqual(self.p.api_cost("claude-opus-5-5", {"cache_write": M, "cache_write_1h": M / 2}), 6.5)
+
+    def test_api_cost_1h_clamped(self):
+        self.assertAlmostEqual(self.p.api_cost("claude-opus-5-5", {"cache_write": M, "cache_write_1h": 3 * M}), 8.0)
+
+    def test_old_prices_json_gets_1h(self):
+        with open(os.path.join(self.dir, "prices.json"), "w") as f:
+            json.dump({"opus": {"in": 4.0, "out": 20.0, "cache_read": 0.2, "cache_write": 5.0}}, f)
+        p = Prices(self.dir)
+        self.assertEqual(p.anthropic["opus"]["cache_write_1h"], 8.0)
+        self.assertEqual(p.anthropic["fable"]["cache_write_1h"], 20.0)
+
     def test_unreadable_prices_json_defaults(self):
         with open(os.path.join(self.dir, "prices.json"), "w") as f:
             f.write("{nope")

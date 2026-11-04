@@ -62,6 +62,9 @@ class AnswerCapture:
                           ("cache_read", "cache_read_input_tokens"), ("cache_write", "cache_creation_input_tokens")):
             if isinstance(u.get(key), int):
                 self.usage[name] = u[key]
+        cc = u.get("cache_creation")
+        if isinstance(cc, dict) and isinstance(cc.get("ephemeral_1h_input_tokens"), int):
+            self.usage["cache_write_1h"] = cc["ephemeral_1h_input_tokens"]
 
     def _event(self, e):
         k = e.get("type")

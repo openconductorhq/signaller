@@ -417,7 +417,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         "model_in": model, "model_out": out_model, "status": status, "ttfb_ms": ttfb if ttfb is not None else ms,
                         "ms": ms, "stream": int(stream), "preview": f.text[:120], "prompt": f.prompt, "turn_id": turn_id,
                         "session_id": sid, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
-                        "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"), "window": window,
+                        "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
+                        "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window,
                         "cost": cost, "api_cost": api_cost})
                     app.recent.append((f, d, rid))
                 shown_reason = '"%s"' % reason if re.search(r"\s", reason) else reason

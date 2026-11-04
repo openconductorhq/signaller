@@ -204,6 +204,8 @@ def test_old_db_gets_columns(tmp_path):
     c = sqlite3.connect(p)
     assert "session_id" in [r[1] for r in c.execute("PRAGMA table_info(turns)")]
     assert "shadow_cost" in [r[1] for r in c.execute("PRAGMA table_info(pairs)")]
+    assert "cache_write_1h_tok" in [r[1] for r in c.execute("PRAGMA table_info(requests)")]
+    assert s.request(1)["cache_write_1h_tok"] is None
     c.close()
 
 

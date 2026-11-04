@@ -82,7 +82,7 @@ class FakeHandler(BaseHTTPRequestHandler):
                 return
             if b"USAGE" in body:
                 self.wfile.write(b'data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1,'
-                                 b'"cache_read_input_tokens":5,"cache_creation_input_tokens":2}}}\n\n'
+                                 b'"cache_read_input_tokens":5,"cache_creation_input_tokens":2,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":2}}}}\n\n'
                                  b'data: {"type":"message_delta","delta":{},"usage":{"output_tokens":7}}\n\n')
                 return
             for i in range(3):
@@ -349,6 +349,7 @@ class ProxyTest(unittest.TestCase):
         ok = sorted(self.app.store.departures(), key=lambda r: r["id"])
         self.assertEqual([r["session_id"] for r in ok], ["S1", None, "S1"])
         self.assertEqual([ok[0][k] for k in ("in_tok", "out_tok", "cache_read_tok", "cache_write_tok")], [10, 7, 5, 2])
+        self.assertEqual(ok[0]["cache_write_1h_tok"], 2)
         self.assertEqual(ok[1]["in_tok"], 10)
         self.assertEqual((ok[2]["status"], ok[2]["in_tok"], ok[2]["out_tok"]), (529, None, None))
 
@@ -360,7 +361,7 @@ class ProxyTest(unittest.TestCase):
         self.logged(2)
         self.app.store.close()
         v, a = sorted(self.app.store.departures(), key=lambda r: r["id"])
-        api = (10 * 2 + 7 * 10 + 5 * 0.2 + 2 * 2.5) / 1e6  # sonnet row
+        api = (10 * 2 + 7 * 10 + 5 * 0.2 + 2 * 4.0) / 1e6  # sonnet row, the 2 cache writes are 1-hour
         self.assertIsNone(v["cost"])
         self.assertAlmostEqual(v["api_cost"], api)
         self.assertEqual(a["cost"], 0.0)
