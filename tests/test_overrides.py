@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 
 from overrides import (Setting, collisions, describe, prune, reset_session, resolve,
                         session_ids, settings_from_json, settings_to_json, upsert_session)
@@ -53,17 +54,22 @@ class ResolveTests(unittest.TestCase):
 class CollisionTests(unittest.TestCase):
     def test_collisions(self):
         flagged = collisions((line("hour < 7"), line("hour >= 5", value="standard")))
-        self.assertEqual(flagged, [{"line": 2, "by": 1, "text": "line 2 is shadowed by line 1 at hours 5–6"}])
+        self.assertEqual(flagged, [{"line": 2, "by": 1,
+                                    "text": "line 2 overlaps line 1 (line 1 wins where both match) at hours 5–6"}])
         self.assertEqual(collisions((line("hour < 7"), line("hour >= 7", value="standard"))), [])
         self.assertEqual(collisions((line("hour >= 22 or hour < 6", value="standard"), line("hour >= 22 or hour < 6"))),
-                         [{"line": 2, "by": 1, "text": "line 2 is shadowed by line 1 at hours 0–5, 22–23"}])
+                         [{"line": 2, "by": 1,
+                           "text": "line 2 overlaps line 1 (line 1 wins where both match) at hours 0–5, 22–23"}])
         self.assertEqual(collisions((line("session is a"), line("session is b", value="standard"))), [])
         self.assertEqual(collisions((line(""), line("session is b", value="standard"))),
-                         [{"line": 2, "by": 1, "text": "line 2 is shadowed by line 1"}])
+                         [{"line": 2, "by": 1,
+                           "text": "line 2 overlaps line 1 (line 1 wins where both match)"}])
         self.assertEqual(collisions((line("hour < 7"), line("hour < 9", value="standard"),
                                      line("hour < 8", value="priority"))),
-                         [{"line": 2, "by": 1, "text": "line 2 is shadowed by line 1 at hours 0–6"},
-                          {"line": 3, "by": 2, "text": "line 3 is shadowed by line 2 at hours 0–7"}])
+                         [{"line": 2, "by": 1,
+                           "text": "line 2 overlaps line 1 (line 1 wins where both match) at hours 0–6"},
+                          {"line": 3, "by": 2,
+                           "text": "line 3 overlaps line 2 (line 2 wins where both match) at hours 0–7"}])
         # a different downstream or key never collides
         self.assertEqual(collisions((line("hour < 7"), line("hour < 9", ds="lemmi", value="standard"))), [])
         self.assertEqual(collisions((line("hour < 7"), line("hour < 9", key="model", value="glm-x"))), [])
@@ -121,21 +127,23 @@ class PruneTests(unittest.TestCase):
         seen = {"old": self.NOW - 8 * 86400, "new": self.NOW - 1 * 86400}
         out = prune(self.lines(), lambda sid: seen.get(sid), self.NOW)
         self.assertEqual(out, (line("session is new"), line("hour < 7")))
-        # an unknown id is kept, a non-session line untouched
+        # an id with no sessions row counts as gone (a forgotten session's row is deleted);
+        # a non-session line is untouched
         out = prune((line("session is ghost"),) + self.lines()[2:], lambda sid: None, self.NOW)
-        self.assertEqual(out, (line("session is ghost"), line("hour < 7")))
+        self.assertEqual(out, (line("hour < 7"),))
 
 
 class UpsertTests(unittest.TestCase):
+    def st(self, sid="s1", ds="valar", tier=None, key="window", value="priority"):
+        return line("session is " + sid, ds=ds, tier=tier, key=key, value=value)
+
     def test_upsert_and_reset(self):
-        s = upsert_session((), "s1", "valar", None, "window", "priority")
-        self.assertEqual(s, (line("session is s1"),))
-        s = upsert_session(s, "s1", "valar", None, "window", "standard")
+        s = upsert_session((), self.st())
+        self.assertEqual(s, (self.st(),))
+        s = upsert_session(s, self.st(value="standard"))
         self.assertEqual((len(s), s[0].value), (1, "standard"))
-        s = upsert_session(s, "s1", "valar", "opus", "window", "priority")
+        s = upsert_session(s, self.st(tier="opus"))
         self.assertEqual(len(s), 2)
-        s = upsert_session(s, "s1", "valar", "opus", "window", None)
-        self.assertEqual((len(s), s[0].tier), (1, None))
         # reset takes the sid out of a two-session line and drops lines left empty
         s = (line("session is s1 or session is s2"),) + s
         s = reset_session(s, "s1", "valar")
@@ -152,19 +160,26 @@ class DescribeTests(unittest.TestCase):
         d = json.loads(describe({"model": ("glm-x", line("", key="model", value="glm-x")), "window": ("priority", s)}))
         self.assertEqual(d, [{"set": "window", "value": "priority", "when": "hour < 7"},
                               {"set": "model", "value": "glm-x", "when": ""}])
+        # a stored `when` is capped at 200 chars
+        d = json.loads(describe({"window": ("priority", replace(s, when="s" * 300))}))
+        self.assertEqual(d[0]["when"], "s" * 200 + "…")
 
 
 class LoadFallbackTests(unittest.TestCase):
     def test_bad_settings_falls_back(self):
         o = config_to_json(DEFAULT_CONFIG)
-        o["settings"] = [dict(when="", downstream="nope", tier=None, set="window", value="priority")]
+        o["lever"] = "anthropic"
+        o["settings"] = [{"when": "hour < 7", "downstream": "valar", "tier": None, "set": "window", "value": "priority"},
+                         {"when": "", "downstream": "nope", "tier": None, "set": "window", "value": "priority"}]
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d)
         with open(os.path.join(d, "console.json"), "w") as f:
             json.dump(o, f)
         cfg, banner = load_console_config(os.path.join(d, "console.json"))
-        self.assertEqual(cfg, DEFAULT_CONFIG)
-        self.assertIn("couldn't be read", banner)
+        # a bad settings line must not reject the whole config: rules and downstreams load intact
+        self.assertEqual((cfg.lever, cfg.settings), ("anthropic", ()))
+        self.assertEqual(cfg.rules, DEFAULT_CONFIG.rules)
+        self.assertIn("Settings lines were ignored: settings line 2", banner)
 
 
 if __name__ == "__main__":

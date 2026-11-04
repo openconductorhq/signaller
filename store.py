@@ -131,9 +131,18 @@ def load_console_config(path):
     except OSError as e:
         return _bad(path, e)
     try:
-        return config_from_json(json.loads(raw)), None
+        obj = json.loads(raw)
     except ValueError as e:  # JSONDecodeError is a ValueError
         return _bad(path, e)
+    try:
+        return config_from_json(obj), None
+    except ValueError as e:
+        if not isinstance(obj, dict):
+            return _bad(path, e)
+        try:  # a bad settings line must not reject the whole config (a stale config PUT still 400s on it)
+            return config_from_json({**obj, "settings": []}), "Settings lines were ignored: %s." % e
+        except ValueError:
+            return _bad(path, e)
 
 
 def _bad(path, err):
@@ -185,7 +194,7 @@ class Store:
         for t, cols in COLS.items():
             have = {r[1] for r in c.execute("PRAGMA table_info(%s)" % t)}
             types = {"in_tok": "INTEGER", "out_tok": "INTEGER", "cache_read_tok": "INTEGER", "cache_write_tok": "INTEGER", "cache_write_1h_tok": "INTEGER",
-                     "cost": "REAL", "api_cost": "REAL", "shadow_cost": "REAL", "id": "INTEGER", "ts": "REAL"}
+                     "cost": "REAL", "api_cost": "REAL", "shadow_cost": "REAL", "id": "INTEGER", "ts": "REAL", "override": "TEXT"}
             for col in cols.split():
                 if col not in have:
                     c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (t, col, types.get(col, "TEXT")))
@@ -431,10 +440,12 @@ class Store:
         return out
 
     def session_last_seen(self, ids):
-        """id -> last_ts for the given session ids, matched exactly (the index, not lower(id)): ids arrive lowered,
-        as settings lines hold them, so they hit."""
-        rows = self._all("SELECT id, last_ts FROM sessions WHERE id IN (%s)" % ",".join("?" * len(ids)), ids)
-        return {r["id"]: r["last_ts"] for r in rows if r["last_ts"] is not None}
+        """id -> last_ts for the given session ids, keyed lowered (settings lines hold lowered ids; the rows keep
+        them as Claude Code sent them), matched case-insensitively."""
+        # ponytail: lower(id) can't use the index; a small table scanned hourly is cheaper than a lowered column
+        rows = self._all("SELECT id, last_ts FROM sessions WHERE lower(id) IN (%s)" % ",".join("?" * len(ids)),
+                         [i.lower() for i in ids])
+        return {r["id"].lower(): r["last_ts"] for r in rows if r["last_ts"] is not None}
 
     def turn(self, turn_id):
         r = self._all("SELECT * FROM turns WHERE id=?", (turn_id,))

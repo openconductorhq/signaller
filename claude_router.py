@@ -141,6 +141,11 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
                 out_model, changed = applied["model"][0], True
             if "window" in applied:
                 window = applied["window"][0]
+    if ds.kind == "valar" and window and (listed := app.prices.listed.get(ds.id, {}).get(out_model)):
+        # a model without the window the router is about to send falls back to Now, the same rule the Tracks
+        # row applies; a model Valar hasn't priced (no listed windows) goes out as set
+        if window not in listed:
+            window = "asap"
     if changed:
         req["model"] = out_model
     if window:
@@ -196,6 +201,9 @@ class App:
                                                  % ", ".join(self.routing.migrated_off)]))
         self._rlock = threading.Lock()
         self.session_levers = {}  # session id -> lever /router chose for that session only
+        self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
+        self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
+        self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
         self.keys = Keys(config_dir)
         self.seed()
         self.classifier = Classifier(self._classifier_upstream)
@@ -258,27 +266,47 @@ class App:
     def set_settings_for_session(self, sid: str, ds_id: str, tier: str | None, key: str, value: str | None,
                                  reset: bool = False) -> None:
         """Set (or with reset, clear) one session's settings lines, under the lock. ValueError if the line about to
-        be written wouldn't load (upsert_session itself doesn't validate); nothing is saved then."""
+        be written wouldn't load (the Setting is built and validated first); nothing is saved then."""
         with self._rlock:
-            if not reset:
-                overrides.setting_from_json({"when": "session is %s" % sid.lower(), "downstream": ds_id, "tier": tier,
-                                              "set": key, "value": value}, self.routing.downstreams, 1)
-            st = overrides.reset_session(self.routing.settings, sid, ds_id) if reset else \
-                overrides.upsert_session(self.routing.settings, sid, ds_id, tier, key, value)
-            self._put(replace(self.routing, settings=st))
+            st = None if reset else overrides.setting_from_json(
+                {"when": "session is %s" % sid.lower(), "downstream": ds_id, "tier": tier, "set": key, "value": value},
+                self.routing.downstreams, 1)
+            new = overrides.reset_session(self.routing.settings, sid, ds_id) if reset else \
+                overrides.upsert_session(self.routing.settings, st)
+            self._put(replace(self.routing, settings=new))
 
     def prune_settings(self) -> None:
-        """Drop session ids not seen for a week from settings lines. Never raises; saves only when something went."""
+        """Drop session ids not seen for a week (no sessions row counts as gone too) from settings lines.
+        Never raises; saves only when something went."""
         try:
-            ids = {i for s in self.routing.settings if (lines := overrides.session_ids(s)) for i in lines}
-            if isinstance(self.store, NullStore) or not ids:
-                return
-            last = self.store.session_last_seen(sorted(ids))
-            new = overrides.prune(self.routing.settings, last.get, time.time())
-            if new != self.routing.settings:
-                self.set_routing(replace(self.routing, settings=new))
+            with self._rlock:  # read, prune and put in one go: no read-modify-write race with set_settings_for_session
+                ids = {i for s in self.routing.settings if (lines := overrides.session_ids(s)) for i in lines}
+                if isinstance(self.store, NullStore) or not ids:
+                    return
+                last = self.store.session_last_seen(sorted(ids))
+                new = overrides.prune(self.routing.settings, last.get, time.time())
+                if new != self.routing.settings:
+                    self._put(replace(self.routing, settings=new))
         except Exception as e:
             print("settings prune failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+
+    def collisions(self):
+        """Settings-line collisions, memoised per settings tuple: the console's 1-second poll would recompute."""
+        key, val = self._collisions
+        if key is not self.routing.settings:
+            key, val = self.routing.settings, overrides.collisions(self.routing.settings)
+            self._collisions = (key, val)
+        return val
+
+    def hour_of(self, turn_key, hour):
+        """The hour a turn runs at: pinned at its first request, so a tool loop crossing an hour boundary doesn't
+        switch model mid-turn."""
+        # ponytail: 512 live turns, oldest inserted dropped; a turn outliving them re-pins at a later boundary
+        if turn_key not in self._turn_hours:
+            self._turn_hours[turn_key] = hour
+            if len(self._turn_hours) > 512:
+                self._turn_hours.popitem(last=False)
+        return self._turn_hours[turn_key]
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
         # ponytail: memory only, a restart drops them (the status line shows it); one small entry per session that used /router
@@ -293,6 +321,7 @@ class App:
 
     def _put(self, new: RoutingConfig) -> None:  # caller holds _rlock
         save_console_config(os.path.join(self.config_dir, "console.json"), new)
+        self.rev += 1  # a page holding an older whole-config copy must not overwrite this
         self.routing = new  # single reference assignment; requests read it once
 
     def add_downstream(self, d: dict, key: str) -> Downstream:
@@ -380,7 +409,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             try:  # a bad saved config must answer, not drop the connection; never guess a track
                 f = Features.from_body(body, req) if is_routed(self.command, self.path) else None
                 if f is not None:
-                    f.session, f.hour = any_sid, time.localtime(t0).tm_hour
+                    f.session, f.hour = any_sid, app.hour_of(f.turn_key, time.localtime(t0).tm_hour)
                 d = decide_route(routing, f, app.classifier) if f else None
             except Exception as e:
                 self._error(500, "claude-router: routing failed")

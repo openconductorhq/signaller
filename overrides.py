@@ -121,7 +121,7 @@ def _ranges(hours):
 
 
 def collisions(settings):
-    """Lines that can never fire because an earlier line already matched: {"line": j, "by": i, "text": str}."""
+    """Lines an earlier line beats where both match: {"line": j, "by": i, "text": str}."""
     ids = [session_ids(st) for st in settings]
     hours = [_hset(st.cond) if _hour_only(st.cond) else None for st in settings]
     out = []
@@ -140,7 +140,8 @@ def collisions(settings):
                 continue
             else:
                 when = ""
-            out.append({"line": j + 1, "by": i + 1, "text": f"line {j + 1} is shadowed by line {i + 1}{when}"})
+            out.append({"line": j + 1, "by": i + 1,
+                        "text": f"line {j + 1} overlaps line {i + 1} (line {i + 1} wins where both match){when}"})
     return out
 
 
@@ -164,25 +165,25 @@ def _drop_ids(settings, gone):
 
 
 def prune(settings, last_seen, now, days=7):
-    """Drop ids last seen more than `days` ago from session lines; a line left with no ids goes."""
-    # ponytail: an id with unknown last_seen is kept; guessing needs the store, which prune stays clear of
-    return _drop_ids(settings, lambda st, i: last_seen(i) is not None and now - last_seen(i) > days * 86400)
+    """Drop ids not seen for `days` from session lines; a line left with no ids goes. An id with no sessions row
+    counts as gone too (a session forgotten via the console's chip has its row deleted; ids written by /router
+    or the picker always have one)."""
+    return _drop_ids(settings, lambda st, i: (t := last_seen(i)) is None or now - t > days * 86400)
 
 
-def upsert_session(settings, sid, ds_id, tier, key, value):
-    """Set one session's value: replace the `session is <sid>` line in place, or insert it at the top. None removes."""
-    sid = sid.lower()
+def upsert_session(settings, st):
+    """Set one session's value (st: a validated Setting whose condition is only `session is <sid>`):
+    replace that session's line in place, or insert the Setting at the top."""
+    sid = next(iter(session_ids(st)))
 
-    def match(st):
-        return st.downstream == ds_id and st.tier == tier and st.key == key and session_ids(st) == frozenset((sid,))
+    def match(s):
+        return s.downstream == st.downstream and s.tier == st.tier and s.key == st.key \
+            and session_ids(s) == frozenset((sid,))
 
-    if value is None:
-        return tuple(st for st in settings if not match(st))
-    hit = next((n for n, st in enumerate(settings) if match(st)), None)
+    hit = next((n for n, s in enumerate(settings) if match(s)), None)
     if hit is None:
-        when = f"session is {sid}"
-        return (Setting(when, parse_cond(when), ds_id, tier, key, value),) + tuple(settings)
-    return tuple(settings[:hit]) + (replace(settings[hit], value=value),) + tuple(settings[hit + 1:])
+        return (st,) + tuple(settings)
+    return tuple(settings[:hit]) + (replace(settings[hit], value=st.value),) + tuple(settings[hit + 1:])
 
 
 def reset_session(settings, sid, ds_id):
@@ -195,5 +196,6 @@ def describe(applied):
     """What resolve() picked, as JSON for the row's override column; None when nothing applied."""
     if not applied:
         return None
-    return json.dumps([{"set": k, "value": applied[k][0], "when": applied[k][1].when}
+    cut = lambda w: w if len(w) <= 200 else w[:200] + "…"  # a `when` this long is display text, not a condition
+    return json.dumps([{"set": k, "value": applied[k][0], "when": cut(applied[k][1].when)}
                        for k in ("window", "model") if k in applied])
