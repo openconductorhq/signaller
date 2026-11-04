@@ -294,6 +294,8 @@ the span are remembered in the browser.
   - **Paging:** 200 load at first; "Load older" pages back to the start of the
     span.
   - **Heading:** shows how many requests the span holds.
+  - **Latency:** each row shows the request's total time under its reason;
+    hover it for the time to first byte.
   - **Tool-loop steps:** Claude Code sends one request per step of a turn, each
     carrying the same prompt. A step's row starts with `↳` and shows the tool
     results it sends back (`↳ Bash: 12 passed · Read: store.py`) instead of
@@ -311,6 +313,10 @@ the span are remembered in the browser.
     they count as $0 and show as unpriced.
   - **Cache:** each card's token line ends with the share of input read from
     cache (`· 98% cached`); hover it for the full split.
+  - **Latency:** each card (Anthropic and every downstream) shows the median
+    time to first byte and total time over the span, and how many requests
+    that covers. Only answered (2xx) requests count; comparison copies don't.
+    Hover it for the means.
   - **Savings:** "≈", what the downstream requests would have cost on Anthropic
     minus what they cost. It is an estimate because other models count tokens
     differently. Side-by-side copies count in cost but not in savings.
