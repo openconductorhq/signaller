@@ -129,8 +129,9 @@ A fresh config ships these rules:
 | Model the request asked for | opus or fable → Anthropic; sonnet, haiku or other → Valar |
 
 **Tags** match whole words, case-insensitive:
-- **Where:** only at the very start of the prompt (`#execution #local fix it`).
-  A `#planning` later in the text, or in a pasted log, is just text.
+- **Where:** only at the very start of the prompt (`#execution fix it`, or
+  several: `#execution #both fix it`). A `#planning` later in the text, or in
+  a pasted log, is just text.
 - **Stripped:** the router removes the leading tags before forwarding, so no
   upstream sees them. A prompt that is only tags is sent as is.
 - **Skipped text:** text inside `<system-reminder>` and messages that hold only
@@ -148,8 +149,8 @@ A fresh config ships these rules:
   never falls back to another track.
 
 **Logging:** each request is one line on stderr:
-`time route= reason= model=in[→out] status= ms= stream=`. Bodies, prompts and
-keys are never logged.
+`time route= reason= model=in[→out] status= ms= stream= shadow=`. Bodies,
+prompts and keys are never logged.
 
 ### Rule language
 
@@ -293,8 +294,14 @@ the span are remembered in the browser.
   - **Paging:** 200 load at first; "Load older" pages back to the start of the
     span.
   - **Heading:** shows how many requests the span holds.
+  - **Tool-loop steps:** Claude Code sends one request per step of a turn, each
+    carrying the same prompt. A step's row starts with `↳` and shows the tool
+    results it sends back (`↳ Bash: 12 passed · Read: store.py`) instead of
+    repeating the prompt. Routing still goes by the prompt.
   - **Opening a request:** shows which rule decided, the models, status,
-    timing, and what it cost on the track it went to.
+    timing, tokens (uncached, read from cache, written to cache, and how many
+    writes were 1-hour), and what it cost on the track it went to. A step also
+    shows the tool results it sent back, above the prompt it's working on.
 - **Side by side:** follows the pick only.
 - **Cost:**
   - **Anthropic:** what the traffic would cost at API prices, even on a flat
@@ -302,6 +309,8 @@ the span are remembered in the browser.
   - **Valar:** priced from its own `/v1/models` prices.
   - **Other downstreams:** priced from the prices you gave them. With none,
     they count as $0 and show as unpriced.
+  - **Cache:** each card's token line ends with the share of input read from
+    cache (`· 98% cached`); hover it for the full split.
   - **Savings:** "≈", what the downstream requests would have cost on Anthropic
     minus what they cost. It is an estimate because other models count tokens
     differently. Side-by-side copies count in cost but not in savings.
@@ -331,7 +340,8 @@ the span are remembered in the browser.
 which is the `stats` volume in Docker.
 - **What it holds:** per request, the routing decision, models, tokens and
   cost. It also stores the latest user message in full, saved as compressed
-  edits of earlier ones from the same session, and the doubled answers. Never
+  edits of earlier ones from the same session, the first 600 characters of the
+  tool results each tool-loop step sends back, and the doubled answers. Never
   headers or keys.
 - **Retention:** requests are pruned after 30 days. Pairs and verdicts stay
   until "Forget all pairs".
@@ -362,6 +372,12 @@ conversation. The router does no history cleaning.
   switch, start a new one.
 - **Doubled copies:** one that Anthropic rejects only shows up as an error on
   its pair.
+
+**Images on a text-only model:** a downstream model that takes no images (such
+as Valar's `zai-org/GLM-5.3`) answers 400 "this model does not support image
+input" once the conversation holds a screenshot. The router doesn't swap
+models for it. Send that turn to Anthropic (no `#execution`, or
+`/router anthropic`), or map the tier to a model that takes images.
 
 ## Development
 

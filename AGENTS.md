@@ -40,9 +40,28 @@ breaks.
 - **To repair it:** stop the router and copy the files out. Run `sqlite3 <copy>
   ".recover" | sqlite3 recovered.db` on the copy, check the counts, put the
   result back in the volume, then start the router.
+- **Adding a column:** put it in the fresh-database `SCHEMA`, in `COLS` and in
+  the `_migrate` types map, so old databases get it on open. No backfills.
 - **All writes go through the store's single writer thread** (`Store._q`).
   Anything that deletes or rewrites rows, like `forget_session`, goes through
   that queue so it can't race the prompt delta chain.
+
+## Routing invariants
+
+- **Routing reads the latest human text** (`latest_human_text`), never the
+  last message. In a tool loop that text is the same on every step, so the
+  turn, its tags, the classifier cache and `turn_key` all hold for the whole
+  turn. Step-only details (`Features.step`) are for display.
+- **Tags** count only at the very start of the prompt (`lead_tags`), and
+  `strip_lead_tags` removes them from every user prompt before the body goes
+  anywhere, the doubling shadow included. Keep that step before doubling.
+- **The body is rewritten only when something changes** (leading tags, a
+  downstream's model name, Valar's tool fixes): `req` is edited and
+  re-serialised once. An untouched Anthropic request goes out byte for byte.
+- **Prices:** Anthropic rates are per tier in `prices.DEFAULT_ANTHROPIC`. A new
+  key there must load from an old `prices.json` (`load()` merges defaults).
+  Downstream prices stay at the four `PRICE_KEYS`. Valar is priced from its
+  `/v1/models` list, per the window the router sent.
 
 ## Secrets
 
@@ -53,7 +72,7 @@ breaks.
   print them. To check which variables one sets, print names only:
   `grep -oE '^[A-Z_]+=' file`.
 - **What is never logged:** request bodies, prompts, headers or keys. A log
-  line is `route= reason= model= status= ms= stream=` and nothing more.
+  line is `route= reason= model= status= ms= stream= shadow=` and nothing more.
 
 ## Code conventions
 
@@ -81,7 +100,7 @@ breaks.
 ## Tests
 
 ```
-pytest -q tests                        # must stay green; about 230 tests, under 20 s
+pytest -q tests                        # must stay green; about 240 tests, under 20 s
 claude plugin test plugin/router-lever # the plugin's gate test
 node --check ui/app.js                 # the console has no unit tests; at least parse it
 ```
