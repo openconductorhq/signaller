@@ -104,6 +104,14 @@ class CaptureTest(unittest.TestCase):
                                       "output_tokens": 5,
                                       "usage": {"in": 3, "out": 5, "cache_read": None, "cache_write": None}})
 
+    def test_usage_1h_split(self):
+        c = AnswerCapture("text/event-stream")
+        u = {"input_tokens": 10, "cache_read_input_tokens": 5, "cache_creation_input_tokens": 5,
+             "cache_creation": {"ephemeral_5m_input_tokens": 2, "ephemeral_1h_input_tokens": 3}, "output_tokens": 1}
+        c.feed(sse({"type": "message_start", "message": {"usage": u}},
+                   {"type": "message_delta", "delta": {}, "usage": {"output_tokens": 7}}))
+        self.assertEqual(c.result()["usage"], {"in": 10, "out": 7, "cache_read": 5, "cache_write": 5, "cache_write_1h": 3})
+
     def test_usage_sse_and_json(self):
         want = {"in": 10, "out": 7, "cache_read": 5, "cache_write": 2}
         u = {"input_tokens": 10, "cache_read_input_tokens": 5, "cache_creation_input_tokens": 2}

@@ -319,6 +319,9 @@ the span are remembered in the browser.
   prices (refreshed at startup and hourly).
 - `prices.json`: Anthropic API prices per tier, used for the "at API prices"
   figures. It is written with defaults on first run; edit it if prices change.
+  Each tier also has `cache_write_1h`, the rate for 1-hour cache writes (2 times
+  input by default; 5-minute writes use `cache_write`, 1.25 times). A missing
+  key falls back to the built-in default, and it doesn't follow an edited `in`.
 
 **`stats.db`** is the SQLite stats database. It lives in `CLAUDE_ROUTER_STATS_DIR`,
 which is the `stats` volume in Docker.

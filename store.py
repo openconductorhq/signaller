@@ -21,7 +21,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,
   explanation TEXT, model_in TEXT, model_out TEXT, status INTEGER, ttfb_ms INTEGER, ms INTEGER,
   stream INTEGER, preview TEXT, turn_id TEXT, session_id TEXT, in_tok INTEGER, out_tok INTEGER,
-  cache_read_tok INTEGER, cache_write_tok INTEGER, window TEXT, cost REAL, api_cost REAL, prompt_hash TEXT);
+  cache_read_tok INTEGER, cache_write_tok INTEGER, cache_write_1h_tok INTEGER, window TEXT, cost REAL, api_cost REAL, prompt_hash TEXT);
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
 CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY, ts REAL, preview TEXT, verdict TEXT, session_id TEXT);
 CREATE TABLE IF NOT EXISTS pairs(id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT, request_id INTEGER,
@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS prompts_base ON prompts(base);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT, branch TEXT, first_ts REAL, last_ts REAL, name TEXT);
 """
 COLS = {
-    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok window cost api_cost prompt_hash",
+    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok cache_write_1h_tok window cost api_cost prompt_hash",
     "turns": "id ts preview verdict session_id",
     "pairs": "turn_id request_id step served_track shadow_track served shadow shadow_cost",
 }
@@ -188,7 +188,7 @@ class Store:
         """Old databases lack the newer columns; add them (CREATE TABLE IF NOT EXISTS doesn't)."""
         for t, cols in COLS.items():
             have = {r[1] for r in c.execute("PRAGMA table_info(%s)" % t)}
-            types = {"in_tok": "INTEGER", "out_tok": "INTEGER", "cache_read_tok": "INTEGER", "cache_write_tok": "INTEGER",
+            types = {"in_tok": "INTEGER", "out_tok": "INTEGER", "cache_read_tok": "INTEGER", "cache_write_tok": "INTEGER", "cache_write_1h_tok": "INTEGER",
                      "cost": "REAL", "api_cost": "REAL", "shadow_cost": "REAL", "id": "INTEGER", "ts": "REAL"}
             for col in cols.split():
                 if col not in have:
@@ -370,6 +370,7 @@ class Store:
         span = [t0, t1]
         by = {r["track"]: r for r in self._all(
             "SELECT track, COUNT(*) n, COALESCE(SUM(in_tok),0) i, COALESCE(SUM(out_tok),0) o, COALESCE(SUM(cost),0) cost, "
+            "COALESCE(SUM(cache_read_tok),0) cr, COALESCE(SUM(cache_write_tok),0) cw, "
             "COALESCE(SUM(api_cost),0) api, "
             "COALESCE(SUM(CASE WHEN cost IS NOT NULL THEN api_cost - cost END),0) sav, "
             "COALESCE(SUM(CASE WHEN cost IS NOT NULL THEN api_cost END),0) papi, SUM(cost IS NULL AND COALESCE(in_tok, out_tok, cache_read_tok, cache_write_tok) IS NOT NULL) nocost FROM requests WHERE %s AND ts BETWEEN ? AND ? GROUP BY track" % sc,
@@ -378,13 +379,13 @@ class Store:
             "SELECT p.shadow_track, COALESCE(SUM(p.shadow_cost),0) c FROM pairs p JOIN requests r ON r.id=p.request_id "
             "WHERE %s AND r.ts BETWEEN ? AND ? GROUP BY p.shadow_track" % self._sess(sessions, "r.session_id")[0], sa + span)}
         total = sum(r["n"] for r in by.values())
-        z = {"n": 0, "i": 0, "o": 0, "cost": 0, "api": 0, "sav": 0, "papi": 0, "nocost": 0}
+        z = {"n": 0, "i": 0, "o": 0, "cr": 0, "cw": 0, "cost": 0, "api": 0, "sav": 0, "papi": 0, "nocost": 0}
         out_tracks = {}
         for t in dict.fromkeys([*tracks, *by]):
             r = by.get(t, z)
             out_tracks[t] = {"n": r["n"], "pct": round(100 * r["n"] / total) if total else 0, "in": r["i"], "out": r["o"],
                              "cost": r["cost"], "api_cost": r["api"], "unpriced": r["nocost"] if t != "anthropic" else 0,
-                             "comparisons": comp.get(t, 0)}
+                             "comparisons": comp.get(t, 0), "cache_read": r["cr"], "cache_write": r["cw"]}
             if t not in tracks:
                 out_tracks[t]["removed"] = True
         rules = {}
@@ -505,7 +506,7 @@ class NullStore:
     def list_sessions(self, *a, **k): return []
     def first_ts(self, *a): return 0
     def summary(self, sessions, t0, t1, now, tracks):
-        t = {"n": 0, "pct": 0, "in": 0, "out": 0, "cost": 0, "api_cost": 0, "unpriced": 0, "comparisons": 0}
+        t = {"n": 0, "pct": 0, "in": 0, "out": 0, "cost": 0, "api_cost": 0, "unpriced": 0, "comparisons": 0, "cache_read": 0, "cache_write": 0}
         return {"total": 0, "per_minute": 0, "tracks": {k: dict(t) for k in tracks}, "savings": 0, "saved_would": 0, "rules": {}, "errors": 0,
                 "tally": dict.fromkeys([*tracks, "same"], 0)}
     def turn(self, turn_id): return None
