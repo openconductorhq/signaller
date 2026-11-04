@@ -195,6 +195,7 @@ async function tick() {
 
 function applyState(st) {
   S = st;
+  if (st.clock) $("sttClock").textContent = "Router time " + hm(st.clock.now) + " (" + st.clock.tz + ")";  // a wrong zone must be visible
   const n = view.pick.length;  // departures list the span's requests, paged back with "Load older"
   $("depFrom").textContent = `${plural(st.summary.total, "request")}${n ? ` from the ${n === 1 ? "picked session" : n + " picked sessions"}` : ""} · ${spanText()}`;
   const s = st.stats;
@@ -215,8 +216,8 @@ function applyState(st) {
   if (t) t.textContent = tallyText();
   // don't clobber a field the user is typing in, or an optimistic edit in flight
   const f = document.activeElement;
-  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f));
-  if (!saving && !typing) { cfg = st.config; renderConfig(); }
+  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f));
+  if (!saving && !typing) { cfg = st.config; renderConfig(); }  // again after a save: fresh collisions, fresh settings
   if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /router at any time
 }
 // Downstream POST/DELETE/key PUT change the config on the server: reload it (even after an error or a timeout),
@@ -289,7 +290,7 @@ function renderConfig(force) {
   const key = JSON.stringify(cfg);
   if (!cfg || (key === rendered && !force)) return;
   rendered = key;
-  keepFocus(() => { renderYard(); renderLever(); renderTracks(); renderRules(); renderOtherwise(); renderStrip(); });
+  keepFocus(() => { renderYard(); renderLever(); renderTracks(); renderRules(); renderOtherwise(); renderSettings(); renderStrip(); });
 }
 
 /* lever: Anthropic, Rules, then one button per downstream */
@@ -677,6 +678,72 @@ function renderOtherwise() {
     "aria-pressed": String(t === cfg.otherwise), onclick: () => t !== cfg.otherwise && save({ ...cfg, otherwise: t }, $("rbErr")) }, NAME(t))));
 }
 
+/* settings lines: window and model overrides by session and hour, per downstream */
+// Rendered from renderConfig only (a render here needs MODELS/WINDOWS too), and it runs after every save.
+function renderSettings() {
+  if (!cfg) return;
+  const cl = (S && S.collisions) || [], clash = new Set(cl.flatMap((c) => [c.line, c.by]));
+  keepFocus(() => {
+    $("stLines").replaceChildren(...cfg.settings.map((s, i) => stLine(s, i, clash.has(i + 1))));
+    $("stAdd").disabled = !DS().length;
+    $("stColl").hidden = !cl.length;
+    $("stColl").replaceChildren(...cl.map((c) => el("li", {}, c.text)));
+  });
+}
+const setSettings = (settings) => save({ ...cfg, settings }, $("sttErr"));
+const setLine = (i, patch) => setSettings(cfg.settings.map((s, k) => k === i ? { ...s, ...patch } : s));
+const moveLine = (from, to) => {
+  const rs = [...cfg.settings];
+  if (to < 0 || to >= rs.length || from === to) return;
+  rs.splice(to, 0, rs.splice(from, 1)[0]);
+  setSettings(rs);
+};
+// A pick that changes what's valid: a window line needs a valar downstream, an offered window and a real model.
+function setPart(i, patch) {
+  const s = { ...cfg.settings[i], ...patch }, ds = dsOf(s.downstream) || {}, models = ds.models || {};
+  if (ds.kind !== "valar") s.set = "model";
+  if (s.set === "window") {
+    const wins = windowsFor(models[s.tier || "sonnet"]);
+    if (!wins.includes(s.value)) s.value = wins[0] || "asap";
+  } else if (!s.value || Object.keys(WIN).includes(s.value)) {
+    s.value = models[s.tier || "sonnet"] || "";
+  }
+  setLine(i, { ...patch, downstream: s.downstream, set: s.set, value: s.value });  // patch first: a tier/set change must survive the validity fixes
+}
+function stLine(s, i, clash) {
+  const ds = dsOf(s.downstream), valar = !!(ds && ds.kind === "valar"), models = (ds && ds.models) || {}, last = i === cfg.settings.length - 1;
+  const ids = [...s.when.matchAll(/session is (\S+)/gi)].map((m) => m[1]);
+  const sel = (k, v, opts, on) => el("select", { "data-k": k, onchange: (e) => on(e.target.value) },
+    opts.map(([v2, t]) => el("option", { value: v2, selected: v === v2 }, t)));
+  return el("li", { class: "strow" + (clash ? " clash" : ""), "aria-label": `Settings line ${i + 1}: ${s.set} on ${NAME(s.downstream)}` },
+    el("span", { class: "num", "aria-hidden": "true" }, i + 1),
+    el("div", { class: "stbody" },
+      el("div", { class: "stline" },
+        el("input", { class: "whenin", value: s.when, placeholder: "always", spellcheck: "false", autocomplete: "off",
+          "data-k": "sw:" + i, "aria-label": `Condition for settings line ${i + 1}`,
+          onchange: (e) => setLine(i, { when: e.target.value.replace(/\s+$/, "") }) }),
+        sel("sd:" + i, s.downstream, DS().map((d) => [d.id, d.name]), (v) => setPart(i, { downstream: v })),
+        sel("st:" + i, s.tier || "", [["", "every tier"], ...Object.entries(TIER)], (v) => setPart(i, { tier: v || null })),
+        sel("sk:" + i, s.set, [["model", "model"], ...(valar ? [["window", "window"]] : [])], (v) => setPart(i, { set: v })),
+        s.set === "window"
+          ? sel("sv:" + i, s.value, windowsFor(models[s.tier || "sonnet"]).map((w) => [w, WIN[w]]), (v) => setLine(i, { value: v }))
+          : modelPick(s.downstream, s.value, { "data-k": "sv:" + i }, (v) => setLine(i, { value: v })),
+        el("span", { class: "stacts" },
+          el("button", { type: "button", class: "mini", disabled: i === 0, "aria-label": `Move settings line ${i + 1} up`, onclick: () => moveLine(i, i - 1) }, "↑"),
+          el("button", { type: "button", class: "mini", disabled: last, "aria-label": `Move settings line ${i + 1} down`, onclick: () => moveLine(i, i + 1) }, "↓"),
+          el("button", { type: "button", class: "mini del", "aria-label": `Delete settings line ${i + 1}`,
+            onclick: () => setSettings(cfg.settings.filter((_, k) => k !== i)) }, "Delete"))),
+      ids.length ? el("div", { class: "hint shint" }, "sessions: " + ids.map((x) => shortLabel(x)).join(", ")) : null));
+}
+// A new line goes on top, pre-filled with the picked sessions (the same ones the chips show).
+$("stAdd").addEventListener("click", () => {
+  const ds = DS().find((d) => d.kind === "valar") || DS()[0];
+  if (!ds) return;
+  setSettings([{ when: view.pick.filter((x) => x !== "unknown").map((x) => "session is " + x).join(" or "),
+    downstream: ds.id, tier: null, set: ds.kind === "valar" ? "window" : "model",
+    value: ds.kind === "valar" ? "asap" : (ds.models && ds.models.sonnet) || "" }, ...cfg.settings]);
+});
+
 /* doubling strip */
 function renderStrip() {
   const d = cfg.doubling, pct = Math.round(d.rate * 100);
@@ -817,6 +884,14 @@ function shortReason(reason, row) {
   }
   return reason;
 }
+// What a settings line changed on this request, stored as JSON on the row: "window: priority", each line's when in the title.
+function ovr(o) {
+  let list = null;
+  try { list = JSON.parse(o); } catch (_) { return null; }  // unreadable: nothing to show
+  if (!Array.isArray(list) || !list.length) return null;
+  return el("span", { class: "ovr", title: list.map((x) => `${x.set}: ${x.value} · when ${x.when || "always"}`).join("\n") },
+    list.map((x) => x.set + ": " + x.value).join(" · "));
+}
 function why(r) {
   if (isErr(r.status)) {
     // ponytail: "not configured" reads today's key state, not the state when the request ran
@@ -833,7 +908,7 @@ function depRow(r) {
     el("time", { datetime: new Date(r.ts * 1000).toISOString() }, hms(r.ts)),
     el("span", { class: "sw" + (err ? " x" : ""), style: cv(r.track), role: "img", "aria-label": err ? "error" : label(r.track) }),
     el("span", { class: "what" }, el("span", { class: "stag", "data-sid": r.session_id || "" }, shortLabel(r.session_id)), r.preview || "(no text)"),
-    el("span", { class: "why" + (err ? " x" : "") }, why(r), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄"),
+    el("span", { class: "why" + (err ? " x" : "") }, why(r), r.override && ovr(r.override), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄"),
       r.ms != null && el("span", { class: "lat", title: `first byte ${fmtMs(r.ttfb_ms)} · total ${fmtMs(r.ms)}` }, "latency: " + fmtMs(r.ms))));
   const row = el("div", { class: "dep", "data-id": r.id }, head), toggle = () => toggleDep(row, head, r);
   head.addEventListener("click", toggle);

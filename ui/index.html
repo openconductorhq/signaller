@@ -135,6 +135,16 @@
       </div>
     </section>
 
+    <section id="stt" aria-labelledby="sttH">
+      <h2 id="sttH">Settings by session and time</h2>
+      <p class="hint">Override the window or the model a downstream serves, for picked sessions or hours of the day. Checked top to bottom; the first line that matches wins, and a window line plus a model line both apply. Routing and the lever are untouched, and Anthropic is never changed.</p>
+      <p id="sttClock" class="scope"></p>
+      <p id="sttErr" class="err" role="alert" hidden></p>
+      <ol class="stlines" id="stLines"></ol>
+      <button type="button" class="btn" id="stAdd">+ Add line</button>
+      <ul id="stColl" class="stcoll" hidden></ul>
+    </section>
+
     <section class="board" aria-labelledby="depH">
       <h2 id="depH">Departures</h2>
       <p class="hint"><span id="depFrom">Every request</span>, newest first. Open one to see which rule decided.</p>
