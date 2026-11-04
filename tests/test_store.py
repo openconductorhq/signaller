@@ -206,6 +206,8 @@ def test_old_db_gets_columns(tmp_path):
     assert "shadow_cost" in [r[1] for r in c.execute("PRAGMA table_info(pairs)")]
     assert "cache_write_1h_tok" in [r[1] for r in c.execute("PRAGMA table_info(requests)")]
     assert s.request(1)["cache_write_1h_tok"] is None
+    assert "override" in [r[1] for r in c.execute("PRAGMA table_info(requests)")]
+    assert s.request(1)["override"] is None
     c.close()
 
 

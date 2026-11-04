@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 import claude_router
+import overrides
 from claude_router import App, Config, make_server
 from doubling import AnswerCapture, Doubler
 from routing import DEFAULT_CONFIG, Doubling, Features
@@ -388,6 +389,15 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(r["shadow"]["usage"], {"in": 3, "out": 5, "cache_read": None, "cache_write": None})
         self.assertAlmostEqual(r["shadow"]["cost"], (3 + 5 * 2) / 1e6)
         self.assertAlmostEqual(r["shadow_cost"], r["shadow"]["cost"])
+
+    def test_shadow_applies_settings(self):
+        r = self.doubling()
+        self.app.routing = replace(r, settings=overrides.settings_from_json(
+            [{"when": "session is s-one", "downstream": "valar", "tier": None, "set": "window", "value": "priority"}],
+            r.downstreams))
+        self.post(msg("shadow turn", "claude-sonnet-5-5"), headers={**HDRS, "X-Claude-Code-Session-Id": "s-one"})
+        self.pairs(1)
+        self.assertEqual(self.v.seen[0][1].get_all("X-Valar-Completion-Window"), ["priority"])
 
     def test_shadow_valar_not_configured_on_pair(self):
         self.srv.shutdown()

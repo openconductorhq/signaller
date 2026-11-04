@@ -17,6 +17,7 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
 import console
+import overrides  # after routing: overrides imports routing
 from sessions import SessionDirectory, claude_dir
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
@@ -116,23 +117,35 @@ def hoist_inline_tools(req: dict) -> bool:
     return changed
 
 
-def prepare(app: "App", track: str, model: str, req, headers, routing=None):
+def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=None):
     """A request as it leaves for a track, the served one and its shadow alike:
-    (name, base, key, ds, headers, out_model, window, changed). On a downstream the model is renamed, Valar's tool
-    fix applied, the client's credentials swapped for the downstream's key and the window set. `req` (when a dict)
-    is edited in place; `changed` says it must be re-serialised."""
+    (name, base, key, ds, headers, out_model, window, changed, override). On a downstream the model is renamed, Valar's
+    tool fix applied, the client's credentials swapped for the downstream's key, the window set and the matching
+    settings lines applied. `req` (when a dict) is edited in place; `changed` says it must be re-serialised."""
     name, base, key, ds = upstream(app, track, routing)
     if not ds:
-        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, False
+        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, False, None
     out_model = track_model(model, ds)
     hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
     changed = isinstance(req, dict) and (hoisted or out_model != model)
+    headers, window = upstream_headers(headers, key), track_window(model, ds)
+    override = None
+    if f is not None:
+        try:
+            applied = overrides.resolve((routing or app.routing).settings, ds.id, model, lambda n: f.get(n, lambda: "none"))
+            override = overrides.describe(applied)
+        except Exception as e:
+            print("settings failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+        else:
+            if "model" in applied:
+                out_model, changed = applied["model"][0], True
+            if "window" in applied:
+                window = applied["window"][0]
     if changed:
         req["model"] = out_model
-    headers, window = upstream_headers(headers, key), track_window(model, ds)
     if window:
         headers.append((WINDOW_HEADER, window))
-    return name, base, key, ds, headers, out_model, window, changed
+    return name, base, key, ds, headers, out_model, window, changed, override
 
 
 RETRY_DELAYS = (0.5, 1.5, 3)  # seconds before each retry of a connection failure (~5 s of blips covered)
@@ -373,7 +386,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
             except Exception:
                 pass
-            name, base, key, ds, headers, out_model, window, changed = prepare(app, route, model, req, self.headers.items(), routing)
+            name, base, key, ds, headers, out_model, window, changed, override = prepare(app, route, model, req, self.headers.items(), routing, f)
             if stripped or changed:
                 body = json.dumps(req).encode()
             if out_model != model:
@@ -446,7 +459,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         "ms": ms, "stream": int(stream), "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120], "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
                         "session_id": sid, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
                         "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
-                        "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window,
+                        "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window, "override": override,
                         "cost": cost, "api_cost": api_cost})
                     f.prompt = None  # recorded; the preview deque keeps only the capped text
                     app.recent.append((f, d, rid))

@@ -13,6 +13,7 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import claude_router
+import overrides
 from claude_router import App, Config, make_server, upstream_headers
 from routing import DEFAULT_CONFIG, Downstream
 
@@ -548,6 +549,32 @@ class ProxyTest(unittest.TestCase):
             self.port = self.srv.server_address[1]
             self.assertEqual(self.post(body_for("claude-opus-5-5"))[0], 200)
             self.assertEqual(self.app.store.departures(), [])
+
+    def set_settings(self, *lines):
+        self.app.routing = replace(self.app.routing, settings=overrides.settings_from_json(list(lines), self.app.routing.downstreams))
+
+    def test_settings_line_sets_window_and_model(self):
+        self.set_settings({"when": "session is s-one", "downstream": "valar", "tier": None, "set": "window", "value": "priority"},
+                          {"when": "", "downstream": "valar", "tier": None, "set": "model", "value": "glm-x"})
+        self.post(body_for("claude-sonnet-5-5"), {**HDRS, "X-Claude-Code-Session-Id": "s-one"})
+        _, path, h, got = self.v.seen[0]
+        self.assertEqual(h.get_all("X-Valar-Completion-Window"), ["priority"])
+        self.assertEqual(json.loads(got)["model"], "glm-x")
+        self.logged(1)
+        self.app.store.close()
+        r = self.app.store.departures()[0]
+        self.assertEqual(r["window"], "priority")
+        self.assertEqual(json.loads(r["override"]), [{"set": "window", "value": "priority", "when": "session is s-one"},
+                                                     {"set": "model", "value": "glm-x", "when": ""}])
+        self.post(body_for("claude-sonnet-5-5"), {**HDRS, "X-Claude-Code-Session-Id": "s-two"})
+        self.assertEqual(self.v.seen[1][2].get_all("X-Valar-Completion-Window"), ["asap"])  # the downstream default
+
+    def test_anthropic_untouched_by_settings(self):
+        self.set_settings({"when": "", "downstream": "valar", "tier": None, "set": "model", "value": "glm-x"})
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        body = body_for("claude-opus-5-5")
+        self.post(body)
+        self.assertEqual(self.a.seen[0][3], body)
 
 
 class SeedTest(unittest.TestCase):

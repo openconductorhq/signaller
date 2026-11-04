@@ -22,7 +22,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,
   explanation TEXT, model_in TEXT, model_out TEXT, status INTEGER, ttfb_ms INTEGER, ms INTEGER,
   stream INTEGER, preview TEXT, turn_id TEXT, session_id TEXT, in_tok INTEGER, out_tok INTEGER,
-  cache_read_tok INTEGER, cache_write_tok INTEGER, cache_write_1h_tok INTEGER, window TEXT, step TEXT, cost REAL, api_cost REAL, prompt_hash TEXT);
+  cache_read_tok INTEGER, cache_write_tok INTEGER, cache_write_1h_tok INTEGER, window TEXT, override TEXT, step TEXT, cost REAL, api_cost REAL, prompt_hash TEXT);
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
 CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY, ts REAL, preview TEXT, verdict TEXT, session_id TEXT);
 CREATE TABLE IF NOT EXISTS pairs(id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT, request_id INTEGER,
@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS prompts_base ON prompts(base);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT, branch TEXT, first_ts REAL, last_ts REAL, name TEXT);
 """
 COLS = {
-    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok cache_write_1h_tok window step cost api_cost prompt_hash",
+    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok cache_write_1h_tok window override step cost api_cost prompt_hash",
     "turns": "id ts preview verdict session_id",
     "pairs": "turn_id request_id step served_track shadow_track served shadow shadow_cost",
 }

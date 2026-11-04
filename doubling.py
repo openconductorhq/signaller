@@ -183,7 +183,7 @@ class Doubler:
             self.inflight[track] = self.inflight.get(track, 0) + 1
         headers = list(headers)  # credentials stay in memory only, in this thread
         try:
-            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, app, routing), daemon=True).start()
+            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, app, routing, f), daemon=True).start()
         except Exception as e:  # e.g. can't start new thread: give the slot back, the served request goes on
             self._release(track)
             h.shadow({**AnswerCapture.EMPTY, "skipped": "error", "status": None, "ttfb_ms": None, "ms": None,
@@ -196,7 +196,7 @@ class Doubler:
             self.inflight[track] -= 1
         self.caps[track].release()
 
-    def _run(self, h, track, method, path, headers, body, app, routing=None):
+    def _run(self, h, track, method, path, headers, body, app, routing=None, f=None):
         from claude_router import prepare  # late: claude_router imports this module
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
         model_out, window, ds = None, None, None
@@ -204,7 +204,7 @@ class Doubler:
             req = json.loads(body)
             req["stream"] = False
             strip_lead_tags(req)
-            name, base, key, ds, headers, model_out, window, _ = prepare(app, track, str(req.get("model", "")), req, headers, routing)
+            name, base, key, ds, headers, model_out, window, _, _ = prepare(app, track, str(req.get("model", "")), req, headers, routing, f)
             if track != "anthropic" and not key:
                 raise NotConfigured("%s has no key" % name)
             if window:
