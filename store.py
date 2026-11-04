@@ -22,7 +22,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,
   explanation TEXT, model_in TEXT, model_out TEXT, status INTEGER, ttfb_ms INTEGER, ms INTEGER,
   stream INTEGER, preview TEXT, turn_id TEXT, session_id TEXT, in_tok INTEGER, out_tok INTEGER,
-  cache_read_tok INTEGER, cache_write_tok INTEGER, cache_write_1h_tok INTEGER, window TEXT, step TEXT, cost REAL, api_cost REAL, prompt_hash TEXT);
+  cache_read_tok INTEGER, cache_write_tok INTEGER, cache_write_1h_tok INTEGER, window TEXT, override TEXT, step TEXT, cost REAL, api_cost REAL, prompt_hash TEXT);
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
 CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY, ts REAL, preview TEXT, verdict TEXT, session_id TEXT);
 CREATE TABLE IF NOT EXISTS pairs(id INTEGER PRIMARY KEY AUTOINCREMENT, turn_id TEXT, request_id INTEGER,
@@ -32,7 +32,7 @@ CREATE INDEX IF NOT EXISTS prompts_base ON prompts(base);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, cwd TEXT, branch TEXT, first_ts REAL, last_ts REAL, name TEXT);
 """
 COLS = {
-    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok cache_write_1h_tok window step cost api_cost prompt_hash",
+    "requests": "id ts track reason explanation model_in model_out status ttfb_ms ms stream preview turn_id session_id in_tok out_tok cache_read_tok cache_write_tok cache_write_1h_tok window override step cost api_cost prompt_hash",
     "turns": "id ts preview verdict session_id",
     "pairs": "turn_id request_id step served_track shadow_track served shadow shadow_cost",
 }
@@ -131,9 +131,18 @@ def load_console_config(path):
     except OSError as e:
         return _bad(path, e)
     try:
-        return config_from_json(json.loads(raw)), None
+        obj = json.loads(raw)
     except ValueError as e:  # JSONDecodeError is a ValueError
         return _bad(path, e)
+    try:
+        return config_from_json(obj), None
+    except ValueError as e:
+        if not isinstance(obj, dict):
+            return _bad(path, e)
+        try:  # a bad settings line must not reject the whole config (a stale config PUT still 400s on it)
+            return config_from_json({**obj, "settings": []}), "Settings lines were ignored: %s." % e
+        except ValueError:
+            return _bad(path, e)
 
 
 def _bad(path, err):
@@ -185,7 +194,7 @@ class Store:
         for t, cols in COLS.items():
             have = {r[1] for r in c.execute("PRAGMA table_info(%s)" % t)}
             types = {"in_tok": "INTEGER", "out_tok": "INTEGER", "cache_read_tok": "INTEGER", "cache_write_tok": "INTEGER", "cache_write_1h_tok": "INTEGER",
-                     "cost": "REAL", "api_cost": "REAL", "shadow_cost": "REAL", "id": "INTEGER", "ts": "REAL"}
+                     "cost": "REAL", "api_cost": "REAL", "shadow_cost": "REAL", "id": "INTEGER", "ts": "REAL", "override": "TEXT"}
             for col in cols.split():
                 if col not in have:
                     c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (t, col, types.get(col, "TEXT")))
@@ -430,6 +439,14 @@ class Store:
             out.append(r)
         return out
 
+    def session_last_seen(self, ids):
+        """id -> last_ts for the given session ids, keyed lowered (settings lines hold lowered ids; the rows keep
+        them as Claude Code sent them), matched case-insensitively."""
+        # ponytail: lower(id) can't use the index; a small table scanned hourly is cheaper than a lowered column
+        rows = self._all("SELECT id, last_ts FROM sessions WHERE lower(id) IN (%s)" % ",".join("?" * len(ids)),
+                         [i.lower() for i in ids])
+        return {r["id"].lower(): r["last_ts"] for r in rows if r["last_ts"] is not None}
+
     def turn(self, turn_id):
         r = self._all("SELECT * FROM turns WHERE id=?", (turn_id,))
         if not r:
@@ -520,6 +537,7 @@ class NullStore:
     def set_session_name(self, sid, name): pass
     def forget_session(self, sid): return True
     def reprice(self, prices, downstreams): return 0
+    def session_last_seen(self, ids): return {}
 
     def stats(self, now, tracks):
         return {**{"%s_pct" % t: 0 for t in tracks}, "last_hour_total": 0, "per_minute": 0, "errors_last_hour": 0,

@@ -14,5 +14,8 @@ services:
       # stats.db on the VM's own disk: SQLite over a host-shared folder (virtiofs) corrupted it twice
       - stats:/data
       - ${HOME}/.claude/projects:/claude/projects:ro  # session labels (cwd, branch) only
+# The settings lines' `hour` field and the console clock read the container's local time: set
+# TZ=<Area/City> in the env file (under Colima the host's /etc/localtime isn't shared into the VM;
+# an unset or empty TZ means UTC). The console shows the zone the router uses.
 volumes:
   stats:

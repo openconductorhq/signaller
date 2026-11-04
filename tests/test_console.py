@@ -13,6 +13,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
+import overrides
 from claude_router import App, Config
 from routing import MODEL_TIERS
 from tests import test_proxy
@@ -44,6 +45,11 @@ class ConsoleTest(Fixture):
     def js(self, *a, **k):
         r, d = self.req(*a, **k)
         return r.status, json.loads(d)
+
+    def put_cfg(self, **patch):
+        """A whole-config PUT from the page's point of view: the config it last rendered, plus that rev."""
+        st = self.js("GET", "/ui/api/state")[1]
+        return self.js("PUT", "/ui/api/config", {**st["config"], **patch, "rev": st["config_rev"]})
 
     def test_page_served_with_csp(self):
         r, d = self.req("GET", "/ui", origin=None)
@@ -80,21 +86,34 @@ class ConsoleTest(Fixture):
             self.assertEqual(self.req("GET", p, origin=None)[0].status, 404, p)
 
     def test_put_invalid_config_unchanged(self):
-        cfg = self.js("GET", "/ui/api/state")[1]["config"]
-        s, j = self.js("PUT", "/ui/api/config", {**cfg, "lever": "bogus"})
+        s, j = self.put_cfg(lever="bogus")
         self.assertEqual((s, j["error"]), (400, "lever: no downstream named bogus"))
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["config"]["lever"], "rules")
 
     def test_put_nested_rule_is_400(self):
         cfg = self.js("GET", "/ui/api/state")[1]["config"]
         cfg["rules"][0]["text"] = "when " + "(" * 5000 + "tier is opus" + ")" * 5000 + " go local"
-        self.assertEqual(self.js("PUT", "/ui/api/config", cfg)[0], 400)
+        self.assertEqual(self.js("PUT", "/ui/api/config",
+                                 {**cfg, "rev": self.js("GET", "/ui/api/state")[1]["config_rev"]})[0], 400)
 
     def test_put_config_applies(self):
-        cfg = self.js("GET", "/ui/api/state")[1]["config"]
-        self.assertEqual(self.js("PUT", "/ui/api/config", {**cfg, "lever": "valar"})[0], 200)
+        self.assertEqual(self.put_cfg(lever="valar")[0], 200)
         self.post(body_for("claude-opus-5-5"))
         self.assertEqual((len(self.v.seen), len(self.a.seen)), (1, 0))
+
+    def test_config_put_with_a_stale_rev_is_409(self):
+        st = self.js("GET", "/ui/api/state")[1]
+        cfg, rev = st["config"], st["config_rev"]
+        # a settings line written by /router after the page rendered: the page's copy is stale
+        self.app.set_settings_for_session("sx", "valar", None, "window", "priority")
+        s, j = self.js("PUT", "/ui/api/config", {**cfg, "lever": "anthropic", "rev": rev})
+        self.assertEqual((s, j["error"]), (409, "the config changed elsewhere; reloaded"))
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["config"]["lever"], "rules")  # nothing changed
+        s, j = self.put_cfg(lever="anthropic")  # a fresh rev goes through
+        self.assertEqual((s, self.js("GET", "/ui/api/state")[1]["config"]["lever"]), (200, "anthropic"))
+        self.assertEqual(j["rev"], self.js("GET", "/ui/api/state")[1]["config_rev"])
+        self.assertEqual(self.req("PUT", "/ui/api/config", cfg, origin=None)[0].status, 403)
+        self.assertEqual(self.js("PUT", "/ui/api/config", {**cfg, "rev": rev})[0], 409)  # missing/stale rev, no origin issues
 
     def test_preview(self):
         self.post(body_for("claude-opus-5-5"))
@@ -180,6 +199,65 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": 5})[0], 400)
         self.assertEqual(self.req("PUT", "/ui/api/name", {"session": "s1", "name": "x"}, origin=None)[0].status, 403)
 
+    def test_session_settings_endpoint(self):
+        put = lambda b: self.js("PUT", "/ui/api/settings", b)
+        line = {"session": "S1", "downstream": "valar", "tier": None, "set": "window", "value": "priority"}
+        s, j = put(line)
+        self.assertEqual(s, 200)
+        self.assertEqual([(x["when"], x["value"]) for x in j["lines"]], [("session is s1", "priority")])  # the sid is lowered
+        self.assertEqual(j["collisions"], [])
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["config"]["settings"][0]["value"], "priority")  # the line is at the top
+        s, j = put({**line, "value": "asap"})  # the same key updates in place, so still one line
+        self.assertEqual([x["value"] for x in j["lines"]], ["asap"])
+        s, j = put({"session": "s1", "downstream": "valar", "reset": True})
+        self.assertEqual((s, j["lines"]), (200, []))
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["config"]["settings"], [])
+        self.assertEqual(self.req("PUT", "/ui/api/settings", line, origin=None)[0].status, 403)
+        self.assertEqual(put({**line, "value": "bogus"})[0], 400)
+        self.assertEqual(put({**line, "set": "junk"})[0], 400)
+        self.assertEqual(put({**line, "tier": "junk"})[0], 400)
+        self.assertEqual(put({**line, "session": "a.b"})[0], 400)
+        self.assertEqual(put({**line, "downstream": "nope"})[0], 400)
+
+    def test_state_has_collisions_and_clock(self):
+        self.app.routing = replace(self.app.routing, settings=overrides.settings_from_json(
+            [{"when": "", "downstream": "valar", "tier": None, "set": "window", "value": "asap"},
+             {"when": "session is s1", "downstream": "valar", "tier": None, "set": "window", "value": "priority"}],
+            self.app.routing.downstreams))
+        before = time.strftime("%H:%M")
+        j = self.js("GET", "/ui/api/state")[1]
+        self.assertEqual([(c["line"], c["by"]) for c in j["collisions"]], [(2, 1)])  # s1's line overlaps the always line
+        self.assertEqual(set(j["clock"]), {"tz", "hm"})
+        self.assertIn(j["clock"]["hm"], {before, time.strftime("%H:%M")})  # the router's own wall clock; a minute may roll between the request and here
+
+    def test_settings_put_returns_only_this_sessions_collisions(self):
+        self.app.routing = replace(self.app.routing, settings=overrides.settings_from_json(
+            [{"when": "", "downstream": "valar", "tier": None, "set": "window", "value": "standard"},
+             {"when": "session is s1", "downstream": "valar", "tier": None, "set": "window", "value": "priority"},
+             {"when": "session is other", "downstream": "valar", "tier": None, "set": "window", "value": "asap"}],
+            self.app.routing.downstreams))
+        s, j = self.js("PUT", "/ui/api/settings", {"session": "s1", "downstream": "valar", "tier": None,
+                                                  "set": "window", "value": "asap"})
+        self.assertEqual(s, 200)
+        # the always line overlaps both session lines; only the one holding s1's own line comes back
+        self.assertEqual([(c["line"], c["by"]) for c in j["collisions"]], [(2, 1)])
+        self.assertIn("overlaps line 1 (line 1 wins where both match)", j["collisions"][0]["text"])
+
+    def test_prune_settings_drops_stale_sessions(self):
+        self.app.store.touch_session("stale", time.time() - 8 * 86400)
+        self.app.store.touch_session("fresh", time.time())
+        self.app.store.close()
+        self.app.routing = replace(self.app.routing, settings=overrides.settings_from_json(
+            [{"when": "session is stale", "downstream": "valar", "tier": None, "set": "window", "value": "priority"},
+             {"when": "session is ghost", "downstream": "valar", "tier": None, "set": "window", "value": "priority"},
+             {"when": "session is fresh", "downstream": "valar", "tier": None, "set": "window", "value": "asap"}],
+            self.app.routing.downstreams))
+        self.app.prune_settings()
+        # ghost has no sessions row (forgotten, or never seen): it counts as gone too
+        self.assertEqual([s.when for s in self.app.routing.settings], ["session is fresh"])
+        with open(os.path.join(self.dir, "console.json")) as f:  # the pruned config was saved
+            self.assertEqual([x["when"] for x in json.load(f)["settings"]], ["session is fresh"])
+
     def test_forget_session(self):
         self.js("PUT", "/ui/api/name", {"session": "s1", "name": "doomed"})
         self.app.sessions._known.add("s1")
@@ -198,7 +276,7 @@ class ConsoleTest(Fixture):
         while not self.app.recent and time.time() - t < 2:
             time.sleep(0.01)
         cfg = self.js("GET", "/ui/api/state")[1]["config"]
-        self.assertEqual(self.js("PUT", "/ui/api/config", {**cfg, "lever": "valar"})[0], 200)
+        self.assertEqual(self.put_cfg(lever="valar")[0], 200)
         rule = {"name": "mig", "text": 'when text contains "migration" go anthropic'}
         j = self.js("POST", "/ui/api/preview", {"rule": rule, "position": 0})[1]
         self.assertEqual((j["matched"], j["changed"]), (1, 1))
@@ -329,7 +407,8 @@ class DownstreamApiTest(Fixture):
         return self.js("POST", "/ui/api/downstreams", d)
 
     def cfg(self):
-        return self.js("GET", "/ui/api/state")[1]["config"]
+        st = self.js("GET", "/ui/api/state")[1]
+        return {**st["config"], "rev": st["config_rev"]}  # what the page sends: its config plus the rev it rendered
 
     def keys_file(self):
         with open(os.path.join(self.dir, "downstreams.keys.json")) as f:
@@ -553,7 +632,7 @@ class MigrationBannerTest(unittest.TestCase):
             app.store.close()
             self.assertIn("Mine", app.banner)
             with open(os.path.join(d, "console.json")) as f:
-                self.assertEqual(json.load(f)["version"], 3)
+                self.assertEqual(json.load(f)["version"], 4)
             again = App(Config("127.0.0.1", 0, "http://a"), d)
             again.store.close()
         self.assertIsNone(again.banner)

@@ -3,7 +3,10 @@ import re
 from dataclasses import dataclass
 
 FIELDS = {"text": "text", "tag": "tags", "tier": "word", "model": "text",
-          "tokens": "number", "subagent": "bool", "servertool": "bool", "label": "word"}
+          "tokens": "number", "subagent": "bool", "servertool": "bool", "label": "word",
+          "session": "word",
+          # ponytail: whole hours only — no minute or day-of-week schedules; add a field when one is needed
+          "hour": "number"}
 KEYWORDS = {"when", "go", "and", "or", "not", "is", "contains", "matches"}
 _TOK = re.compile(r'\s*(?:(?P<op>>=|<=|>|<)|(?P<par>[()])|(?P<word>#?[A-Za-z0-9_.-]+)|(?P<str>")|(?P<re>/))')
 MAX_TERMS = 200  # comparisons + nots per line; keeps evaluate's recursion far from Python's limit
@@ -171,6 +174,17 @@ class _P:
         return ("cmp", field, o, val.lower())
 
 
+def parse_cond(text):
+    """One condition tree from a single line, or None when blank. Same grammar as between `when` and `go`."""
+    if not text.strip():
+        return None
+    p = _P(_lex(text, 1), 1)
+    c = p.or_()
+    if p.peek():
+        p.err("unexpected text after condition")
+    return c
+
+
 def parse(src):
     lines = [(n, s) for n, s in enumerate(src.split("\n"), 1) if s.strip()]
     if not lines:
@@ -213,7 +227,10 @@ def evaluate(cond, get):
     return v in x if o == "contains" else x == v
 
 
+def fields_of(cond):
+    """The field names a condition tree reads."""
+    return {cond[1]} if cond[0] == "cmp" else fields_of(cond[1]) | (fields_of(cond[2]) if len(cond) > 2 else set())
+
+
 def fields_used(lines):
-    def walk(c):
-        return walk(c[1]) | (walk(c[2]) if len(c) > 2 else set()) if c[0] != "cmp" else {c[1]}
-    return set().union(*(walk(l.cond) for l in lines))
+    return set().union(*(fields_of(l.cond) for l in lines))

@@ -75,6 +75,7 @@ These are read from `~/.config/claude-router/env`; `env.example` lists them.
 | `CLAUDE_ROUTER_CONFIG_DIR` | `~/.config/claude-router` | Config files (see [Data](#data)). |
 | `CLAUDE_ROUTER_STATS_DIR` | the config dir | Where `stats.db` lives. The image sets it to `/data` (the `stats` volume). |
 | `VALAR_URL`, `VALAR_API_KEY` | `https://api.valarhq.ai` | Used once, to seed the Valar downstream. |
+| `TZ` | the host's zone | The router's local time: the settings lines' `hour` field and the console clock. In the container set it to an IANA zone (`TZ=Asia/Jerusalem`); the host's `/etc/localtime` isn't shared into the VM under Colima, and an empty or unset `TZ` means UTC. |
 
 `LITELLM_*`, `CLAUDE_ROUTER_LOCAL_SONNET` and `CLAUDE_ROUTER_LOCAL_HAIKU` are no
 longer used. To keep using LiteLLM, add it as a downstream.
@@ -91,14 +92,20 @@ checked every 15 s.
 | `/router rules\|anthropic\|<downstream id>` | Switch this session only; its subagents follow. Other sessions keep the console's lever. |
 | `/router reset` | Go back to the global lever. |
 | `/router name <text>` | Name this session in the console. `/router name` alone clears the name. |
+| `/router <downstream> [<tier>] window\|model <value>` | Set this session's own settings line on a downstream: its completion window (`/router valar window priority`) or the model it serves for a tier (`/router valar sonnet model glm-4.8`; without a tier, every tier). It goes in at the top of the settings list, so it beats schedules. |
+| `/router <downstream> reset` | Clear this session's settings lines for that downstream. |
 
 A session's own lever lives in the router's memory, so a router restart drops
-it.
+it. Settings lines set with `/router` are saved in `console.json`, so they
+survive a restart; a session id unseen for a week — including one the stats
+no longer know at all — is dropped from them.
 
 Claude can switch the lever too, through the plugin's `router_lever` tool, but
 only when you typed `/router <mode>` in a message. That can be "do /router
 anthropic", or a plan with "/router rules" at a later step. Each one you type
-allows one switch to that mode; any other switch is refused.
+allows one switch to that mode; any other switch is refused. Setting this
+session's window or model through the tool needs a typed
+`/router <downstream> [<tier>] window|model <value>` the same way.
 
 The plugin talks to `127.0.0.1:8787` only. Install:
 
@@ -246,6 +253,22 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
   upstream and model are set here too.
 - **Rulebook:** add, edit and switch off rules. A new rule goes on top. Each
   rule shows how many requests it decided in the span.
+- **Settings by session and time:** override the window or the model a
+  downstream serves, for picked sessions or hours of the day. Each line holds a
+  condition (`session is <id>` — pick sessions first and "Add line" fills them
+  in — or `hour >= 0 and hour < 7`; blank means always), a downstream, a tier
+  or every tier, and what it sets: the completion window (Valar-kind
+  downstreams only) or the model name. "+ Add line" starts as a no-op: the
+  sonnet slot's current window or model, until you edit it. Checked top to
+  bottom, first match wins, and a window line plus a model line both apply;
+  the hour is read once per turn, so a turn crossing an hour boundary keeps
+  its hour. Routing, the lever and Anthropic are untouched. The router's own
+  clock shows beside the list, because `hour` is the router's local time (in
+  the container set `TZ` in the env file; see [Environment](#environment)). A
+  line an earlier line beats where both match is listed as a collision — it
+  still saves, since a deliberate override overlaps on purpose. `/router`'s
+  per-session form writes the same lines; a whole-config save that would land
+  on lines written since the page loaded is refused and the page reloads them.
 - **Classifier:** a rule that asks a small model which label the newest human
   message fits, once per turn, cached.
   - **What it calls:** an OpenAI-style `/v1/chat/completions`, so its upstream
@@ -296,6 +319,9 @@ the span are remembered in the browser.
   - **Heading:** shows how many requests the span holds.
   - **Latency:** each row shows the request's total time under its reason;
     hover it for the time to first byte.
+  - **Settings overrides:** a request a settings line changed shows
+    `window: priority` (or the model it was sent to) next to its reason;
+    hover it for the line's condition.
   - **Tool-loop steps:** Claude Code sends one request per step of a turn, each
     carrying the same prompt. A step's row starts with `↳` and shows the tool
     results it sends back (`↳ Bash: 12 passed · Read: store.py`) instead of

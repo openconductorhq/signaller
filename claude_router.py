@@ -17,6 +17,7 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
 import console
+import overrides  # after routing: overrides imports routing
 from sessions import SessionDirectory, claude_dir
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
@@ -116,23 +117,40 @@ def hoist_inline_tools(req: dict) -> bool:
     return changed
 
 
-def prepare(app: "App", track: str, model: str, req, headers, routing=None):
+def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=None):
     """A request as it leaves for a track, the served one and its shadow alike:
-    (name, base, key, ds, headers, out_model, window, changed). On a downstream the model is renamed, Valar's tool
-    fix applied, the client's credentials swapped for the downstream's key and the window set. `req` (when a dict)
-    is edited in place; `changed` says it must be re-serialised."""
+    (name, base, key, ds, headers, out_model, window, changed, override). On a downstream the model is renamed, Valar's
+    tool fix applied, the client's credentials swapped for the downstream's key, the window set and the matching
+    settings lines applied. `req` (when a dict) is edited in place; `changed` says it must be re-serialised."""
     name, base, key, ds = upstream(app, track, routing)
     if not ds:
-        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, False
+        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, False, None
     out_model = track_model(model, ds)
     hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
     changed = isinstance(req, dict) and (hoisted or out_model != model)
+    headers, window = upstream_headers(headers, key), track_window(model, ds)
+    override = None
+    if f is not None and (routing or app.routing).settings:
+        try:
+            applied = overrides.resolve((routing or app.routing).settings, ds.id, model, lambda n: f.get(n, lambda: "none"))
+            override = overrides.describe(applied)
+        except Exception as e:
+            print("settings failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+        else:
+            if "model" in applied:
+                out_model, changed = applied["model"][0], True
+            if "window" in applied:
+                window = applied["window"][0]
+    if ds.kind == "valar" and window and (listed := app.prices.listed.get(ds.id, {}).get(out_model)):
+        # a model without the window the router is about to send falls back to Now, the same rule the Tracks
+        # row applies; a model Valar hasn't priced (no listed windows) goes out as set
+        if window not in listed:
+            window = "asap"
     if changed:
         req["model"] = out_model
-    headers, window = upstream_headers(headers, key), track_window(model, ds)
     if window:
         headers.append((WINDOW_HEADER, window))
-    return name, base, key, ds, headers, out_model, window, changed
+    return name, base, key, ds, headers, out_model, window, changed, override
 
 
 RETRY_DELAYS = (0.5, 1.5, 3)  # seconds before each retry of a connection failure (~5 s of blips covered)
@@ -183,6 +201,9 @@ class App:
                                                  % ", ".join(self.routing.migrated_off)]))
         self._rlock = threading.Lock()
         self.session_levers = {}  # session id -> lever /router chose for that session only
+        self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
+        self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
+        self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
         self.keys = Keys(config_dir)
         self.seed()
         self.classifier = Classifier(self._classifier_upstream)
@@ -238,8 +259,54 @@ class App:
         def loop():
             while True:
                 self.refresh_prices()
+                self.prune_settings()
                 time.sleep(every)
         threading.Thread(target=loop, daemon=True).start()
+
+    def set_settings_for_session(self, sid: str, ds_id: str, tier: str | None, key: str, value: str | None,
+                                 reset: bool = False) -> None:
+        """Set (or with reset, clear) one session's settings lines, under the lock. ValueError if the line about to
+        be written wouldn't load (the Setting is built and validated first); nothing is saved then."""
+        with self._rlock:
+            st = None if reset else overrides.setting_from_json(
+                {"when": "session is %s" % sid.lower(), "downstream": ds_id, "tier": tier, "set": key, "value": value},
+                self.routing.downstreams, 1)
+            new = overrides.reset_session(self.routing.settings, sid, ds_id) if reset else \
+                overrides.upsert_session(self.routing.settings, st)
+            self._put(replace(self.routing, settings=new))
+
+    def prune_settings(self) -> None:
+        """Drop session ids not seen for a week (no sessions row counts as gone too) from settings lines.
+        Never raises; saves only when something went."""
+        try:
+            with self._rlock:  # read, prune and put in one go: no read-modify-write race with set_settings_for_session
+                ids = {i for s in self.routing.settings if (lines := overrides.session_ids(s)) for i in lines}
+                if isinstance(self.store, NullStore) or not ids:
+                    return
+                last = self.store.session_last_seen(sorted(ids))
+                new = overrides.prune(self.routing.settings, last.get, time.time())
+                if new != self.routing.settings:
+                    self._put(replace(self.routing, settings=new))
+        except Exception as e:
+            print("settings prune failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+
+    def collisions(self):
+        """Settings-line collisions, memoised per settings tuple: the console's 1-second poll would recompute."""
+        key, val = self._collisions
+        if key is not self.routing.settings:
+            key, val = self.routing.settings, overrides.collisions(self.routing.settings)
+            self._collisions = (key, val)
+        return val
+
+    def hour_of(self, turn_key, hour):
+        """The hour a turn runs at: pinned at its first request, so a tool loop crossing an hour boundary doesn't
+        switch model mid-turn."""
+        # ponytail: 512 live turns, oldest inserted dropped; a turn outliving them re-pins at a later boundary
+        if turn_key not in self._turn_hours:
+            self._turn_hours[turn_key] = hour
+            if len(self._turn_hours) > 512:
+                self._turn_hours.popitem(last=False)
+        return self._turn_hours[turn_key]
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
         # ponytail: memory only, a restart drops them (the status line shows it); one small entry per session that used /router
@@ -254,6 +321,7 @@ class App:
 
     def _put(self, new: RoutingConfig) -> None:  # caller holds _rlock
         save_console_config(os.path.join(self.config_dir, "console.json"), new)
+        self.rev += 1  # a page holding an older whole-config copy must not overwrite this
         self.routing = new  # single reference assignment; requests read it once
 
     def add_downstream(self, d: dict, key: str) -> Downstream:
@@ -340,6 +408,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
                 f = Features.from_body(body, req) if is_routed(self.command, self.path) else None
+                if f is not None:
+                    f.session, f.hour = any_sid, app.hour_of(f.turn_key, time.localtime(t0).tm_hour)
                 d = decide_route(routing, f, app.classifier) if f else None
             except Exception as e:
                 self._error(500, "claude-router: routing failed")
@@ -371,7 +441,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
             except Exception:
                 pass
-            name, base, key, ds, headers, out_model, window, changed = prepare(app, route, model, req, self.headers.items(), routing)
+            name, base, key, ds, headers, out_model, window, changed, override = prepare(app, route, model, req, self.headers.items(), routing, f)
             if stripped or changed:
                 body = json.dumps(req).encode()
             if out_model != model:
@@ -444,7 +514,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         "ms": ms, "stream": int(stream), "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120], "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
                         "session_id": sid, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
                         "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
-                        "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window,
+                        "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window, "override": override,
                         "cost": cost, "api_cost": api_cost})
                     f.prompt = None  # recorded; the preview deque keeps only the capped text
                     app.recent.append((f, d, rid))
@@ -475,7 +545,7 @@ def main() -> None:
         print("claude-router: config dir unusable: %s" % e, file=sys.stderr)
         sys.exit(2)
     srv = make_server(cfg, app)
-    app.start_price_refresh()
+    app.start_price_refresh()  # its thread also prunes settings on its first pass
     print("listening on %s:%d; anthropic=%s downstreams=%s" % (
         cfg.listen_host, cfg.listen_port, cfg.anthropic_url,
         ", ".join("%s (%s)" % (d.id, "key set" if app.keys.has(d.id) else "no key") for d in app.routing.downstreams)),

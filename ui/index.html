@@ -124,6 +124,8 @@
             <div><code>tokens</code> rough request size (<code>100k</code> works)</div>
             <div><code>subagent</code> yes or no</div>
             <div><code>servertool</code> uses a tool only Anthropic can run (web search…): yes or no</div>
+            <div><code>session</code> the session id</div>
+            <div><code>hour</code> the hour of the request, 0–23</div>
             <div><b>Joining</b> <code>and</code> <code>or</code> <code>not</code> <code>( )</code></div>
             <div><b>Comparing</b> <code>is</code> <code>contains</code> <code>matches /re/i</code> <code>&gt;</code> <code>&lt;</code></div>
             <div><b>Ending</b> <code>go anthropic</code> or <code>go</code> any downstream id: <span id="refIds"></span></div>
@@ -131,6 +133,16 @@
           <p class="hint">One <code>when … go …</code> per line; the first line that matches decides.</p>
         </details>
       </div>
+    </section>
+
+    <section id="stt" aria-labelledby="sttH">
+      <h2 id="sttH">Settings by session and time</h2>
+      <p class="hint">Override the window or the model a downstream serves, for picked sessions or hours of the day. Checked top to bottom; the first line that matches wins, and a window line plus a model line both apply. Routing and the lever are untouched, and Anthropic is never changed.</p>
+      <p id="sttClock" class="scope"></p>
+      <p id="sttErr" class="err" role="alert" hidden></p>
+      <ol class="stlines" id="stLines"></ol>
+      <button type="button" class="btn" id="stAdd">+ Add line</button>
+      <ul id="stColl" class="stcoll" hidden></ul>
     </section>
 
     <section class="board" aria-labelledby="depH">

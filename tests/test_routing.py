@@ -5,8 +5,10 @@ import unittest
 from dataclasses import replace
 
 from claude_router import load_config
+from overrides import Setting
 from routing import (DEFAULT_CONFIG, MODEL_TIERS, ClassResult, Downstream, Features, Rule, latest_tool_results, strip_lead_tags, is_routed, session_of, config_from_json,
                      config_to_json, downstream, references, route, tier_of, track_model, track_window, tracks, valid_id)
+from rulelang import parse_cond
 
 
 def body(messages, model="claude-opus-5-5"):
@@ -147,6 +149,14 @@ class EngineTests(unittest.TestCase):
         d = self.go(replace(DEFAULT_CONFIG, lever="valar"), [user("#plan")])
         self.assertEqual((d.track, d.reason), ("valar", "lever"))
         self.assertEqual(d.explanation, [{"rule": "Lever", "outcome": "sending everything to valar", "decided": True}])
+
+    def test_hour_rule(self):
+        cfg = replace(OFF, rules=(Rule("H", "dsl", True, "when hour < 7 go valar"),))
+        f = Features.from_body(body([user("hi")]))
+        f.hour = 3
+        self.assertEqual(route(cfg, f, boom).track, "valar")
+        f.hour = 12
+        self.assertEqual(route(cfg, f, boom).track, "anthropic")
 
     def test_first_match_and_explanation(self):
         d = self.go(OFF, [user("#execution")])
@@ -313,7 +323,7 @@ class ThreeTrackTests(unittest.TestCase):
         self.assertEqual(c.classifier.labels[0].track, "anthropic")
         self.assertEqual(c.doubling.shadow, {"anthropic": None, "valar": None})
         self.assertEqual(c.rules, DEFAULT_CONFIG.rules)
-        self.assertEqual(config_to_json(c)["version"], 3)
+        self.assertEqual(config_to_json(c)["version"], 4)
 
     def test_windows(self):
         o = config_to_json(DEFAULT_CONFIG)
@@ -353,7 +363,8 @@ class ThreeTrackTests(unittest.TestCase):
 class ConfigJsonTests(unittest.TestCase):
     def test_config_roundtrip(self):
         j = config_to_json(DEFAULT_CONFIG)
-        self.assertEqual(j["version"], 3)
+        self.assertEqual(j["version"], 4)
+        self.assertEqual(j["settings"], [])
         self.assertEqual(config_from_json(json.loads(json.dumps(j))), DEFAULT_CONFIG)
 
     def test_config_errors(self):
@@ -369,7 +380,9 @@ class ConfigJsonTests(unittest.TestCase):
             return with_rules([{**r, **kw} if n == i else r for n, r in enumerate(rules)])
         cl = config_to_json(DEFAULT_CONFIG)["classifier"]
         cases = [
-            (j(version=4), "unsupported config version"),
+            (j(version=5), "unsupported config version"),
+            (j(settings=[{"when": "", "downstream": "nope", "tier": None, "set": "window", "value": "priority"}]),
+             "settings line 1: no downstream named 'nope'"),
             (j(lever="x"), "lever: no downstream named x"),
             (j(classifier={**cl, "threshold": 1.5}), "classifier threshold must be 0\u20131"),
             (j(doubling={**config_to_json(DEFAULT_CONFIG)["doubling"], "rate": 2}), "doubling rate must be 0\u20131"),
@@ -490,7 +503,7 @@ class DownstreamTests(unittest.TestCase):
     def test_v3_round_trip(self):
         for cfg in (DEFAULT_CONFIG, with_lemmi()):
             j = json.loads(json.dumps(config_to_json(cfg)))
-            self.assertEqual(j["version"], 3)
+            self.assertEqual(j["version"], 4)
             self.assertEqual(config_from_json(j), cfg)
 
     def test_unknown_track_in_enabled_rule_rejected(self):
@@ -509,6 +522,26 @@ class DownstreamTests(unittest.TestCase):
         for bad in ("Lemmi", "anthropic", "name", "go", "tier", "a" * 25):
             self.assertIsInstance(valid_id(bad, []), str, bad)
         self.assertIsInstance(valid_id("lemmi", ["lemmi"]), str)
+
+    def test_references_lists_settings_lines(self):
+        cfg = replace(DEFAULT_CONFIG, settings=(Setting("", None, "valar", None, "window", "priority"),
+                                                Setting("hour < 7", parse_cond("hour < 7"), "lemmi", None, "model", "glm-x")))
+        self.assertIn("settings line 1", references(cfg, "valar", {}))
+        self.assertEqual(references(cfg, "lemmi", {})[-1], "settings line 2")
+        self.assertNotIn("settings line 1", references(replace(cfg, settings=()), "valar", {}))
+
+    def test_v3_fixture_loads_with_no_settings(self):
+        with open(os.path.join(os.path.dirname(__file__), "fixtures", "console_v3.json")) as f:
+            cfg = config_from_json(json.load(f))
+        self.assertEqual(cfg.settings, ())
+        self.assertEqual(cfg.downstreams[0].models["sonnet"], "zai-org/GLM-5.3")
+
+    def test_settings_round_trip(self):
+        cfg = replace(DEFAULT_CONFIG, settings=(Setting("hour < 7", parse_cond("hour < 7"), "valar", None, "model", "glm-x"),))
+        j = json.loads(json.dumps(config_to_json(cfg)))
+        self.assertEqual(j["settings"], [{"when": "hour < 7", "downstream": "valar", "tier": None,
+                                           "set": "model", "value": "glm-x"}])
+        self.assertEqual(config_from_json(j), cfg)
 
     def test_references(self):
         rule = Rule("Mine", "dsl", True, "when tag is a go anthropic\nwhen tag is b go lemmi")

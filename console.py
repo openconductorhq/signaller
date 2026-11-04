@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from keys import write_json
 from prices import parse_valar
+import overrides
 from routing import (MAX_DOWNSTREAMS, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, untagged, config_from_json, config_to_json,
                      downstream, route, tracks, valid_id)
 from rulelang import RuleError, parse
@@ -222,12 +223,14 @@ def state(app, query=None):
     if t0 is None:  # whole session
         t0 = app.store.first_ts(ids)
     c, ts = app.cfg, tracks(app.routing)
-    return {"config": config_to_json(app.routing), "stats": app.store.stats(time.time(), ts),
+    return {"config": config_to_json(app.routing), "config_rev": app.rev, "stats": app.store.stats(time.time(), ts),
             "summary": app.store.summary(ids, t0, t1, time.time(), tracks(app.routing)), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
             "downstreams": {d.id: {"key_set": app.keys.has(d.id), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
-            "recent_count": len(app.recent), "session_levers": dict(app.session_levers)}
+            "recent_count": len(app.recent), "session_levers": dict(app.session_levers),
+            "collisions": app.collisions(),
+            "clock": {"tz": time.strftime("%Z"), "hm": time.strftime("%H:%M")}}
 
 
 def api(h, app, method, path, query, body):
@@ -325,7 +328,30 @@ def api(h, app, method, path, query, body):
         name = " ".join((name or "").split())[:80] or None
         st.set_session_name(sid, name)
         return {"session": sid, "name": name}
+    if path == "/ui/api/settings" and method == "PUT":  # one session's window/model overrides on a downstream
+        body = body if isinstance(body, dict) else {}
+        sid, ds = body.get("session"), body.get("downstream")
+        if not _sid_ok(sid):
+            raise Err(400, "session must be a Claude Code session id")
+        if not downstream(app.routing, ds):
+            raise Err(400, "no downstream named %r" % ds)
+        reset = bool(body.get("reset"))
+        try:
+            app.set_settings_for_session(sid, ds, body.get("tier"), body.get("set"), body.get("value"), reset=reset)
+        except ValueError as e:  # setting_from_json judged the changed line; nothing was saved
+            raise Err(400, str(e))
+        low = sid.lower()
+        hits, lines = [], set()
+        for i, s in enumerate(app.routing.settings, 1):
+            if (ids := overrides.session_ids(s)) and low in ids:
+                hits.append(s)
+                lines.add(i)
+        # only this session's own business comes back: collisions its lines are in
+        coll = [c for c in app.collisions() if c["line"] in lines or c["by"] in lines]
+        return {"lines": overrides.settings_to_json(hits), "collisions": coll}
     if path == "/ui/api/config" and method == "PUT":
+        if not isinstance(body, dict) or body.get("rev") != app.rev:
+            raise Err(409, "the config changed elsewhere; reloaded")  # don't erase what /router or prune wrote since
         try:
             new = config_from_json(body)
         except (ValueError, RecursionError) as e:
@@ -338,7 +364,7 @@ def api(h, app, method, path, query, body):
                 st.reprice(app.prices, new.downstreams)
             except Exception as e:
                 print("reprice failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
-        return config_to_json(new)
+        return {**config_to_json(new), "rev": app.rev}
     if path == "/ui/api/downstreams/probe" and method == "POST":
         body = body if isinstance(body, dict) else {}
         key = body.get("key") or ""

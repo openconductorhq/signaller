@@ -129,6 +129,12 @@ MODEL_TIERS = ("fable", "opus", "sonnet", "haiku")
 WINDOWS = ("asap", "priority", "standard")  # Valar completion windows; flex rejects streaming, batch is async: never sent
 
 
+def slot(model: str) -> str:
+    """The tier a request's model uses, mirroring track_window: non-claude (and unmatched claude) models use sonnet's."""
+    t = tier_of(model) if model.startswith("claude-") else "sonnet"
+    return t if t in MODEL_TIERS else "sonnet"
+
+
 @dataclass(frozen=True)
 class Downstream:
     id: str
@@ -145,7 +151,7 @@ def track_model(model: str, ds: Downstream) -> str:
     """The model id a downstream serves for a request's model; non-claude ids pass through."""
     if not model.startswith("claude-"):
         return model
-    return ds.models.get(tier_of(model), ds.models["sonnet"])
+    return ds.models.get(slot(model), ds.models["sonnet"])
 
 
 def track_window(model: str, ds: Downstream) -> str | None:
@@ -153,15 +159,16 @@ def track_window(model: str, ds: Downstream) -> str | None:
     if ds.kind != "valar":
         return None
     w = ds.windows
-    return w.get(tier_of(model), w["sonnet"]) if model.startswith("claude-") else w["sonnet"]
+    return w.get(slot(model), w["sonnet"])
 
 
 class Features:
-    def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None):
+    def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None, session=None, hour=None):
         self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
         self.step = step  # the tool results this request carries back (display only; routing uses text)
         self.prompt = untagged(text)  # uncapped and as sent upstream (no leading tags), for display
         self.tier, self.subagent, self.turn_key = tier_of(model), subagent, turn_key
+        self.session, self.hour = session, hour
 
     @classmethod
     def from_body(cls, body: bytes, req=None):
@@ -247,6 +254,7 @@ class RoutingConfig:
     downstreams: tuple[Downstream, ...]
     seeded: bool = False  # the valar downstream got its url/key from the env once
     migrated_off: tuple[str, ...] = field(default=(), compare=False)  # rules the v2→v3 migration switched off; banner only
+    settings: tuple = ()  # overrides.Setting lines; last so positional constructors stay valid
 
 
 def tracks(cfg: RoutingConfig) -> tuple[str, ...]:
@@ -273,6 +281,7 @@ def references(cfg: RoutingConfig, id: str, session_levers: Mapping[str, str]) -
     out = ["the lever"] if cfg.lever == id else []
     out += [f"session {sid[:8]}'s lever" for sid, lv in session_levers.items() if lv == id]
     out += [f"rule '{r.name}' line {n}" for r in cfg.rules if r.enabled for n, ln in enumerate(r.lines, 1) if ln.track == id]
+    out += [f"settings line {n}" for n, s in enumerate(cfg.settings, 1) if s.downstream == id]
     out += ["Otherwise"] if cfg.otherwise == id else []
     out += [f"classifier label '{l.name}'" for l in cfg.classifier.labels if l.track == id]
     out += ["classifier upstream"] if cfg.classifier.upstream == id else []
@@ -398,7 +407,9 @@ def config_from_json(obj: dict) -> RoutingConfig:
         off = ()
         if obj.get("version") == 2:
             obj, off = _v2_to_v3(obj)
-        if obj.get("version") != 3:
+        if obj.get("version") == 3:
+            obj = {**obj, "version": 4, "settings": []}
+        if obj.get("version") != 4:
             raise ValueError("unsupported config version")
         if len(obj["downstreams"]) > MAX_DOWNSTREAMS:
             raise ValueError(f"at most {MAX_DOWNSTREAMS} downstreams")
@@ -438,17 +449,21 @@ def config_from_json(obj: dict) -> RoutingConfig:
             if o is not None and (o not in ts or o == t):
                 raise ValueError(f"doubling shadow for {t} must be another track or none")
         dbl = Doubling(_unit(d["rate"], "doubling rate"), str(d["tag"]), {t: sh[t] for t in ts})
+        import overrides  # local: overrides imports routing, so the module can't import it at the top
+        settings = overrides.settings_from_json(obj.get("settings", []), tuple(dss))
         return RoutingConfig(obj["lever"], otherwise, rules,
                              ClassifierSettings(str(c["model"]), thr,
                                                 float(_num(c["timeout_s"], 0.1, 30, "classifier time limit must be 0.1–30 s")), labels,
-                                                c["upstream"]), dbl, tuple(dss), bool(obj.get("seeded", False)), off)
+                                                c["upstream"]), dbl, tuple(dss), bool(obj.get("seeded", False)), off, settings)
     except (KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"bad config: {e!r}") from None
 
 
 def config_to_json(cfg: RoutingConfig) -> dict:
+    import overrides  # local: overrides imports routing, so the module can't import it at the top
     return {
-        "version": 3, "lever": cfg.lever, "otherwise": cfg.otherwise, "seeded": cfg.seeded,
+        "version": 4, "settings": overrides.settings_to_json(cfg.settings),
+        "lever": cfg.lever, "otherwise": cfg.otherwise, "seeded": cfg.seeded,
         "rules": [{"name": r.name, "kind": r.kind, "enabled": r.enabled, "text": r.text, "builtin": r.builtin}
                   for r in cfg.rules],
         "classifier": {"model": cfg.classifier.model, "threshold": cfg.classifier.threshold,

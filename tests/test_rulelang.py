@@ -1,6 +1,8 @@
 import unittest
 
-from rulelang import parse, evaluate, fields_used, RuleError
+import pytest
+
+from rulelang import parse, parse_cond, evaluate, fields_used, RuleError
 
 
 def ev(src, **f):
@@ -84,6 +86,21 @@ class RuleLangTests(unittest.TestCase):
         with self.assertRaises(RuleError) as cm:
             parse("when tag is a go local\n\nwhen nope is a go local")
         self.assertEqual((cm.exception.line, cm.exception.col), (3, 6))
+
+
+def test_hour_wraps_midnight():
+    c = parse_cond("hour >= 22 or hour < 6")
+    at = lambda h: evaluate(c, lambda n: h)
+    assert at(23) and at(3) and not at(12)
+
+def test_session_is():
+    c = parse_cond("session is AbC-1 or session is x2")
+    assert evaluate(c, lambda n: "abc-1") and not evaluate(c, lambda n: "zz")
+
+def test_parse_cond_blank_and_error():
+    assert parse_cond("  ") is None
+    with pytest.raises(RuleError):
+        parse_cond("hour >")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import claude_router
+import overrides
 from claude_router import App, Config, make_server, upstream_headers
 from routing import DEFAULT_CONFIG, Downstream
 
@@ -548,6 +549,55 @@ class ProxyTest(unittest.TestCase):
             self.port = self.srv.server_address[1]
             self.assertEqual(self.post(body_for("claude-opus-5-5"))[0], 200)
             self.assertEqual(self.app.store.departures(), [])
+
+    def set_settings(self, *lines):
+        self.app.routing = replace(self.app.routing, settings=overrides.settings_from_json(list(lines), self.app.routing.downstreams))
+
+    def test_window_without_a_price_falls_back_to_asap(self):
+        # a model override to a model without the set window: the same rule the Tracks row applies
+        self.app.prices.set_listed("valar", {"glm-x": {"asap": [1.0, 0.5, 2.0]}})
+        self.set_settings({"when": "", "downstream": "valar", "tier": None, "set": "window", "value": "priority"},
+                          {"when": "", "downstream": "valar", "tier": None, "set": "model", "value": "glm-x"})
+        self.post(body_for("claude-sonnet-5-5"))
+        _, _, h, got = self.v.seen[0]
+        self.assertEqual((json.loads(got)["model"], h.get_all("X-Valar-Completion-Window")), ("glm-x", ["asap"]))
+        # the model's window list unknown (no prices for it): the window goes out as set
+        self.set_settings({"when": "", "downstream": "valar", "tier": None, "set": "window", "value": "priority"},
+                          {"when": "", "downstream": "valar", "tier": None, "set": "model", "value": "glm-y"})
+        self.post(body_for("claude-sonnet-5-5"))
+        _, _, h, got = self.v.seen[1]
+        self.assertEqual((json.loads(got)["model"], h.get_all("X-Valar-Completion-Window")), ("glm-y", ["priority"]))
+
+    def test_hour_pinned_per_turn(self):
+        # a tool loop crossing an hour boundary keeps the hour its first request ran at
+        self.set_settings({"when": "hour < 12", "downstream": "valar", "tier": None, "set": "window", "value": "standard"})
+        for hour in (11, 12):
+            with mock.patch("time.time", return_value=time.mktime((2026, 1, 1, hour, 30, 0, 0, 0, -1))):
+                self.post(body_for("claude-sonnet-5-5"))
+        self.assertEqual([self.v.seen[i][2]["X-Valar-Completion-Window"] for i in (0, 1)], ["standard", "standard"])
+
+    def test_settings_line_sets_window_and_model(self):
+        self.set_settings({"when": "session is s-one", "downstream": "valar", "tier": None, "set": "window", "value": "priority"},
+                          {"when": "", "downstream": "valar", "tier": None, "set": "model", "value": "glm-x"})
+        self.post(body_for("claude-sonnet-5-5"), {**HDRS, "X-Claude-Code-Session-Id": "s-one"})
+        _, path, h, got = self.v.seen[0]
+        self.assertEqual(h.get_all("X-Valar-Completion-Window"), ["priority"])
+        self.assertEqual(json.loads(got)["model"], "glm-x")
+        self.logged(1)
+        self.app.store.close()
+        r = self.app.store.departures()[0]
+        self.assertEqual(r["window"], "priority")
+        self.assertEqual(json.loads(r["override"]), [{"set": "window", "value": "priority", "when": "session is s-one"},
+                                                     {"set": "model", "value": "glm-x", "when": ""}])
+        self.post(body_for("claude-sonnet-5-5"), {**HDRS, "X-Claude-Code-Session-Id": "s-two"})
+        self.assertEqual(self.v.seen[1][2].get_all("X-Valar-Completion-Window"), ["asap"])  # the downstream default
+
+    def test_anthropic_untouched_by_settings(self):
+        self.set_settings({"when": "", "downstream": "valar", "tier": None, "set": "model", "value": "glm-x"})
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        body = body_for("claude-opus-5-5")
+        self.post(body)
+        self.assertEqual(self.a.seen[0][3], body)
 
 
 class SeedTest(unittest.TestCase):
