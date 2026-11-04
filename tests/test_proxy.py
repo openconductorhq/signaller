@@ -353,6 +353,11 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(ok[1]["in_tok"], 10)
         self.assertEqual((ok[2]["status"], ok[2]["in_tok"], ok[2]["out_tok"]), (529, None, None))
 
+    def test_leading_tag_routes_and_is_stripped(self):
+        self.post(body_for("claude-opus-5-5", {"messages": [{"role": "user", "content": "#execution fix it"}]}), HDRS)
+        self.assertEqual(json.loads(self.v.seen[0][3])["messages"][0]["content"], "fix it")
+        self.assertEqual(self.a.seen, [])
+
     def test_tool_step_recorded(self):
         msgs = [{"role": "user", "content": "fix it"},
                 {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]},

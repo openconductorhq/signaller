@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 
 from claude_router import load_config
-from routing import (DEFAULT_CONFIG, MODEL_TIERS, ClassResult, Downstream, Features, Rule, latest_tool_results, is_routed, session_of, config_from_json,
+from routing import (DEFAULT_CONFIG, MODEL_TIERS, ClassResult, Downstream, Features, Rule, latest_tool_results, strip_lead_tags, is_routed, session_of, config_from_json,
                      config_to_json, downstream, references, route, tier_of, track_model, track_window, tracks, valid_id)
 
 
@@ -48,7 +48,7 @@ def route_(messages, model="claude-opus-5-5"):
 
 class RouteTests(unittest.TestCase):
     def test_tag_execution_in_latest_human(self):
-        self.assertEqual(route_([user(text("do it #execution"))]), ("valar", "rule:Tags in your message:2"))
+        self.assertEqual(route_([user(text("#execution do it"))]), ("valar", "rule:Tags in your message:2"))
 
     def test_tag_plan_beats_haiku(self):
         self.assertEqual(route_([user(text("#planning"))], "claude-haiku-4-5"), ("anthropic", "rule:Tags in your message:1"))
@@ -57,7 +57,7 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(route_([user(text("#execution"))]), ("valar", "rule:Tags in your message:2"))
 
     def test_both_tags_anthropic(self):
-        self.assertEqual(route_([user(text("#execution and #planning"))]), ("anthropic", "rule:Tags in your message:1"))
+        self.assertEqual(route_([user(text("#execution #planning go"))]), ("anthropic", "rule:Tags in your message:1"))
 
     def test_tag_case_insensitive_whole_word(self):
         self.assertEqual(route_([user(text("#EXECUTION"))]), ("valar", "rule:Tags in your message:2"))
@@ -83,7 +83,13 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(route_([user(blocks)]), ("anthropic", "rule:Model the request asked for:1"))
 
     def test_string_content(self):
-        self.assertEqual(route_([user("fix #execution")]), ("valar", "rule:Tags in your message:2"))
+        self.assertEqual(route_([user("#execution fix")]), ("valar", "rule:Tags in your message:2"))
+
+    def test_tag_only_at_start(self):
+        for t in ("fix #execution", "do it #execution", "see log:\n#execution", "#123 #execution"):
+            self.assertEqual(route_([user(t)]), ("anthropic", "rule:Model the request asked for:1"), t)
+        self.assertEqual(route_([user("  #Execution: go")]), ("valar", "rule:Tags in your message:2"))
+        self.assertEqual(route_([user("#local #execution go")]), ("valar", "rule:Tags in your message:2"))
 
     def test_tier(self):
         m = [user("hi")]
@@ -111,9 +117,11 @@ class RouteTests(unittest.TestCase):
 
 
 OPUS_CASES = [
-    ([user(text("do it #execution"))], "valar"),
+    ([user(text("#execution do it"))], "valar"),
+    ([user(text("do it #execution"))], "anthropic"),
     ([user(text("#planning"))], "anthropic"),
-    ([user(text("#execution and #planning"))], "anthropic"),
+    ([user(text("#execution #planning go"))], "anthropic"),
+    ([user(text("#execution and #planning"))], "valar"),
     ([user(text("#EXECUTION"))], "valar"),
     ([user(text("#executions"))], "anthropic"),
     ([user("hi")], "anthropic"),
@@ -123,7 +131,7 @@ OPUS_CASES = [
       user([{"type": "tool_result", "tool_use_id": "t1", "content": "done"}])], "valar"),
     ([user([{"type": "text", "text": "<system-reminder>#execution</system-reminder>"},
             {"type": "text", "text": "hello"}])], "anthropic"),
-    ([user("fix #execution")], "valar"),
+    ([user("#execution fix")], "valar"),
 ]
 
 
@@ -566,6 +574,19 @@ class DownstreamTests(unittest.TestCase):
                 config_from_json(mod(f))
         ok = mod(ds(1, prices={"in": 1, "out": 2.5, "cache_read": 0.1, "cache_write": 0}))
         self.assertEqual(downstream(config_from_json(ok), "lemmi").prices["out"], 2.5)
+
+
+class StripTagsTest(unittest.TestCase):
+    def test_leading_tags_stripped_from_every_prompt(self):
+        req = {"messages": [user("#execution #local  fix it"), assistant(text("ok")),
+                            user([{"type": "text", "text": "<system-reminder>#x</system-reminder>"},
+                                  {"type": "text", "text": "#planning: next"}]),
+                            user("mid #execution stays"), user("#execution")]}
+        self.assertTrue(strip_lead_tags(req))
+        m = req["messages"]
+        self.assertEqual((m[0]["content"], m[2]["content"][0]["text"], m[2]["content"][1]["text"], m[3]["content"], m[4]["content"]),
+                         ("fix it", "<system-reminder>#x</system-reminder>", "next", "mid #execution stays", "#execution"))
+        self.assertFalse(strip_lead_tags({"messages": [user("plain")]}))
 
 
 class ToolStepTest(unittest.TestCase):

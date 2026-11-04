@@ -22,7 +22,7 @@ from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from prices import Prices, parse_valar
-from routing import (session_of, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
+from routing import (session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
                      references, route as decide_route, track_model, track_window)
 from keys import Keys
 from store import NullStore, Store, load_console_config, save_console_config
@@ -315,6 +315,11 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__), file=sys.stderr, flush=True)
                 return
             route, reason = (d.track, d.reason) if d else ("anthropic", "passthrough")
+            try:  # routing already read the tags; no upstream (or shadow) needs them
+                if f and isinstance(req, dict) and strip_lead_tags(req):
+                    body = json.dumps(req).encode()
+            except Exception:
+                pass
             shown = out_model = model
             rec = f is not None and self.path.split("?", 1)[0] == "/v1/messages"
             sid = session_of(self.headers, req) if rec else None

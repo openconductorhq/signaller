@@ -10,6 +10,9 @@ from rulelang import FIELDS, KEYWORDS, RuleError, evaluate, parse
 
 ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
 TAG_RE = re.compile(r"(?<!\w)#(\w+)", re.I)
+# tags count only at the very start of the prompt ("#execution #local do x"), so a "#planning" mid-sentence or in a
+# pasted log can't hijack the turn. ponytail: a tag starts with a letter, so "#123 broke" is left alone
+LEAD_TAGS_RE = re.compile(r"\A\s*(?:#[A-Za-z]\w*[:,]?(?:\s+|\Z))+")
 TEXT_CAP = 20_000
 MAX_DOWNSTREAMS = 6
 ID_RE = re.compile(r"[a-z][a-z0-9-]{0,23}")
@@ -33,6 +36,35 @@ def latest_human_text(messages: list) -> str:
         if texts:
             return "\n".join(texts)
     return ""
+
+
+def lead_tags(text: str) -> frozenset:
+    m = LEAD_TAGS_RE.match(text)
+    return frozenset(t.lower() for t in TAG_RE.findall(m.group())) if m else frozenset()
+
+
+def strip_lead_tags(req: dict) -> bool:
+    """Drop the leading #tags from every user prompt in the request (upstreams don't need them).
+    True when anything changed. A prompt that is only tags is kept as is, never sent empty."""
+    hit = False
+    for msg in req.get("messages") or []:
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        c = msg.get("content")
+        if isinstance(c, str):
+            holder, key = msg, "content"
+        elif isinstance(c, list):
+            holder, key = next((b for b in c if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+                                and not b["text"].strip().startswith("<system-reminder>")), None), "text"
+            if holder is None:
+                continue
+        else:
+            continue
+        m = LEAD_TAGS_RE.match(holder[key])
+        if m and holder[key][m.end():].strip():
+            holder[key] = holder[key][m.end():]
+            hit = True
+    return hit
 
 
 STEP_CAP = 600  # stored per request; ponytail: a snippet of each result, not the whole output
@@ -147,8 +179,7 @@ class Features:
             step = latest_tool_results(req["messages"])
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
             return None
-        tags = frozenset(t.lower() for t in TAG_RE.findall(text))
-        return cls(text, tags, model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), srv, step)
+        return cls(text, lead_tags(text), model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), srv, step)
 
     def get(self, name: str, label: Callable[[], str]):
         return label() if name == "label" else getattr(self, {"tag": "tags"}.get(name, name))

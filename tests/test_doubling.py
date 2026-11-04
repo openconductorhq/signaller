@@ -268,11 +268,11 @@ class DoublingTest(unittest.TestCase):
         self.assertIn("shadow=-", self.err.getvalue())
         self.app.routing = self.doubling(tag="Both")
         self.post(msg("plain"))
-        self.post(msg("compare this #both"))
+        self.post(msg("#both compare this"))
         rows = self.pairs(1)
         self.assertEqual(len(rows), 1)
         self.assertEqual(len(self.settle()), 1)
-        self.assertEqual(self.app.store._all("SELECT preview FROM turns")[0]["preview"], "compare this #both")
+        self.assertEqual(self.app.store._all("SELECT preview FROM turns")[0]["preview"], "#both compare this")
 
     def test_direction_checkbox(self):
         self.app.routing = self.doubling(shadow={**SHADOW, "valar": None})

@@ -129,6 +129,10 @@ A fresh config ships these rules:
 | Model the request asked for | opus or fable → Anthropic; sonnet, haiku or other → Valar |
 
 **Tags** match whole words, case-insensitive:
+- **Where:** only at the very start of the prompt (`#execution #local fix it`).
+  A `#planning` later in the text, or in a pasted log, is just text.
+- **Stripped:** the router removes the leading tags before forwarding, so no
+  upstream sees them. A prompt that is only tags is sent as is.
 - **Skipped text:** text inside `<system-reminder>` and messages that hold only
   tool results.
 - **How long one lasts:** the whole turn. It lapses at the next human message.
@@ -155,7 +159,7 @@ The first matching line decides; if no line matches, the next rule runs.
 | Field | Value |
 |-------|-------|
 | `text` | the latest human message (first 20 000 chars) |
-| `tag` | every `#word` in `text` (`tag is plan` means "has this tag") |
+| `tag` | every leading `#word` of `text` (`tag is plan` means "has this tag") |
 | `tier` | `opus`, `fable`, `sonnet`, `haiku` or `other`, from the model id |
 | `model` | the full model id |
 | `tokens` | rough size: request bytes / 4 (`100k` means 100 000) |
