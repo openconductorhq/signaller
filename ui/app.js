@@ -225,10 +225,12 @@ async function dsCall(method, path, body, id) {
   let r, err = null;
   try { r = await api(method, path, body, 15000); } catch (e) { err = e; }  // POST probes the url first: up to 5 s
   ASKED.delete(id); delete MODELS[id]; delete WARN[id];
-  const st = await api("GET", "state" + qs(sessQ(), spanQ()));
-  applyState(st);
-  cfg = st.config;
-  renderConfig(true);
+  try {
+    const st = await api("GET", "state" + qs(sessQ(), spanQ()));
+    applyState(st);
+    cfg = st.config;
+    renderConfig(true);
+  } catch (e) { if (!err) throw e; }  // the call's own error is the one to show
   if (err) throw err;
   return r;
 }

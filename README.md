@@ -149,7 +149,7 @@ A fresh config ships these rules:
   never falls back to another track.
 
 **Logging:** each request is one line on stderr:
-`time route= reason= model=in[→out] status= ms= stream= shadow=`. Bodies,
+`time route= reason= model=in[→out] status= ms= stream= [err=midstream] shadow=`. Bodies,
 prompts and keys are never logged.
 
 ### Rule language

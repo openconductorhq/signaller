@@ -267,6 +267,14 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Valar has no key; set it in the console")
         self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
 
+    def test_bad_content_length_answers_400(self):
+        for cl in ("abc", "-5", "1e3"):
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            s.sendall(("POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %s\r\n\r\n" % cl).encode())
+            self.assertIn(b" 400 ", s.recv(4096).split(b"\r\n")[0] + b" ", cl)
+            s.close()
+        self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
+
     def test_valar_down_502(self):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))

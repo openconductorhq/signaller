@@ -93,6 +93,7 @@ export const register: Register = on => {
     if (want && !use(want))
       return { deny: `Not switching: the person hasn't typed "/router ${want}" for this switch (each one they type allows one). Only switch when they tell you to that way; they can also type /router ${want} themselves.` }
     const r = await switchTo($, want ?? '')
+    if (!r.ok && want) granted.push(want) // the switch didn't happen: the person's say-so still stands
     return r.ok ? { result: r.text } : { deny: r.text }
   })
 

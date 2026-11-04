@@ -260,6 +260,14 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(reqs[r["request_id"]], r["turn_id"])
         self.assertIn("shadow=valar", self.err.getvalue())
 
+    def test_same_prompt_two_sessions_two_turns(self):
+        self.app.routing = self.doubling()
+        for sid in ("s-one", "s-two"):
+            self.post(msg("continue"), headers={**HDRS, "X-Claude-Code-Session-Id": sid})
+        self.pairs(2)
+        turns = self.app.store._all("SELECT session_id FROM turns ORDER BY session_id")
+        self.assertEqual([t["session_id"] for t in turns], ["s-one", "s-two"])
+
     def test_rate_zero_and_tag(self):
         self.app.routing = self.doubling(rate=0)
         self.post(msg("hello"))

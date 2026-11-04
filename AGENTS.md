@@ -77,7 +77,8 @@ breaks.
   print them. To check which variables one sets, print names only:
   `grep -oE '^[A-Z_]+=' file`.
 - **What is never logged:** request bodies, prompts, headers or keys. A log
-  line is `route= reason= model= status= ms= stream= shadow=` and nothing more.
+  line is `route= reason= model= status= ms= stream= [err=] shadow=` and nothing
+  more.
 
 ## Code conventions
 

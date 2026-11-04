@@ -412,7 +412,8 @@ def _handle(h, app):
     origin = h.headers.get("origin")
     if not LOOPBACK_HOST_RE.fullmatch(h.headers.get("host", "")) or \
             (origin is not None and origin not in ok) or h.headers.get("sec-fetch-site", "none") not in ("same-origin", "none") or (h.command in ("PUT", "POST", "DELETE") and origin is None):
-        raise Err(403, "claude-router: forbidden origin/host")  # body left unread
+        h.close_connection = True  # body left unread: the connection can't carry another request
+        raise Err(403, "claude-router: forbidden origin/host")
     n = int(h.headers.get("content-length") or 0)
     if not 0 <= n <= MAX_BODY:
         raise Err(400, "bad content-length")

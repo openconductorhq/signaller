@@ -145,10 +145,11 @@ class Doubler:
             # ponytail: sweeps every call; fine for the few hundred turns 30 minutes holds
             for k in [k for k, e in self.turns.items() if now - e[1] > TURN_TTL]:
                 self.by_id.pop(self.turns.pop(k)[0], None)
-            e = self.turns.get(f.turn_key)
+            k = (session_id, f.turn_key)  # the same prompt in two sessions is two turns
+            e = self.turns.get(k)
             if e is None:
                 tid = uuid.uuid4().hex if self.rng.random() < d.rate else None
-                e = self.turns[f.turn_key] = [tid, now, 0, False]
+                e = self.turns[k] = [tid, now, 0, False]
                 if tid:
                     self.by_id[tid] = e
             e[1] = now
@@ -169,7 +170,7 @@ class Doubler:
             h = self.pending[request_id] = PairHandle(self.store, turn_id, request_id, step, served_track, shadow_track)
         return h
 
-    def start_shadow(self, turn_id, request_id, f, served_track, method, path, headers, body, app) -> str:
+    def start_shadow(self, turn_id, request_id, f, served_track, method, path, headers, body, app, routing=None) -> str:
         """Starts the shadow in a daemon thread; returns its track, or "busy" when that direction is full."""
         with self.lock:
             h = self.pending.pop(request_id)  # pending_served always comes first
@@ -182,7 +183,7 @@ class Doubler:
             self.inflight[track] = self.inflight.get(track, 0) + 1
         headers = list(headers)  # credentials stay in memory only, in this thread
         try:
-            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, app), daemon=True).start()
+            threading.Thread(target=self._run, args=(h, track, method, path, headers, body, app, routing), daemon=True).start()
         except Exception as e:  # e.g. can't start new thread: give the slot back, the served request goes on
             self._release(track)
             h.shadow({**AnswerCapture.EMPTY, "skipped": "error", "status": None, "ttfb_ms": None, "ms": None,
@@ -195,7 +196,7 @@ class Doubler:
             self.inflight[track] -= 1
         self.caps[track].release()
 
-    def _run(self, h, track, method, path, headers, body, app):
+    def _run(self, h, track, method, path, headers, body, app, routing=None):
         from claude_router import prepare  # late: claude_router imports this module
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
         model_out, window, ds = None, None, None
@@ -203,7 +204,7 @@ class Doubler:
             req = json.loads(body)
             req["stream"] = False
             strip_lead_tags(req)
-            name, base, key, ds, headers, model_out, window, _ = prepare(app, track, str(req.get("model", "")), req, headers)
+            name, base, key, ds, headers, model_out, window, _ = prepare(app, track, str(req.get("model", "")), req, headers, routing)
             if track != "anthropic" and not key:
                 raise NotConfigured("%s has no key" % name)
             if window:

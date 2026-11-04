@@ -66,12 +66,13 @@ MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_erro
                  b'"message":"claude-router: upstream ended mid-stream"}}\n\n')
 
 
-def upstream(app: "App", track: str) -> tuple[str, str, str, Downstream | None]:
-    """(display name, base url, key, downstream) of a track, from the live config and keys; anthropic has no key of ours.
+def upstream(app: "App", track: str, routing=None) -> tuple[str, str, str, Downstream | None]:
+    """(display name, base url, key, downstream) of a track, from `routing` (the request's snapshot; default the live
+    config) and the keys; anthropic has no key of ours.
     A track no longer configured comes back keyless, so it fails as "no key" rather than going anywhere else."""
     if track == "anthropic":
         return "Anthropic", app.cfg.anthropic_url, "", None
-    ds = downstream(app.routing, track)
+    ds = downstream(routing or app.routing, track)
     return (ds.name, ds.url, app.keys.get(track), ds) if ds else (track, "", "", None)
 
 
@@ -115,12 +116,12 @@ def hoist_inline_tools(req: dict) -> bool:
     return changed
 
 
-def prepare(app: "App", track: str, model: str, req, headers):
+def prepare(app: "App", track: str, model: str, req, headers, routing=None):
     """A request as it leaves for a track, the served one and its shadow alike:
     (name, base, key, ds, headers, out_model, window, changed). On a downstream the model is renamed, Valar's tool
     fix applied, the client's credentials swapped for the downstream's key and the window set. `req` (when a dict)
     is edited in place; `changed` says it must be re-serialised."""
-    name, base, key, ds = upstream(app, track)
+    name, base, key, ds = upstream(app, track, routing)
     if not ds:
         return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, False
     out_model = track_model(model, ds)
@@ -310,13 +311,22 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             if p == "/favicon.ico":  # browsers ask for it on their own; never let it reach Anthropic
                 return self._error(404, "not found")
             t0 = time.time()
-            body = self.rfile.read(int(self.headers.get("content-length") or 0))
-            # browsers (cross-origin) and DNS rebinding must not reach the injected downstream keys
+            # browsers (cross-origin) and DNS rebinding must not reach the injected downstream keys; checked before
+            # reading the body, which is then left unread, so the connection closes
             if "origin" in self.headers or not LOOPBACK_HOST_RE.fullmatch(self.headers.get("host", "")):
+                self.close_connection = True
                 self._error(403, "claude-router: forbidden origin/host")
                 print("%s route=- reason=forbidden status=403 shadow=-" % time.strftime("%Y-%m-%d %H:%M:%S"),
                       file=sys.stderr, flush=True)
                 return
+            try:
+                n = int(self.headers.get("content-length") or 0)
+                if n < 0:
+                    raise ValueError
+            except ValueError:
+                self.close_connection = True
+                return self._error(400, "claude-router: bad content-length")
+            body = self.rfile.read(n)
             routing = app.routing  # read once; a concurrent set_routing doesn't affect this request
             model, stream, req = "-", False, None
             try:
@@ -352,7 +362,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 if turn_id:  # shadow starts before the served upstream; it never touches the served path again
                     pair = app.doubler.pending_served(turn_id, rid, route, routing.doubling.shadow[route])
                     shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
-                                                      self.headers.items(), body, app)  # the shadow strips its own tags
+                                                      self.headers.items(), body, app, routing)  # the shadow strips its own tags
             except Exception as e:
                 print("doubling failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
                 pair, shadow, turn_id = None, "-", None
@@ -361,7 +371,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
             except Exception:
                 pass
-            name, base, key, ds, headers, out_model, window, changed = prepare(app, route, model, req, self.headers.items())
+            name, base, key, ds, headers, out_model, window, changed = prepare(app, route, model, req, self.headers.items(), routing)
             if stripped or changed:
                 body = json.dumps(req).encode()
             if out_model != model:
