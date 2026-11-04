@@ -169,7 +169,7 @@ for (const id of ["cFrom", "cTo"]) $(id).addEventListener("change", () => {
 });
 
 /* ---------- state + polling ---------- */
-let S = null, cfg = null, rendered = "", saving = 0, ticks = 0, busy = false;
+let S = null, cfg = null, cfgRev = 0, rendered = "", saving = 0, ticks = 0, busy = false;
 
 async function tick() {
   if (busy || document.hidden) return;
@@ -195,6 +195,7 @@ async function tick() {
 
 function applyState(st) {
   S = st;
+  cfgRev = st.config_rev;
   if (st.clock) $("sttClock").textContent = "Router time " + st.clock.hm + " (" + st.clock.tz + ")";  // the router's own wall clock, what "hour" means; a wrong zone must be visible
   const n = view.pick.length;  // departures list the span's requests, paged back with "Load older"
   $("depFrom").textContent = `${plural(st.summary.total, "request")}${n ? ` from the ${n === 1 ? "picked session" : n + " picked sessions"}` : ""} · ${spanText()}`;
@@ -218,6 +219,7 @@ function applyState(st) {
   const f = document.activeElement;
   const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }  // again after a save: fresh collisions, fresh settings
+  renderCollisions();  // every poll: /router or the picker can change them without this tab's config JSON changing
   if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /router at any time
 }
 // Downstream POST/DELETE/key PUT change the config on the server: reload it (even after an error or a timeout),
@@ -271,14 +273,23 @@ async function save(next, errNode) {
   renderConfig();
   saving++;
   try {
-    cfg = await api("PUT", "config", next);
+    cfg = await api("PUT", "config", { ...next, rev: cfgRev });  // the rev this page rendered: a stale copy would erase /router's lines
+    cfgRev = cfg.rev;
     showErr(errNode, "");
     renderConfig();
     return true;
   } catch (e) {
     cfg = prev;
     renderConfig(true);
-    showErr(errNode, e.status === 400 ? e.message : "Couldn't save: " + e.message);
+    if (e.status === 409) {  // changed elsewhere (/router, prune, another tab): reload and show why
+      try {
+        const st = await api("GET", "state" + qs(sessQ(), spanQ()));
+        applyState(st);
+        cfg = st.config;
+        renderConfig(true);
+      } catch (_) { /* offline: the poll reloads when it's back */ }
+    }
+    showErr(errNode, e.status === 400 || e.status === 409 ? e.message : "Couldn't save: " + e.message);
     return false;
   } finally {
     saving--;
@@ -685,15 +696,21 @@ function renderOtherwise() {
 }
 
 /* settings lines: window and model overrides by session and hour, per downstream */
-// Rendered from renderConfig only (a render here needs MODELS/WINDOWS too), and it runs after every save.
+// The rows render from renderConfig (a render here needs MODELS/WINDOWS too) and after every save; the
+// collision list re-renders on every poll (renderCollisions), since /router can change it without
+// this tab's config JSON changing.
+const clashSet = () => new Set(((S && S.collisions) || []).flatMap((c) => [c.line, c.by]));
+function renderCollisions() {
+  const cl = (S && S.collisions) || [];
+  $("stColl").hidden = !cl.length;
+  $("stColl").replaceChildren(...cl.map((c) => el("li", {}, c.text)));
+}
 function renderSettings() {
   if (!cfg) return;
-  const cl = (S && S.collisions) || [], clash = new Set(cl.flatMap((c) => [c.line, c.by]));
+  const clash = clashSet();
   keepFocus(() => {
     $("stLines").replaceChildren(...cfg.settings.map((s, i) => stLine(s, i, clash.has(i + 1))));
     $("stAdd").disabled = !DS().length;
-    $("stColl").hidden = !cl.length;
-    $("stColl").replaceChildren(...cl.map((c) => el("li", {}, c.text)));
   });
 }
 const setSettings = (settings) => save({ ...cfg, settings }, $("sttErr"));
@@ -740,13 +757,15 @@ function stLine(s, i, clash) {
             onclick: () => setSettings(cfg.settings.filter((_, k) => k !== i)) }, "Delete"))),
       ids.length ? el("div", { class: "hint shint" }, "sessions: " + ids.map((x) => shortLabel(x)).join(", ")) : null));
 }
-// A new line goes on top, pre-filled with the picked sessions (the same ones the chips show);
-// fixPart picks its window or model, the same fix-up an edit of that line would get.
+// A new line goes on top, pre-filled with the picked sessions (the same ones the chips show) and set to
+// the sonnet slot's current value — the downstream's window (valar) or model — so it's a no-op until edited.
 $("stAdd").addEventListener("click", () => {
   const ds = DS().find((d) => d.kind === "valar") || DS()[0];
   if (!ds) return;
-  setSettings([fixPart({ when: view.pick.filter((x) => x !== "unknown").map((x) => "session is " + x).join(" or "),
-    downstream: ds.id, tier: null, set: "window", value: "" }), ...cfg.settings]);
+  const valar = ds.kind === "valar";
+  setSettings([{ when: view.pick.filter((x) => x !== "unknown").map((x) => "session is " + x).join(" or "),
+    downstream: ds.id, tier: "sonnet", set: valar ? "window" : "model",
+    value: (valar ? ds.windows : ds.models).sonnet }, ...cfg.settings]);
 });
 
 /* doubling strip */
