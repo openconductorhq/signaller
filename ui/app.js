@@ -235,14 +235,17 @@ async function dsCall(method, path, body, id) {
 
 // Anthropic, one card per downstream (and per removed one with rows in the span), then the savings over all of them.
 function renderMoney(m, sfx) {
-  const t = m.tracks, io = (x) => `${tok(x.in)} in / ${tok(x.out)} out`, ds = Object.keys(t).filter((k) => k !== "anthropic");
+  const t = m.tracks, io = (x) => `${tok(x.in)} in / ${tok(x.out)} out`, ds = Object.keys(t).filter((k) => k !== "anthropic"),
+    cached = (x) => { const s = x.in + (x.cache_read || 0) + (x.cache_write || 0); return s ? Math.round(100 * (x.cache_read || 0) / s) + "% cached" : ""; },
+    split = (x) => `${tok(x.in)} uncached · ${tok(x.cache_read || 0)} read from cache · ${tok(x.cache_write || 0)} written to cache`;
   $("money").style.setProperty("--cols", ds.length <= 3 ? `repeat(${ds.length + 1},minmax(0,1fr)) 1.3fr` : "repeat(4,minmax(0,1fr))");
   $("money").replaceChildren($("money").firstElementChild, ...ds.map((k) => { const v = t[k]; return el("div", { class: "mcell", style: cv(k) },
     el("div", { class: "k" }, label(k), el("span", { class: "sfx" })), el("div", { class: "n" }, usd(v.cost + v.comparisons)),
-    el("div", { class: "t" }, [io(v), v.unpriced > 0 && "partly unpriced", v.comparisons > 0 && `incl. ${usd(v.comparisons)} comparisons`].filter(Boolean).join(" · "))); }), $("mcS"));
+    el("div", { class: "t", title: split(v) }, [io(v), cached(v), v.unpriced > 0 && "partly unpriced", v.comparisons > 0 && `incl. ${usd(v.comparisons)} comparisons`].filter(Boolean).join(" · "))); }), $("mcS"));
   for (const e of document.querySelectorAll("#money .sfx")) e.textContent = sfx;
   $("nA").textContent = usd(t.anthropic.api_cost);
-  $("mA").textContent = io(t.anthropic);
+  $("mA").textContent = [io(t.anthropic), cached(t.anthropic)].filter(Boolean).join(" · ");
+  $("mA").title = split(t.anthropic);
   $("nS").textContent = "≈ " + usd(m.savings);
   $("mS").textContent = `${ds.map(NAME).join(" + ") || "Downstream"} requests would have cost ${usd(m.saved_would)} on Anthropic`;
 }
@@ -853,7 +856,10 @@ function explain(d) {
   out.push(el("div", { class: "facts" }, `${d.model_in} → ${d.model_out} · status ${d.status || "none"} · first byte ${fmtMs(d.ttfb_ms)} · total ${fmtMs(d.ms)}`,
     money && [" · ", el("b", {}, money)]));
   out.push(el("div", { class: "facts" }, ["session " + fullLabel(d.session_id),
-    d.in_tok != null && `${tok(d.in_tok)} in / ${tok(d.out_tok)} out`].filter(Boolean).join(" · ")));
+    d.in_tok != null && [`${tok(d.in_tok)} in / ${tok(d.out_tok)} out`,
+      d.cache_read_tok > 0 && `${tok(d.cache_read_tok)} cache read`,
+      d.cache_write_tok > 0 && `${tok(d.cache_write_tok)} cache write` + (d.cache_write_1h_tok > 0 ? ` (${tok(d.cache_write_1h_tok)} 1h)` : "")
+    ].filter(Boolean).join(" · ")].filter(Boolean).join(" · ")));
   if (d.prompt) out.push(el("pre", { class: "prompt" }, d.prompt));
   if (d.turn_id) {
     let s = null;
