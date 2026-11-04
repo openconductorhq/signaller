@@ -6,6 +6,21 @@ import tempfile
 import threading
 
 
+def write_json(path: str, obj, indent=None) -> None:
+    """Atomic, durable JSON write: a 0600 temp file (mkstemp) in the same dir, fsync, rename over."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
 class Keys:
     def __init__(self, config_dir: str):
         self.path = os.path.join(config_dir, "downstreams.keys.json")
@@ -44,15 +59,5 @@ class Keys:
             self._save({k: v for k, v in self.keys.items() if k != id})
 
     def _save(self, keys: dict) -> None:  # caller holds self.lock
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(self.path))  # 0600 from the start
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(keys, f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except BaseException:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+        write_json(self.path, keys)
         self.keys = keys

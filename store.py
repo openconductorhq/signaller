@@ -6,11 +6,11 @@ import queue
 import re
 import sqlite3
 import sys
-import tempfile
 import threading
 import zlib
 from collections import deque
 from hashlib import sha256
+from keys import write_json
 import time
 
 import sessions as sess
@@ -148,18 +148,7 @@ def _bad(path, err):
 def save_console_config(path, cfg):
     d = os.path.dirname(os.path.abspath(path))
     os.makedirs(d, mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d)  # mkstemp is already 0600
-    try:
-        with os.fdopen(fd, "w") as f:
-            os.chmod(tmp, 0o600)
-            json.dump(config_to_json(cfg), f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-        raise
+    write_json(path, config_to_json(cfg), indent=2)
 
 
 class Store:

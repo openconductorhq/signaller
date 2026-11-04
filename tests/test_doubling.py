@@ -272,7 +272,10 @@ class DoublingTest(unittest.TestCase):
         rows = self.pairs(1)
         self.assertEqual(len(rows), 1)
         self.assertEqual(len(self.settle()), 1)
-        self.assertEqual(self.app.store._all("SELECT preview FROM turns")[0]["preview"], "#both compare this")
+        self.assertEqual(self.app.store._all("SELECT preview FROM turns")[0]["preview"], "compare this")
+        seen = [json.dumps(b) for x in (self.a, self.v) for *_, b in x.seen]
+        self.assertEqual(sum("compare this" in b for b in seen), 2)  # the served copy and its shadow
+        self.assertFalse([b for b in seen if "#both" in b])  # neither the served copy nor the shadow carries the tag
 
     def test_direction_checkbox(self):
         self.app.routing = self.doubling(shadow={**SHADOW, "valar": None})

@@ -43,6 +43,18 @@ const use = (want: string) => {
   return i >= 0 && granted.splice(i, 1).length > 0
 }
 
+// switch (or with no mode, read) the lever; the reply text either way, ok false when the router is down
+const switchTo = async ($: EngineInterface, want: string): Promise<{ ok: boolean; text: string }> => {
+  try {
+    const l = await lever($, want ? { lever: want === 'reset' ? null : want } : undefined)
+    show($, l)
+    return { ok: true, text: `claude-router: ${label(l)}` }
+  } catch (err) {
+    show($)
+    return { ok: false, text: `claude-router isn't reachable at ${BASE}: ${(err as Error).message}` }
+  }
+}
+
 const label = (l: Lever) => (l.session ? `${l.lever} (this session)` : `${l.lever} (global)`)
 const show = ($: EngineInterface, l?: Lever) => $.ui.status(l ? `router: ${label(l)}` : 'router: down')
 
@@ -80,14 +92,8 @@ export const register: Register = on => {
     if (want && want !== 'reset' && !MODES.includes(want)) return { deny: `Unknown lever "${want}". Use one of: ${MODES.join(', ')}, or reset.` }
     if (want && !use(want))
       return { deny: `Not switching: the person hasn't typed "/router ${want}" for this switch (each one they type allows one). Only switch when they tell you to that way; they can also type /router ${want} themselves.` }
-    try {
-      const l = await lever($, want ? { lever: want === 'reset' ? null : want } : undefined)
-      show($, l)
-      return { result: `claude-router: ${label(l)}` }
-    } catch (err) {
-      show($)
-      return { deny: `claude-router isn't reachable at ${BASE}: ${(err as Error).message}` }
-    }
+    const r = await switchTo($, want ?? '')
+    return r.ok ? { result: r.text } : { deny: r.text }
   })
 
   on('prompt.submit', ($, e, next) => {
@@ -108,13 +114,6 @@ export const register: Register = on => {
     const want = args.toLowerCase()
     if (want && want !== 'reset' && !MODES.includes(want))
       return { text: `Unknown mode "${want}". Use one of: ${MODES.join(', ')}, reset, or name <text>.` }
-    try {
-      const l = await lever($, want ? { lever: want === 'reset' ? null : want } : undefined)
-      show($, l)
-      return { text: `claude-router: ${label(l)}` }
-    } catch (err) {
-      show($)
-      return { text: `claude-router isn't reachable at ${BASE}: ${(err as Error).message}` }
-    }
+    return { text: (await switchTo($, want)).text }
   })
 }

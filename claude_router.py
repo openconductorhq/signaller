@@ -60,6 +60,7 @@ def load_config(env: Mapping[str, str]) -> Config:
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
        "trailer", "trailers", "transfer-encoding", "upgrade", "host", "content-length"}
 OAUTH_BETA = "oauth-2025-04-20"
+WINDOW_HEADER = "X-Valar-Completion-Window"  # the router owns it: a client's own is dropped
 UPSTREAM_TIMEOUT = 600
 MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
                  b'"message":"claude-router: upstream ended mid-stream"}}\n\n')
@@ -79,7 +80,7 @@ def upstream_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple
     out = []
     for k, v in headers:
         lk = k.lower()
-        if lk in HOP or lk in ("authorization", "x-api-key", "x-valar-completion-window"):  # the router owns the window
+        if lk in HOP or lk in ("authorization", "x-api-key", WINDOW_HEADER.lower()):
             continue
         if lk == "anthropic-beta":
             v = ",".join(b for b in (x.strip() for x in v.split(",")) if b and b != OAUTH_BETA)
@@ -95,8 +96,9 @@ def hoist_inline_tools(req: dict) -> bool:
     which the Messages API does not define"). Move each carried definition into top-level `tools` (a later
     same-name one replaces it), drop the blocks and any message they leave empty. True if anything changed."""
     old = req.get("tools") or []
-    rest = [t for t in old if not (isinstance(t, dict) and isinstance(t.get("name"), str))]  # kept as-is
-    tools, changed = {t["name"]: t for t in old if t not in rest}, False
+    named = lambda t: isinstance(t, dict) and isinstance(t.get("name"), str)
+    rest = [t for t in old if not named(t)]  # kept as-is
+    tools, changed = {t["name"]: t for t in old if named(t)}, False
     for m in req.get("messages") or []:
         c = m.get("content") if isinstance(m, dict) else None
         adds = [b for b in c if isinstance(b, dict) and b.get("type") == "tool_addition"] if isinstance(c, list) else []
@@ -111,6 +113,25 @@ def hoist_inline_tools(req: dict) -> bool:
         req["messages"] = [m for m in req["messages"] if not (isinstance(m, dict) and m.get("content") == [])]
         req["tools"] = rest + list(tools.values())
     return changed
+
+
+def prepare(app: "App", track: str, model: str, req, headers):
+    """A request as it leaves for a track, the served one and its shadow alike:
+    (name, base, key, ds, headers, out_model, window, changed). On a downstream the model is renamed, Valar's tool
+    fix applied, the client's credentials swapped for the downstream's key and the window set. `req` (when a dict)
+    is edited in place; `changed` says it must be re-serialised."""
+    name, base, key, ds = upstream(app, track)
+    if not ds:
+        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, False
+    out_model = track_model(model, ds)
+    hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
+    changed = isinstance(req, dict) and (hoisted or out_model != model)
+    if changed:
+        req["model"] = out_model
+    headers, window = upstream_headers(headers, key), track_window(model, ds)
+    if window:
+        headers.append((WINDOW_HEADER, window))
+    return name, base, key, ds, headers, out_model, window, changed
 
 
 RETRY_DELAYS = (0.5, 1.5, 3)  # seconds before each retry of a connection failure (~5 s of blips covered)
@@ -303,11 +324,12 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 model, stream = str(req.get("model", "-")), bool(req.get("stream"))
             except (ValueError, AttributeError):
                 pass
-            lever = app.session_levers.get(session_of(self.headers, req))
+            any_sid = session_of(self.headers, req)
+            lever = app.session_levers.get(any_sid)
             if lever:  # /router set this session's own lever
                 routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
-                f = Features.from_body(body) if is_routed(self.command, self.path) else None
+                f = Features.from_body(body, req) if is_routed(self.command, self.path) else None
                 d = decide_route(routing, f, app.classifier) if f else None
             except Exception as e:
                 self._error(500, "claude-router: routing failed")
@@ -315,46 +337,35 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__), file=sys.stderr, flush=True)
                 return
             route, reason = (d.track, d.reason) if d else ("anthropic", "passthrough")
-            try:  # routing already read the tags; no upstream (or shadow) needs them
-                if f and isinstance(req, dict) and strip_lead_tags(req):
-                    body = json.dumps(req).encode()
-            except Exception:
-                pass
-            shown = out_model = model
+            shown = model
             rec = f is not None and self.path.split("?", 1)[0] == "/v1/messages"
-            sid = session_of(self.headers, req) if rec else None
+            sid = any_sid if rec else None
             rid = app.store.next_id() if rec else None
             if rec and sid:
                 try:
                     app.sessions.note(sid, t0)
                 except Exception:
                     pass
-            window = None
             pair, cap, shadow, turn_id = None, None, "-", None
             try:  # a doubling fault must never change the served request
                 turn_id = app.doubler.turn_for(f, route, routing.doubling, sid) if rec and app.doubler else None
                 if turn_id:  # shadow starts before the served upstream; it never touches the served path again
-                    pair = app.doubler.pending_served(turn_id, rid, None, route, routing.doubling.shadow[route])
+                    pair = app.doubler.pending_served(turn_id, rid, route, routing.doubling.shadow[route])
                     shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
-                                                      self.headers.items(), body, app)
+                                                      self.headers.items(), body, app)  # the shadow strips its own tags
             except Exception as e:
                 print("doubling failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
                 pair, shadow, turn_id = None, "-", None
-            name, base, key, ds = upstream(app, route)
-            if ds:
-                out_model = track_model(model, ds)
-                hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
-                if out_model != model or hoisted:
-                    req["model"] = out_model
-                    body = json.dumps(req).encode()
-                if out_model != model:
-                    shown = "%s→%s" % (model, out_model)
-                headers = upstream_headers(self.headers.items(), key)
-                window = track_window(model, ds)
-                if window:
-                    headers.append(("X-Valar-Completion-Window", window))
-            else:
-                headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]
+            stripped = False
+            try:  # routing already read the tags; no upstream needs them
+                stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
+            except Exception:
+                pass
+            name, base, key, ds, headers, out_model, window, changed = prepare(app, route, model, req, self.headers.items())
+            if stripped or changed:
+                body = json.dumps(req).encode()
+            if out_model != model:
+                shown = "%s→%s" % (model, out_model)
             status, err, ttfb, conn = 0, "", None, None
             try:
                 if route != "anthropic" and not key:  # never fall back to another track
@@ -413,18 +424,19 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 except Exception:
                     cost = api_cost = None
                 if pair:
-                    res = res or {"text": "", "tools": [], "output_tokens": None}
+                    res = res or AnswerCapture.EMPTY
                     pair.finish({**res, "status": status, "ttfb_ms": ttfb, "ms": ms,
                                  "error": err.strip() or res.get("error")})
                 if rec:
                     app.store.record_request({
                         "id": rid, "ts": t0, "track": route, "reason": d.reason, "explanation": json.dumps(d.explanation),
                         "model_in": model, "model_out": out_model, "status": status, "ttfb_ms": ttfb if ttfb is not None else ms,
-                        "ms": ms, "stream": int(stream), "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.text)[:120], "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
+                        "ms": ms, "stream": int(stream), "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120], "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
                         "session_id": sid, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
                         "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
                         "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window,
                         "cost": cost, "api_cost": api_cost})
+                    f.prompt = None  # recorded; the preview deque keeps only the capped text
                     app.recent.append((f, d, rid))
                 shown_reason = '"%s"' % reason if re.search(r"\s", reason) else reason
                 print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s shadow=%s" % (

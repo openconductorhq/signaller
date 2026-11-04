@@ -43,7 +43,7 @@ const hms = (ts) => { const d = new Date(ts * 1000); return `${pad(d.getHours())
 const fmtMs = (ms) => ms == null ? "–" : ms < 1000 ? ms + " ms" : ms < 10000 ? (ms / 1000).toFixed(1) + " s" : Math.round(ms / 1000) + " s";
 const fmtUp = (s) => s < 60 ? s + "s" : s < 3600 ? Math.floor(s / 60) + "m" : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m` : `${Math.floor(s / 86400)}d ${Math.floor(s / 3600) % 24}h`;
 const isErr = (status) => status === 0 || status >= 500;
-const tierOf = (m) => { m = (m || "").toLowerCase(); return m.includes("haiku") ? "haiku" : m.includes("sonnet") ? "sonnet" : m.includes("opus") ? "opus" : "other"; };
+const tierOf = (m) => { m = (m || "").toLowerCase(); return ["haiku", "sonnet", "opus", "fable"].find((t) => m.includes(t)) || "other"; };  // as routing.tier_of
 
 const hm = (ts) => { const d = new Date(ts * 1000); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const usd = (v) => "$" + (!v ? "0" : v < 0.1 ? v.toFixed(3) : v.toFixed(2));

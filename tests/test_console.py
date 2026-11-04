@@ -564,7 +564,7 @@ class ListModelsRedirectTest(unittest.TestCase):
     def test_redirect_not_followed_and_key_not_leaked(self):
         import threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
-        from console import list_models
+        from console import fetch_models
         auth = []
 
         class B(BaseHTTPRequestHandler):
@@ -586,7 +586,7 @@ class ListModelsRedirectTest(unittest.TestCase):
             threading.Thread(target=x.serve_forever, daemon=True).start()
         try:
             with self.assertRaises(Exception):
-                list_models("http://127.0.0.1:%d" % a.server_address[1], "k")
+                fetch_models("http://127.0.0.1:%d" % a.server_address[1], "k")
             self.assertEqual(auth, [])
         finally:
             a.shutdown(); b.shutdown(); a.server_close(); b.server_close()

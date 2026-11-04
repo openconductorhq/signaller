@@ -356,6 +356,10 @@ class ProxyTest(unittest.TestCase):
     def test_leading_tag_routes_and_is_stripped(self):
         self.post(body_for("claude-opus-5-5", {"messages": [{"role": "user", "content": "#execution fix it"}]}), HDRS)
         self.assertEqual(json.loads(self.v.seen[0][3])["messages"][0]["content"], "fix it")
+        self.logged(1)
+        self.app.store.close()
+        r = self.app.store.departures()[0]
+        self.assertEqual((r["preview"], self.app.store.request(r["id"])["prompt"]), ("fix it", "fix it"))
         self.assertEqual(self.a.seen, [])
 
     def test_tool_step_recorded(self):

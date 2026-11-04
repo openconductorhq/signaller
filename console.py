@@ -2,7 +2,6 @@
 import json
 import os
 import re
-import tempfile
 import time
 import sys
 import urllib.error
@@ -10,9 +9,10 @@ import urllib.request
 from dataclasses import asdict, replace
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from keys import write_json
 from prices import parse_valar
-from routing import (MAX_DOWNSTREAMS, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, config_from_json, config_to_json,
-                     downstream, references, route, tracks, valid_id)
+from routing import (MAX_DOWNSTREAMS, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, untagged, config_from_json, config_to_json,
+                     downstream, route, tracks, valid_id)
 from rulelang import RuleError, parse
 
 UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui")
@@ -75,14 +75,14 @@ def preview(app, body):
             raise Err(400, "rule is nested too deeply")
         if would.reason == "rule:" + rule.name or would.reason.startswith("rule:%s:" % rule.name):
             changed += would.track != d.track
-            rows.append({"id": rid, "ts": None, "went": d.track, "why": d.reason, "would": would.track, "preview": f.text[:120]})
+            rows.append({"id": rid, "ts": None, "went": d.track, "why": d.reason, "would": would.track, "preview": untagged(f.text)[:120]})
     ids = [x["id"] for x in rows]
     ts = {r["id"]: r["ts"] for r in app.store.departures(limit=200) if r["id"] in ids}
     for x in rows:
         x["ts"] = ts.get(x["id"])
     ms = (time.time() - t0) * 1000
     return {"matched": len(rows), "changed": changed, "rows": rows, "slow": ms > 50,
-            "since_restart": True, "count": len(app.recent)}
+            "count": len(app.recent)}
 
 
 def fetch_models(url, key, timeout=5):
@@ -91,10 +91,6 @@ def fetch_models(url, key, timeout=5):
     nored = urllib.request.build_opener(type("NoRedirect", (urllib.request.HTTPRedirectHandler,), {"redirect_request": lambda *a: None}))
     with nored.open(req, timeout=timeout) as r:  # a redirect would re-send the key elsewhere
         return json.load(r)
-
-
-def list_models(url, key, timeout=5):
-    return sorted(m["id"] for m in fetch_models(url, key, timeout)["data"])
 
 
 def read_models(config_dir):
@@ -113,14 +109,7 @@ def save_models(config_dir, **updates):
     saved = read_models(config_dir)
     if all(saved.get(k) == v for k, v in updates.items()):
         return
-    fd, tmp = tempfile.mkstemp(dir=config_dir)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump({k: v for k, v in {**saved, **updates}.items() if v is not None}, f, indent=1)
-        os.replace(tmp, os.path.join(config_dir, "models.json"))
-    except BaseException:
-        os.unlink(tmp)
-        raise
+    write_json(os.path.join(config_dir, "models.json"), {k: v for k, v in {**saved, **updates}.items() if v is not None}, indent=1)
 
 
 def clean_url(url):

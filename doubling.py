@@ -6,6 +6,8 @@ import time
 import uuid
 import zlib
 
+from routing import strip_lead_tags
+
 TEXT_CAP, INPUT_CAP = 50_000, 2000
 TURN_TTL = 30 * 60
 
@@ -16,6 +18,7 @@ class NotConfigured(Exception):
 
 class AnswerCapture:
     """Collects text, tool calls and output tokens from a response, fed in arbitrary chunks. Never raises."""
+    EMPTY = {"text": "", "tools": [], "output_tokens": None}  # result() with nothing captured; never mutated
 
     def __init__(self, content_type: str, content_encoding: str = ""):
         self.sse = (content_type or "").startswith("text/event-stream")
@@ -37,10 +40,9 @@ class AnswerCapture:
             except zlib.error:
                 self.error = "bad compressed data"
                 return
-        if not self.sse:
-            self.buf += chunk
-            return
         self.buf += chunk
+        if not self.sse:
+            return
         *lines, self.buf = self.buf.split(b"\n")
         for line in lines:
             if line.startswith(b"data:"):
@@ -154,17 +156,16 @@ class Doubler:
                 return None
             if not e[3]:
                 e[3] = True
-                self.store.record_turn({"id": e[0], "ts": now, "preview": f.text[:120], "session_id": session_id})
+                self.store.record_turn({"id": e[0], "ts": now, "preview": f.prompt[:120], "session_id": session_id})
             return e[0]
 
-    def pending_served(self, turn_id, request_id, step, served_track, shadow_track) -> PairHandle:
-        """step None = next step of the turn."""
+    def pending_served(self, turn_id, request_id, served_track, shadow_track) -> PairHandle:
+        """The pair for the turn's next step."""
         with self.lock:
-            if step is None:
-                e = self.by_id.get(turn_id)
-                if e:
-                    e[2] += 1
-                step = e[2] if e else 1
+            e = self.by_id.get(turn_id)
+            if e:
+                e[2] += 1
+            step = e[2] if e else 1
             h = self.pending[request_id] = PairHandle(self.store, turn_id, request_id, step, served_track, shadow_track)
         return h
 
@@ -175,8 +176,7 @@ class Doubler:
             track = h.row["shadow_track"]
             cap = self.caps.setdefault(track, threading.BoundedSemaphore(2))
         if not cap.acquire(blocking=False):
-            h.shadow({"skipped": "busy", "status": None, "ttfb_ms": None, "ms": None, "error": None,
-                      "text": "", "tools": [], "output_tokens": None})
+            h.shadow({**AnswerCapture.EMPTY, "skipped": "busy", "status": None, "ttfb_ms": None, "ms": None, "error": None})
             return "busy"
         with self.lock:
             self.inflight[track] = self.inflight.get(track, 0) + 1
@@ -185,8 +185,8 @@ class Doubler:
             threading.Thread(target=self._run, args=(h, track, method, path, headers, body, app), daemon=True).start()
         except Exception as e:  # e.g. can't start new thread: give the slot back, the served request goes on
             self._release(track)
-            h.shadow({"skipped": "error", "status": None, "ttfb_ms": None, "ms": None, "error": type(e).__name__,
-                      "text": "", "tools": [], "output_tokens": None})
+            h.shadow({**AnswerCapture.EMPTY, "skipped": "error", "status": None, "ttfb_ms": None, "ms": None,
+                      "error": type(e).__name__})
             return "-"
         return track
 
@@ -196,30 +196,18 @@ class Doubler:
         self.caps[track].release()
 
     def _run(self, h, track, method, path, headers, body, app):
-        from claude_router import HOP, hoist_inline_tools, upstream, upstream_headers  # late: claude_router imports this module
-        from routing import track_model, track_window
+        from claude_router import prepare  # late: claude_router imports this module
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
         model_out, window, ds = None, None, None
         try:
             req = json.loads(body)
             req["stream"] = False
-            headers = [(k, v) for k, v in headers if k.lower() != "accept-encoding"]  # identity, so it can be read
-            name, base, key, ds = upstream(app, track)
-            if track != "anthropic":
-                if not key:
-                    raise NotConfigured("%s has no key" % name)
-                model_in = str(req.get("model", ""))
-                req["model"] = track_model(model_in, ds)
-                if ds.kind == "valar":
-                    hoist_inline_tools(req)
-                headers = upstream_headers(headers, key)
-                window = track_window(model_in, ds)
-                if window:
-                    out["window"] = window
-                    headers.append(("X-Valar-Completion-Window", window))
-            else:
-                headers = [(k, v) for k, v in headers if k.lower() not in HOP]
-            model_out = str(req.get("model", ""))
+            strip_lead_tags(req)
+            name, base, key, ds, headers, model_out, window, _ = prepare(app, track, str(req.get("model", "")), req, headers)
+            if track != "anthropic" and not key:
+                raise NotConfigured("%s has no key" % name)
+            if window:
+                out["window"] = window
             conn, resp = self.open_upstream(base, method, path, headers, json.dumps(req).encode())
             out["ttfb_ms"], out["status"] = int((time.time() - t0) * 1000), resp.status
             cap = AnswerCapture(resp.getheader("content-type", ""), resp.getheader("content-encoding", ""))
@@ -231,7 +219,7 @@ class Doubler:
                 conn.close()
             self._release(track)
         out["ms"] = int((time.time() - t0) * 1000)
-        res = cap.result() if cap else {"text": "", "tools": [], "output_tokens": None}
+        res = cap.result() if cap else AnswerCapture.EMPTY
         try:
             out["cost"] = self.prices.cost(ds, model_out, window, res.get("usage") or {}) if self.prices else None
         except Exception:

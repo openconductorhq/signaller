@@ -52,12 +52,17 @@ breaks.
   last message. In a tool loop that text is the same on every step, so the
   turn, its tags, the classifier cache and `turn_key` all hold for the whole
   turn. Step-only details (`Features.step`) are for display.
-- **Tags** count only at the very start of the prompt (`lead_tags`), and
+- **Tags** count only at the very start of the prompt (`lead_tags`).
   `strip_lead_tags` removes them from every user prompt before the body goes
-  anywhere, the doubling shadow included. Keep that step before doubling.
+  anywhere; the doubling shadow strips its own copy. The console shows the
+  prompt as sent (`untagged`).
+- **One request prep for every track:** `prepare()` in `claude_router.py`
+  renames the model, applies Valar's tool fix, swaps credentials and sets the
+  window, for the served request and its shadow alike. Change it there, once.
 - **The body is rewritten only when something changes** (leading tags, a
-  downstream's model name, Valar's tool fixes): `req` is edited and
-  re-serialised once. An untouched Anthropic request goes out byte for byte.
+  downstream's model name, Valar's tool fixes): `req` is parsed once, edited,
+  and re-serialised once. An untouched Anthropic request goes out byte for
+  byte.
 - **Prices:** Anthropic rates are per tier in `prices.DEFAULT_ANTHROPIC`. A new
   key there must load from an old `prices.json` (`load()` merges defaults).
   Downstream prices stay at the four `PRICE_KEYS`. Valar is priced from its

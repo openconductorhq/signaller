@@ -43,6 +43,12 @@ def lead_tags(text: str) -> frozenset:
     return frozenset(t.lower() for t in TAG_RE.findall(m.group())) if m else frozenset()
 
 
+def untagged(text: str) -> str:
+    """The prompt without its leading #tags, as upstreams get it; a prompt that is only tags stays as is."""
+    m = LEAD_TAGS_RE.match(text)
+    return text[m.end():] if m and text[m.end():].strip() else text
+
+
 def strip_lead_tags(req: dict) -> bool:
     """Drop the leading #tags from every user prompt in the request (upstreams don't need them).
     True when anything changed. A prompt that is only tags is kept as is, never sent empty."""
@@ -60,10 +66,9 @@ def strip_lead_tags(req: dict) -> bool:
                 continue
         else:
             continue
-        m = LEAD_TAGS_RE.match(holder[key])
-        if m and holder[key][m.end():].strip():
-            holder[key] = holder[key][m.end():]
-            hit = True
+        t = untagged(holder[key])
+        if t != holder[key]:
+            holder[key], hit = t, True
     return hit
 
 
@@ -155,14 +160,14 @@ class Features:
     def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None):
         self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
         self.step = step  # the tool results this request carries back (display only; routing uses text)
-        self.prompt = text  # uncapped, for the Traffic view
+        self.prompt = untagged(text)  # uncapped and as sent upstream (no leading tags), for display
         self.tier, self.subagent, self.turn_key = tier_of(model), subagent, turn_key
 
     @classmethod
-    def from_body(cls, body: bytes):
-        """None when the body isn't a messages request we can route (passthrough)."""
+    def from_body(cls, body: bytes, req=None):
+        """None when the body isn't a messages request we can route (passthrough). `req`: the body already parsed."""
         try:
-            req = json.loads(body)
+            req = json.loads(body) if req is None else req
             model = req["model"]
             if not isinstance(model, str):
                 return None

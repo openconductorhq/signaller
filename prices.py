@@ -3,7 +3,7 @@ import json
 import os
 import sys
 
-from routing import tier_of
+from routing import PRICE_KEYS as KEYS, tier_of
 
 VALAR_TIERS = {"realtime": "asap", "priority": "priority", "standard": "standard"}  # flex/batch: never sent
 _SONNET = {"in": 2.0, "out": 10.0, "cache_read": 0.20, "cache_write": 2.5, "cache_write_1h": 4.0}
@@ -16,7 +16,6 @@ DEFAULT_ANTHROPIC = {
     "haiku": {"in": 0.10, "out": 0.50, "cache_read": 0.01, "cache_write": 0.125, "cache_write_1h": 0.2},
     "other": dict(_SONNET),
 }
-KEYS = ("in", "out", "cache_read", "cache_write")
 
 
 def parse_valar(payload: dict) -> dict:
