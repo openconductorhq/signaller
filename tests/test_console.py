@@ -226,7 +226,7 @@ class ConsoleTest(Fixture):
             self.app.routing.downstreams))
         before = time.strftime("%H:%M")
         j = self.js("GET", "/ui/api/state")[1]
-        self.assertEqual([(c["line"], c["by"]) for c in j["collisions"]], [(2, 1)])  # s1's line is shadowed by the always line
+        self.assertEqual([(c["line"], c["by"]) for c in j["collisions"]], [(2, 1)])  # s1's line overlaps the always line
         self.assertEqual(set(j["clock"]), {"tz", "hm"})
         self.assertIn(j["clock"]["hm"], {before, time.strftime("%H:%M")})  # the router's own wall clock; a minute may roll between the request and here
 

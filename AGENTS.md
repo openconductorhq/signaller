@@ -62,10 +62,14 @@ breaks.
 - **Settings lines** (`config.settings`, `overrides.py`) run inside that same
   `prepare()`, after the track is chosen: they change the window and model for
   that downstream, served and shadow alike, ignore the lever, and never touch
-  an Anthropic request. First matching line per key wins (`resolve`). The
-  plugin's `/router <downstream> window|model …` writes through
+  an Anthropic request. First matching line per key wins (`resolve`). A
+  window the final model isn't priced for falls back to Now (the same rule the
+  Tracks row applies); the hour a turn uses is pinned at its first request
+  (`App.hour_of`), so a tool loop crossing an hour boundary doesn't switch
+  mid-turn. The plugin's `/router <downstream> window|model …` writes through
   `set_settings_for_session` (inserted at the top, under the lock), and
-  `prune_settings` drops session ids unseen for a week.
+  `prune_settings` drops session ids unseen for a week — an id with no
+  sessions row counts as unseen (forgotten sessions go too).
 - **The body is rewritten only when something changes** (leading tags, a
   downstream's model name, Valar's tool fixes): `req` is parsed once, edited,
   and re-serialised once. An untouched Anthropic request goes out byte for
@@ -99,7 +103,10 @@ breaks.
     checks this
   - fonts are local in `ui/fonts/`
 - **The console API** is under `/ui/api/`. Every PUT, POST or DELETE needs a
-  loopback `Origin` (the CSRF check). When testing with curl, send
+  loopback `Origin` (the CSRF check). `PUT /ui/api/config` also needs the
+  body's `rev` to equal `state`'s `config_rev` — a page saving a config that
+  changed elsewhere (a `/router` write, a prune) gets 409 and reloads, rather
+  than erasing those lines. When testing with curl, send
   `-H 'Origin: http://127.0.0.1:<port>'`.
 - **The config** (`console.json`) is version 4. If you change its shape, add a
   migration in `routing.config_from_json`, plus a fixture under

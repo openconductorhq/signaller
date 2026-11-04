@@ -97,8 +97,8 @@ checked every 15 s.
 
 A session's own lever lives in the router's memory, so a router restart drops
 it. Settings lines set with `/router` are saved in `console.json`, so they
-survive a restart; a session id with no request for a week is dropped from
-them.
+survive a restart; a session id unseen for a week — including one the stats
+no longer know at all — is dropped from them.
 
 Claude can switch the lever too, through the plugin's `router_lever` tool, but
 only when you typed `/router <mode>` in a message. That can be "do /router
@@ -258,13 +258,17 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
   condition (`session is <id>` — pick sessions first and "Add line" fills them
   in — or `hour >= 0 and hour < 7`; blank means always), a downstream, a tier
   or every tier, and what it sets: the completion window (Valar-kind
-  downstreams only) or the model name. Checked top to bottom, first match
-  wins, and a window line plus a model line both apply. Routing, the lever and
-  Anthropic are untouched. The router's own clock shows beside the list,
-  because `hour` is the router's local time. A line that can never fire
-  because an earlier one already matched is listed as a collision — it still
-  saves, since a deliberate override is a collision on purpose. `/router`'s
-  per-session form writes the same lines.
+  downstreams only) or the model name. "+ Add line" starts as a no-op: the
+  sonnet slot's current window or model, until you edit it. Checked top to
+  bottom, first match wins, and a window line plus a model line both apply;
+  the hour is read once per turn, so a turn crossing an hour boundary keeps
+  its hour. Routing, the lever and Anthropic are untouched. The router's own
+  clock shows beside the list, because `hour` is the router's local time (in
+  the container set `TZ` in the env file; see [Environment](#environment)). A
+  line an earlier line beats where both match is listed as a collision — it
+  still saves, since a deliberate override overlaps on purpose. `/router`'s
+  per-session form writes the same lines; a whole-config save that would land
+  on lines written since the page loaded is refused and the page reloads them.
 - **Classifier:** a rule that asks a small model which label the newest human
   message fits, once per turn, cached.
   - **What it calls:** an OpenAI-style `/v1/chat/completions`, so its upstream
