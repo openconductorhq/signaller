@@ -247,6 +247,7 @@ class RoutingConfig:
     downstreams: tuple[Downstream, ...]
     seeded: bool = False  # the valar downstream got its url/key from the env once
     migrated_off: tuple[str, ...] = field(default=(), compare=False)  # rules the v2→v3 migration switched off; banner only
+    settings: tuple = ()  # overrides.Setting lines; last so positional constructors stay valid
 
 
 def tracks(cfg: RoutingConfig) -> tuple[str, ...]:
@@ -273,6 +274,7 @@ def references(cfg: RoutingConfig, id: str, session_levers: Mapping[str, str]) -
     out = ["the lever"] if cfg.lever == id else []
     out += [f"session {sid[:8]}'s lever" for sid, lv in session_levers.items() if lv == id]
     out += [f"rule '{r.name}' line {n}" for r in cfg.rules if r.enabled for n, ln in enumerate(r.lines, 1) if ln.track == id]
+    out += [f"settings line {n}" for n, s in enumerate(cfg.settings, 1) if s.downstream == id]
     out += ["Otherwise"] if cfg.otherwise == id else []
     out += [f"classifier label '{l.name}'" for l in cfg.classifier.labels if l.track == id]
     out += ["classifier upstream"] if cfg.classifier.upstream == id else []
@@ -398,7 +400,9 @@ def config_from_json(obj: dict) -> RoutingConfig:
         off = ()
         if obj.get("version") == 2:
             obj, off = _v2_to_v3(obj)
-        if obj.get("version") != 3:
+        if obj.get("version") == 3:
+            obj = {**obj, "version": 4, "settings": []}
+        if obj.get("version") != 4:
             raise ValueError("unsupported config version")
         if len(obj["downstreams"]) > MAX_DOWNSTREAMS:
             raise ValueError(f"at most {MAX_DOWNSTREAMS} downstreams")
@@ -438,17 +442,21 @@ def config_from_json(obj: dict) -> RoutingConfig:
             if o is not None and (o not in ts or o == t):
                 raise ValueError(f"doubling shadow for {t} must be another track or none")
         dbl = Doubling(_unit(d["rate"], "doubling rate"), str(d["tag"]), {t: sh[t] for t in ts})
+        import overrides  # local: overrides imports routing, so the module can't import it at the top
+        settings = overrides.settings_from_json(obj.get("settings", []), tuple(dss))
         return RoutingConfig(obj["lever"], otherwise, rules,
                              ClassifierSettings(str(c["model"]), thr,
                                                 float(_num(c["timeout_s"], 0.1, 30, "classifier time limit must be 0.1–30 s")), labels,
-                                                c["upstream"]), dbl, tuple(dss), bool(obj.get("seeded", False)), off)
+                                                c["upstream"]), dbl, tuple(dss), bool(obj.get("seeded", False)), off, settings)
     except (KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"bad config: {e!r}") from None
 
 
 def config_to_json(cfg: RoutingConfig) -> dict:
+    import overrides  # local: overrides imports routing, so the module can't import it at the top
     return {
-        "version": 3, "lever": cfg.lever, "otherwise": cfg.otherwise, "seeded": cfg.seeded,
+        "version": 4, "settings": overrides.settings_to_json(cfg.settings),
+        "lever": cfg.lever, "otherwise": cfg.otherwise, "seeded": cfg.seeded,
         "rules": [{"name": r.name, "kind": r.kind, "enabled": r.enabled, "text": r.text, "builtin": r.builtin}
                   for r in cfg.rules],
         "classifier": {"model": cfg.classifier.model, "threshold": cfg.classifier.threshold,
