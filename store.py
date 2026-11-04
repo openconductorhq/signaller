@@ -370,6 +370,7 @@ class Store:
         span = [t0, t1]
         by = {r["track"]: r for r in self._all(
             "SELECT track, COUNT(*) n, COALESCE(SUM(in_tok),0) i, COALESCE(SUM(out_tok),0) o, COALESCE(SUM(cost),0) cost, "
+            "COALESCE(SUM(cache_read_tok),0) cr, COALESCE(SUM(cache_write_tok),0) cw, "
             "COALESCE(SUM(api_cost),0) api, "
             "COALESCE(SUM(CASE WHEN cost IS NOT NULL THEN api_cost - cost END),0) sav, "
             "COALESCE(SUM(CASE WHEN cost IS NOT NULL THEN api_cost END),0) papi, SUM(cost IS NULL AND COALESCE(in_tok, out_tok, cache_read_tok, cache_write_tok) IS NOT NULL) nocost FROM requests WHERE %s AND ts BETWEEN ? AND ? GROUP BY track" % sc,
@@ -378,13 +379,13 @@ class Store:
             "SELECT p.shadow_track, COALESCE(SUM(p.shadow_cost),0) c FROM pairs p JOIN requests r ON r.id=p.request_id "
             "WHERE %s AND r.ts BETWEEN ? AND ? GROUP BY p.shadow_track" % self._sess(sessions, "r.session_id")[0], sa + span)}
         total = sum(r["n"] for r in by.values())
-        z = {"n": 0, "i": 0, "o": 0, "cost": 0, "api": 0, "sav": 0, "papi": 0, "nocost": 0}
+        z = {"n": 0, "i": 0, "o": 0, "cr": 0, "cw": 0, "cost": 0, "api": 0, "sav": 0, "papi": 0, "nocost": 0}
         out_tracks = {}
         for t in dict.fromkeys([*tracks, *by]):
             r = by.get(t, z)
             out_tracks[t] = {"n": r["n"], "pct": round(100 * r["n"] / total) if total else 0, "in": r["i"], "out": r["o"],
                              "cost": r["cost"], "api_cost": r["api"], "unpriced": r["nocost"] if t != "anthropic" else 0,
-                             "comparisons": comp.get(t, 0)}
+                             "comparisons": comp.get(t, 0), "cache_read": r["cr"], "cache_write": r["cw"]}
             if t not in tracks:
                 out_tracks[t]["removed"] = True
         rules = {}
@@ -505,7 +506,7 @@ class NullStore:
     def list_sessions(self, *a, **k): return []
     def first_ts(self, *a): return 0
     def summary(self, sessions, t0, t1, now, tracks):
-        t = {"n": 0, "pct": 0, "in": 0, "out": 0, "cost": 0, "api_cost": 0, "unpriced": 0, "comparisons": 0}
+        t = {"n": 0, "pct": 0, "in": 0, "out": 0, "cost": 0, "api_cost": 0, "unpriced": 0, "comparisons": 0, "cache_read": 0, "cache_write": 0}
         return {"total": 0, "per_minute": 0, "tracks": {k: dict(t) for k in tracks}, "savings": 0, "saved_would": 0, "rules": {}, "errors": 0,
                 "tally": dict.fromkeys([*tracks, "same"], 0)}
     def turn(self, turn_id): return None

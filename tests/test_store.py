@@ -255,9 +255,15 @@ def test_summary(tmp_path):
     assert s.summary([], 0, now + 1, now, T)["total"] == 0
     assert s.first_ts(["sb"]) == now - 50
     s2 = Store(str(tmp_path / "s.db"))  # an unpriced valar row with tokens and an api_cost is not a saving
-    s2.record_request(req(8, now - 10, "valar", 200, reason="default", session_id="sb", cost=None, api_cost=9.0, in_tok=5, out_tok=5))
+    s2.record_request(req(8, now - 10, "valar", 200, reason="default", session_id="sb", cost=None, api_cost=9.0, in_tok=5, out_tok=5,
+                          cache_read_tok=100, cache_write_tok=10))
+    s2.close()  # writes are queued: flush before reading
+    s2 = Store(str(tmp_path / "s.db"))
     m2 = s2.summary(None, 0, now + 1, now, T)
     assert m2["savings"] == m["savings"] and m2["saved_would"] == m["saved_would"] == 1.5
+    assert (m2["tracks"]["valar"]["cache_read"], m2["tracks"]["valar"]["cache_write"]) == (100, 10)  # only row 8 has cache counts
+    assert (m2["tracks"]["anthropic"]["cache_read"], m2["tracks"]["anthropic"]["cache_write"]) == (0, 0)
+    assert (m2["tracks"]["local"]["cache_read"], m2["tracks"]["local"]["cache_write"]) == (0, 0)
     s2.close()
 
 
@@ -294,6 +300,12 @@ def test_summary_includes_removed_tracks(tmp_path):
     assert set(m["tally"]) == {"anthropic", "valar", "local", "lemmi", "same"}
     n = store.NullStore().summary(None, 0, 1, 1, ("anthropic", "x"))
     assert set(n["tracks"]) == {"anthropic", "x"}
+
+
+def test_nullstore_summary_cache_keys():
+    m = store.NullStore().summary(None, 0, 1, 1, ["anthropic", "valar"])
+    assert set(m["tracks"]) == {"anthropic", "valar"}
+    assert all(t["cache_read"] == 0 and t["cache_write"] == 0 for t in m["tracks"].values())
 
 
 def test_reprice_fills_only_null_costs(tmp_path):
