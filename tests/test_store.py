@@ -216,9 +216,9 @@ T = ("anthropic", "valar", "local")
 
 def test_session_last_seen(tmp_path):
     s, now = Store(str(tmp_path / "s.db")), time.time()
-    s.touch_session("MixedCase", now - 100)
+    s.touch_session("mixedcase", now - 100)
     s.close()
-    assert s.session_last_seen(["mixedcase", "gone"]) == {"mixedcase": now - 100}  # lowered: settings lines hold lowered ids
+    assert s.session_last_seen(["mixedcase", "gone"]) == {"mixedcase": now - 100}  # ids arrive lowered: settings lines hold lowered ids
     assert NullStore().session_last_seen(["x"]) == {}
 
 

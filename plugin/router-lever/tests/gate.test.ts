@@ -1,22 +1,28 @@
 import { expect, test } from 'claude-code/testing'
 
 const TOOL = 'mcp__router-lever__router_lever'
+const LEVER = JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] })
 
-test('Claude switches the lever only when the latest prompt asks for it', async ($, on) => {
-  const puts: string[] = []
+// one stub router per test: everything the hooks need, with the test's own http.fetch
+const stub = ($: any, on: any, http: (e: any) => any) => {
   on('command.register', () => ({ value: { command: 'router' } }))
   on('tool.register', () => ({ value: { tool: TOOL } }))
   on('session.id', () => ({ value: 's1' }))
   on('clock.every', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
-  on('http.fetch', (_, e) => {
-    if (e.init?.method === 'PUT') puts.push(String(e.init.body))
-    return { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] }) } }
-  })
+  on('http.fetch', (_, e) => http(e))
   on('prompt.submit', (_, e) => ({ text: e.text }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.call', () => ({ result: 'engine' }))
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  return $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+}
+
+test('Claude switches the lever only when the latest prompt asks for it', async ($, on) => {
+  const puts: string[] = []
+  await stub($, on, (e) => {
+    if (e.init?.method === 'PUT') puts.push(String(e.init.body))
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
 
   await $.prompt.submit({ text: 'please simplify this file' })
   expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')  // never asked
@@ -37,12 +43,7 @@ test('Claude switches the lever only when the latest prompt asks for it', async 
 
 test('the settings form is gated like the lever: one write per typed /router, of exactly those values', async ($, on) => {
   const puts: string[] = []
-  on('command.register', () => ({ value: { command: 'router' } }))
-  on('tool.register', () => ({ value: { tool: TOOL } }))
-  on('session.id', () => ({ value: 's1' }))
-  on('clock.every', () => ({ value: undefined }))
-  on('ui.status', () => ({ value: undefined }))
-  on('http.fetch', (_, e) => {
+  await stub($, on, (e) => {
     const body = e.init?.method === 'PUT' ? String(e.init.body) : ''
     if (body.includes('"downstream"')) {
       puts.push(body)
@@ -52,12 +53,8 @@ test('the settings form is gated like the lever: one write per typed /router, of
         collisions: [{ line: 2, by: 1, text: 'line 2 is shadowed by line 1' }],
       }) } }
     }
-    return { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] }) } }
+    return { value: { ok: true, status: 200, text: LEVER } }
   })
-  on('prompt.submit', (_, e) => ({ text: e.text }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('tool.call', () => ({ result: 'engine' }))
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   await $.prompt.submit({ text: 'please leave the window alone' })
   expect((await $.tool.call({ tool: TOOL, settings: 'valar window priority' })).deny).toContain('Not setting')  // never asked
@@ -81,24 +78,14 @@ test('the settings form is gated like the lever: one write per typed /router, of
 
 test('a typed settings form is no lever grant; the value keeps its case on its way to the router', async ($, on) => {
   const puts: string[] = []
-  on('command.register', () => ({ value: { command: 'router' } }))
-  on('tool.register', () => ({ value: { tool: TOOL } }))
-  on('session.id', () => ({ value: 's1' }))
-  on('clock.every', () => ({ value: undefined }))
-  on('ui.status', () => ({ value: undefined }))
-  on('http.fetch', (_, e) => {
+  await stub($, on, (e) => {
     const body = e.init?.method === 'PUT' ? String(e.init.body) : ''
     if (body.includes('"downstream"')) {
       puts.push(body)
-      const b = JSON.parse(body)
       return { value: { ok: true, status: 200, text: JSON.stringify({ lines: [], collisions: [] }) } }
     }
-    return { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] }) } }
+    return { value: { ok: true, status: 200, text: LEVER } }
   })
-  on('prompt.submit', (_, e) => ({ text: e.text }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('tool.call', () => ({ result: 'engine' }))
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   await $.prompt.submit({ text: 'do /router valar window priority' })  // a settings form grants only that write
   expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')
@@ -124,16 +111,8 @@ test('a typed settings form is no lever grant; the value keeps its case on its w
 })
 
 test('modes come from the router: a downstream id works, a removed one is unknown', async ($, on) => {
-  on('command.register', () => ({ value: { command: 'router' } }))
-  on('tool.register', () => ({ value: { tool: TOOL } }))
-  on('session.id', () => ({ value: 's1' }))
-  on('clock.every', () => ({ value: undefined }))
-  on('ui.status', () => ({ value: undefined }))
-  on('http.fetch', () => ({ value: { ok: true, status: 200, text: JSON.stringify({ lever: 'lemmi', session: 'lemmi', global: 'rules', modes: ['rules', 'anthropic', 'lemmi'] }) } }))
-  on('prompt.submit', (_, e) => ({ text: e.text }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('tool.call', () => ({ result: 'engine' }))
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await stub($, on, () => ({ value: { ok: true, status: 200, text: JSON.stringify(
+    { lever: 'lemmi', session: 'lemmi', global: 'rules', modes: ['rules', 'anthropic', 'lemmi'] }) } }))
 
   await $.prompt.submit({ text: 'do /router lemmi' })
   expect((await $.tool.call({ tool: TOOL, lever: 'lemmi' })).deny).toBeUndefined()

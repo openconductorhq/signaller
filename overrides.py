@@ -3,8 +3,8 @@ Pure. The proxy applies them in prepare(); the console edits them through the AP
 import json
 from dataclasses import dataclass, replace
 
-from rulelang import RuleError, evaluate, parse_cond
-from routing import MODEL_TIERS, WINDOWS, tier_of
+from rulelang import RuleError, evaluate, fields_of, parse_cond
+from routing import MODEL_TIERS, WINDOWS, slot
 
 
 @dataclass(frozen=True)
@@ -17,12 +17,9 @@ class Setting:
     value: str
 
 
-def _fields(c):
-    return {c[1]} if c[0] == "cmp" else _fields(c[1]) | (_fields(c[2]) if len(c) > 2 else set())
-
-
-def _session_ids(c):
-    """The session ids when the condition is only `session is X` terms joined by or, else None."""
+def session_ids(st):
+    """The Setting's session ids when its condition is only `session is X` terms joined by or, else None."""
+    c = st.cond
     if c is None:
         return None
     ids = set()
@@ -38,58 +35,51 @@ def _session_ids(c):
     return frozenset(ids) if walk(c) else None
 
 
-def is_session_line(s):
-    """The Setting's session ids when its condition is only `session is X` terms joined by or, else None."""
-    return _session_ids(s.cond)
+def setting_from_json(it, downstreams, n):
+    """One settings line (console.json's shape) -> a Setting; ValueError("settings line N: …") on bad input."""
+    kinds = {d.id: d.kind for d in downstreams}
+
+    def bad(msg):
+        raise ValueError(f"settings line {n}: {msg}")
+
+    if not isinstance(it, dict):
+        bad("must be an object")
+    when, ds, tier = it.get("when", ""), it.get("downstream"), it.get("tier")
+    key, value = it.get("set"), it.get("value")
+    if not isinstance(when, str):
+        bad("when must be text")
+    if ds not in kinds:
+        bad(f"no downstream named {ds!r}")
+    if key not in ("window", "model"):
+        bad("set must be window or model")
+    if tier is not None and (not isinstance(tier, str) or tier not in MODEL_TIERS):
+        bad("tier must be one of " + ", ".join(MODEL_TIERS) + " or null")
+    if not isinstance(value, str) or not value:
+        bad("value must be non-empty text")
+    if key == "window":
+        if kinds[ds] != "valar":
+            bad("a window setting needs a valar downstream")
+        if value not in WINDOWS:
+            bad("window must be " + ", ".join(WINDOWS))
+    try:
+        cond = parse_cond(when)
+    except RuleError as e:
+        bad(str(e))
+    if cond is not None and "label" in fields_of(cond):
+        bad("label can't be used in a setting")
+    return Setting(when, cond, ds, tier, key, value)
 
 
 def settings_from_json(items, downstreams):
     """console.json's settings list -> Settings; ValueError("settings line N: …") on bad input."""
     if not isinstance(items, list):
         raise ValueError("settings must be a list")
-    kinds = {d.id: d.kind for d in downstreams}
-    out = []
-    for n, it in enumerate(items, 1):
-        def bad(msg):
-            raise ValueError(f"settings line {n}: {msg}")
-        if not isinstance(it, dict):
-            bad("must be an object")
-        when, ds, tier = it.get("when", ""), it.get("downstream"), it.get("tier")
-        key, value = it.get("set"), it.get("value")
-        if not isinstance(when, str):
-            bad("when must be text")
-        if ds not in kinds:
-            bad(f"no downstream named {ds!r}")
-        if key not in ("window", "model"):
-            bad("set must be window or model")
-        if tier is not None and (not isinstance(tier, str) or tier not in MODEL_TIERS):
-            bad("tier must be one of " + ", ".join(MODEL_TIERS) + " or null")
-        if not isinstance(value, str) or not value:
-            bad("value must be non-empty text")
-        if key == "window":
-            if kinds[ds] != "valar":
-                bad("a window setting needs a valar downstream")
-            if value not in WINDOWS:
-                bad("window must be " + ", ".join(WINDOWS))
-        try:
-            cond = parse_cond(when)
-        except RuleError as e:
-            bad(str(e))
-        if cond is not None and "label" in _fields(cond):
-            bad("label can't be used in a setting")
-        out.append(Setting(when, cond, ds, tier, key, value))
-    return tuple(out)
+    return tuple(setting_from_json(it, downstreams, n) for n, it in enumerate(items, 1))
 
 
 def settings_to_json(settings):
     return [{"when": s.when, "downstream": s.downstream, "tier": s.tier, "set": s.key, "value": s.value}
             for s in settings]
-
-
-def slot(model):
-    """The tier a request's model uses, mirroring track_window: non-claude (and unmatched claude) models use sonnet's."""
-    t = tier_of(model) if model.startswith("claude-") else "sonnet"
-    return t if t in MODEL_TIERS else "sonnet"
 
 
 def resolve(settings, ds_id, model, get):
@@ -109,7 +99,7 @@ def resolve(settings, ds_id, model, get):
 
 
 def _hour_only(c):
-    return c is not None and _fields(c) == {"hour"}
+    return c is not None and fields_of(c) == {"hour"}
 
 
 def _hset(c):
@@ -132,6 +122,8 @@ def _ranges(hours):
 
 def collisions(settings):
     """Lines that can never fire because an earlier line already matched: {"line": j, "by": i, "text": str}."""
+    ids = [session_ids(st) for st in settings]
+    hours = [_hset(st.cond) if _hour_only(st.cond) else None for st in settings]
     out = []
     for j, b in enumerate(settings):
         for i, a in enumerate(settings[:j]):
@@ -139,13 +131,12 @@ def collisions(settings):
                 continue
             if not (a.tier is None or b.tier is None or a.tier == b.tier):
                 continue
-            if _hour_only(a.cond) and _hour_only(b.cond):
-                shared = _hset(a.cond) & _hset(b.cond)
+            if hours[i] is not None and hours[j] is not None:
+                shared = hours[i] & hours[j]
                 if not shared:
                     continue
                 when = " at hours " + _ranges(shared)
-            elif _session_ids(a.cond) is not None and _session_ids(b.cond) is not None \
-                    and not (_session_ids(a.cond) & _session_ids(b.cond)):
+            elif ids[i] is not None and ids[j] is not None and not (ids[i] & ids[j]):
                 continue
             else:
                 when = ""
@@ -158,19 +149,24 @@ def _rebuild(st, ids):
     return replace(st, when=when, cond=parse_cond(when))
 
 
-def prune(settings, last_seen, now, days=7):
-    """Drop ids last seen more than `days` ago from session lines; a line left with no ids goes."""
+def _drop_ids(settings, gone):
+    """A line with its ids filtered out (gone(st, id) → True removes that id); a line left with no ids goes."""
     out = []
     for st in settings:
-        ids = _session_ids(st.cond)
+        ids = session_ids(st)
         if ids is None:
             out.append(st)
             continue
-        # ponytail: an id with unknown last_seen is kept; guessing needs the store, which prune stays clear of
-        keep = frozenset(i for i in ids if last_seen(i) is None or now - last_seen(i) <= days * 86400)
+        keep = frozenset(i for i in ids if not gone(st, i))
         if keep:
             out.append(_rebuild(st, keep) if keep != ids else st)
     return tuple(out)
+
+
+def prune(settings, last_seen, now, days=7):
+    """Drop ids last seen more than `days` ago from session lines; a line left with no ids goes."""
+    # ponytail: an id with unknown last_seen is kept; guessing needs the store, which prune stays clear of
+    return _drop_ids(settings, lambda st, i: last_seen(i) is not None and now - last_seen(i) > days * 86400)
 
 
 def upsert_session(settings, sid, ds_id, tier, key, value):
@@ -178,7 +174,7 @@ def upsert_session(settings, sid, ds_id, tier, key, value):
     sid = sid.lower()
 
     def match(st):
-        return st.downstream == ds_id and st.tier == tier and st.key == key and _session_ids(st.cond) == frozenset((sid,))
+        return st.downstream == ds_id and st.tier == tier and st.key == key and session_ids(st) == frozenset((sid,))
 
     if value is None:
         return tuple(st for st in settings if not match(st))
@@ -192,16 +188,7 @@ def upsert_session(settings, sid, ds_id, tier, key, value):
 def reset_session(settings, sid, ds_id):
     """Take the sid out of every session line for ds_id; a line left with no ids goes."""
     sid = sid.lower()
-    out = []
-    for st in settings:
-        ids = _session_ids(st.cond)
-        if ids is None or st.downstream != ds_id or sid not in ids:
-            out.append(st)
-            continue
-        keep = ids - frozenset((sid,))
-        if keep:
-            out.append(_rebuild(st, keep))
-    return tuple(out)
+    return _drop_ids(settings, lambda st, i: st.downstream == ds_id and i == sid)
 
 
 def describe(applied):

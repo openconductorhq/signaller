@@ -195,7 +195,7 @@ async function tick() {
 
 function applyState(st) {
   S = st;
-  if (st.clock) $("sttClock").textContent = "Router time " + (st.clock.hm || hm(st.clock.now)) + " (" + st.clock.tz + ")";  // hm: the router's own wall clock, what "hour" means; a wrong zone must be visible
+  if (st.clock) $("sttClock").textContent = "Router time " + st.clock.hm + " (" + st.clock.tz + ")";  // the router's own wall clock, what "hour" means; a wrong zone must be visible
   const n = view.pick.length;  // departures list the span's requests, paged back with "Load older"
   $("depFrom").textContent = `${plural(st.summary.total, "request")}${n ? ` from the ${n === 1 ? "picked session" : n + " picked sessions"}` : ""} · ${spanText()}`;
   const s = st.stats;
@@ -619,11 +619,17 @@ function classifierBits(r, i) {
 }
 const setCls = (patch) => save({ ...cfg, classifier: { ...cfg.classifier, ...patch } }, $("rbErr"));
 
-function move(from, to) {
-  const rs = [...cfg.rules];
-  if (to < 0 || to >= rs.length || from === to) return;
+// Move an item of a list (a rule, a settings line); null when that move goes nowhere.
+const reorder = (list, from, to) => {
+  if (to < 0 || to >= list.length || from === to) return null;
+  const rs = [...list];
   rs.splice(to, 0, rs.splice(from, 1)[0]);
-  save(withRules(rs), $("rbErr"));
+  return rs;
+};
+
+function move(from, to) {
+  const rs = reorder(cfg.rules, from, to);
+  if (rs) save(withRules(rs), $("rbErr"));
 }
 
 let dragFrom = null;
@@ -693,14 +699,12 @@ function renderSettings() {
 const setSettings = (settings) => save({ ...cfg, settings }, $("sttErr"));
 const setLine = (i, patch) => setSettings(cfg.settings.map((s, k) => k === i ? { ...s, ...patch } : s));
 const moveLine = (from, to) => {
-  const rs = [...cfg.settings];
-  if (to < 0 || to >= rs.length || from === to) return;
-  rs.splice(to, 0, rs.splice(from, 1)[0]);
-  setSettings(rs);
+  const rs = reorder(cfg.settings, from, to);
+  if (rs) setSettings(rs);
 };
 // A pick that changes what's valid: a window line needs a valar downstream, an offered window and a real model.
-function setPart(i, patch) {
-  const s = { ...cfg.settings[i], ...patch }, ds = dsOf(s.downstream) || {}, models = ds.models || {};
+function fixPart(s) {
+  const ds = dsOf(s.downstream) || {}, models = ds.models || {};
   if (ds.kind !== "valar") s.set = "model";
   if (s.set === "window") {
     const wins = windowsFor(models[s.tier || "sonnet"]);
@@ -708,8 +712,9 @@ function setPart(i, patch) {
   } else if (!s.value || Object.keys(WIN).includes(s.value)) {
     s.value = models[s.tier || "sonnet"] || "";
   }
-  setLine(i, { ...patch, downstream: s.downstream, set: s.set, value: s.value });  // patch first: a tier/set change must survive the validity fixes
+  return s;
 }
+const setPart = (i, patch) => setLine(i, fixPart({ ...cfg.settings[i], ...patch }));
 function stLine(s, i, clash) {
   const ds = dsOf(s.downstream), valar = !!(ds && ds.kind === "valar"), models = (ds && ds.models) || {}, last = i === cfg.settings.length - 1;
   const ids = [...s.when.matchAll(/session is (\S+)/gi)].map((m) => m[1]);
@@ -735,13 +740,13 @@ function stLine(s, i, clash) {
             onclick: () => setSettings(cfg.settings.filter((_, k) => k !== i)) }, "Delete"))),
       ids.length ? el("div", { class: "hint shint" }, "sessions: " + ids.map((x) => shortLabel(x)).join(", ")) : null));
 }
-// A new line goes on top, pre-filled with the picked sessions (the same ones the chips show).
+// A new line goes on top, pre-filled with the picked sessions (the same ones the chips show);
+// fixPart picks its window or model, the same fix-up an edit of that line would get.
 $("stAdd").addEventListener("click", () => {
   const ds = DS().find((d) => d.kind === "valar") || DS()[0];
   if (!ds) return;
-  setSettings([{ when: view.pick.filter((x) => x !== "unknown").map((x) => "session is " + x).join(" or "),
-    downstream: ds.id, tier: null, set: ds.kind === "valar" ? "window" : "model",
-    value: ds.kind === "valar" ? "asap" : (ds.models && ds.models.sonnet) || "" }, ...cfg.settings]);
+  setSettings([fixPart({ when: view.pick.filter((x) => x !== "unknown").map((x) => "session is " + x).join(" or "),
+    downstream: ds.id, tier: null, set: "window", value: "" }), ...cfg.settings]);
 });
 
 /* doubling strip */

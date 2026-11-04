@@ -69,23 +69,32 @@ const take = (list: string[], want: string) => {
   const i = list.indexOf(want)
   return i >= 0 && list.splice(i, 1).length > 0
 }
-const use = (want: string) => take(granted, want)
-const useSettings = (want: string) => take(grantedSettings, want)
 
-// set (or reset) this session's settings line; the reply lists the session's resulting lines and any collisions
-const setSettings = async ($: EngineInterface, f: Form): Promise<{ ok: boolean; text: string }> => {
+// set (or reset) this session's settings line; the reply lists the session's resulting lines and any collisions.
+// `typed`: the settings form as typed, when the call must be gated on the person's "/router …" (the tool path);
+// the command path is the person's own hand and passes nothing. A failed write hands the say-so back.
+const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise<{ ok: boolean; text: string }> => {
+  if (!downstreams().includes(f.ds))
+    return { ok: false, text: `Unknown downstream "${f.ds}". The router's downstreams: ${downstreams().join(', ') || 'none yet'}.` }
+  const c = canon(f)
+  if (typed !== undefined && !take(grantedSettings, c))
+    return { ok: false, text: `Not setting: the person hasn't typed "/router ${typed}" for this change (each one they type allows one). Only set a line when they tell you to that way; they can also type /router ${typed} themselves.` }
   const session = await $.session.id()
   const body = 'reset' in f
     ? { session, downstream: f.ds, reset: true }
     : { session, downstream: f.ds, tier: f.tier, set: f.key, value: f.value }
   try {
     const r = await $.http.fetch(SETTINGS, { method: 'PUT', headers: HEADERS, body: JSON.stringify(body) })
-    if (!r.ok) return { ok: false, text: `claude-router answered ${r.status}: ${r.text.slice(0, 200)}` }
+    if (!r.ok) {
+      if (typed !== undefined) grantedSettings.push(c)
+      return { ok: false, text: `claude-router answered ${r.status}: ${r.text.slice(0, 200)}` }
+    }
     const back = JSON.parse(r.text) as { lines: Line[]; collisions: { text: string }[] }
     if ('reset' in f) return { ok: true, text: `claude-router: this session's ${f.ds} settings cleared` }
     const lines = back.lines.map(l => `claude-router: ${l.downstream} ${l.set} ${l.value} for this session${l.tier ? ` (${l.tier})` : ''}`)
-    return { ok: true, text: [...lines, ...back.collisions.map(c => c.text)].join('\n') }
+    return { ok: true, text: [...lines, ...back.collisions.map(x => x.text)].join('\n') }
   } catch (err) {
+    if (typed !== undefined) grantedSettings.push(c)
     return { ok: false, text: `claude-router isn't reachable at ${BASE}: ${(err as Error).message}` }
   }
 }
@@ -142,18 +151,12 @@ export const register: Register = on => {
     if (settings !== undefined) {
       const f = parseForm(settings)
       if (!f) return { deny: `Unknown settings "${settings}". Use "<downstream> [<tier>] window|model <value>", or "<downstream> reset".` }
-      if (!downstreams().includes(f.ds))
-        return { deny: `Unknown downstream "${f.ds}". The router's downstreams: ${downstreams().join(', ') || 'none yet'}.` }
-      const c = canon(f)
-      if (!useSettings(c))
-        return { deny: `Not setting: the person hasn't typed "/router ${settings}" for this change (each one they type allows one). Only set a line when they tell you to that way; they can also type /router ${settings} themselves.` }
-      const r = await setSettings($, f)
-      if (!r.ok) grantedSettings.push(c) // the write didn't happen: the person's say-so still stands
+      const r = await setSettings($, f, settings)
       return r.ok ? { result: r.text } : { deny: r.text }
     }
     const want = (e as { lever?: string }).lever
     if (want && want !== 'reset' && !MODES.includes(want)) return { deny: `Unknown lever "${want}". Use one of: ${MODES.join(', ')}, or reset.` }
-    if (want && !use(want))
+    if (want && !take(granted, want))
       return { deny: `Not switching: the person hasn't typed "/router ${want}" for this switch (each one they type allows one). Only switch when they tell you to that way; they can also type /router ${want} themselves.` }
     const r = await switchTo($, want ?? '')
     if (!r.ok && want) granted.push(want) // the switch didn't happen: the person's say-so still stands
@@ -176,11 +179,7 @@ export const register: Register = on => {
       }
     }
     const f = parseForm(args)
-    if (f) {
-      if (!downstreams().includes(f.ds))
-        return { text: `Unknown downstream "${f.ds}". The router's downstreams: ${downstreams().join(', ') || 'none yet'}.` }
-      return { text: (await setSettings($, f)).text }
-    }
+    if (f) return { text: (await setSettings($, f)).text }
     const want = args.toLowerCase()
     if (want && want !== 'reset' && !MODES.includes(want))
       return { text: `Unknown mode "${want}". Use one of: ${MODES.join(', ')}, reset, or name <text>.` }

@@ -225,7 +225,10 @@ def evaluate(cond, get):
     return v in x if o == "contains" else x == v
 
 
+def fields_of(cond):
+    """The field names a condition tree reads."""
+    return {cond[1]} if cond[0] == "cmp" else fields_of(cond[1]) | (fields_of(cond[2]) if len(cond) > 2 else set())
+
+
 def fields_used(lines):
-    def walk(c):
-        return walk(c[1]) | (walk(c[2]) if len(c) > 2 else set()) if c[0] != "cmp" else {c[1]}
-    return set().union(*(walk(l.cond) for l in lines))
+    return set().union(*(fields_of(l.cond) for l in lines))

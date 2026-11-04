@@ -129,6 +129,12 @@ MODEL_TIERS = ("fable", "opus", "sonnet", "haiku")
 WINDOWS = ("asap", "priority", "standard")  # Valar completion windows; flex rejects streaming, batch is async: never sent
 
 
+def slot(model: str) -> str:
+    """The tier a request's model uses, mirroring track_window: non-claude (and unmatched claude) models use sonnet's."""
+    t = tier_of(model) if model.startswith("claude-") else "sonnet"
+    return t if t in MODEL_TIERS else "sonnet"
+
+
 @dataclass(frozen=True)
 class Downstream:
     id: str
@@ -145,7 +151,7 @@ def track_model(model: str, ds: Downstream) -> str:
     """The model id a downstream serves for a request's model; non-claude ids pass through."""
     if not model.startswith("claude-"):
         return model
-    return ds.models.get(tier_of(model), ds.models["sonnet"])
+    return ds.models.get(slot(model), ds.models["sonnet"])
 
 
 def track_window(model: str, ds: Downstream) -> str | None:
@@ -153,7 +159,7 @@ def track_window(model: str, ds: Downstream) -> str | None:
     if ds.kind != "valar":
         return None
     w = ds.windows
-    return w.get(tier_of(model), w["sonnet"]) if model.startswith("claude-") else w["sonnet"]
+    return w.get(slot(model), w["sonnet"])
 
 
 class Features:
@@ -162,6 +168,7 @@ class Features:
         self.step = step  # the tool results this request carries back (display only; routing uses text)
         self.prompt = untagged(text)  # uncapped and as sent upstream (no leading tags), for display
         self.tier, self.subagent, self.turn_key = tier_of(model), subagent, turn_key
+        self.session, self.hour = session, hour
 
     @classmethod
     def from_body(cls, body: bytes, req=None):

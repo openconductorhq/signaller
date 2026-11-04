@@ -5,9 +5,9 @@ import shutil
 import tempfile
 import unittest
 
-from overrides import (Setting, collisions, describe, is_session_line, prune, reset_session, resolve,
-                        settings_from_json, settings_to_json, slot, upsert_session)
-from routing import DEFAULT_CONFIG, MODEL_TIERS, Downstream, config_from_json, config_to_json
+from overrides import (Setting, collisions, describe, prune, reset_session, resolve,
+                        session_ids, settings_from_json, settings_to_json, upsert_session)
+from routing import DEFAULT_CONFIG, MODEL_TIERS, Downstream, config_from_json, config_to_json, slot
 from rulelang import parse_cond
 from store import load_console_config
 
@@ -101,12 +101,12 @@ class ValidationTests(unittest.TestCase):
 
 
 class SessionLineTests(unittest.TestCase):
-    def test_is_session_line(self):
-        self.assertEqual(is_session_line(line("session is a or session is b")), frozenset(("a", "b")))
-        self.assertEqual(is_session_line(line("session is a")), frozenset(("a",)))
-        self.assertIsNone(is_session_line(line("")))
-        self.assertIsNone(is_session_line(line("hour < 7")))
-        self.assertIsNone(is_session_line(line("session is a and hour < 7")))
+    def test_session_ids(self):
+        self.assertEqual(session_ids(line("session is a or session is b")), frozenset(("a", "b")))
+        self.assertEqual(session_ids(line("session is a")), frozenset(("a",)))
+        self.assertIsNone(session_ids(line("")))
+        self.assertIsNone(session_ids(line("hour < 7")))
+        self.assertIsNone(session_ids(line("session is a and hour < 7")))
 
 
 class PruneTests(unittest.TestCase):

@@ -130,7 +130,7 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
     changed = isinstance(req, dict) and (hoisted or out_model != model)
     headers, window = upstream_headers(headers, key), track_window(model, ds)
     override = None
-    if f is not None:
+    if f is not None and (routing or app.routing).settings:
         try:
             applied = overrides.resolve((routing or app.routing).settings, ds.id, model, lambda n: f.get(n, lambda: "none"))
             override = overrides.describe(applied)
@@ -257,19 +257,20 @@ class App:
 
     def set_settings_for_session(self, sid: str, ds_id: str, tier: str | None, key: str, value: str | None,
                                  reset: bool = False) -> None:
-        """Set (or with reset, clear) one session's settings lines, under the lock. ValueError if the result would
-        not load (upsert_session itself doesn't validate); nothing is saved then."""
+        """Set (or with reset, clear) one session's settings lines, under the lock. ValueError if the line about to
+        be written wouldn't load (upsert_session itself doesn't validate); nothing is saved then."""
         with self._rlock:
+            if not reset:
+                overrides.setting_from_json({"when": "session is %s" % sid.lower(), "downstream": ds_id, "tier": tier,
+                                              "set": key, "value": value}, self.routing.downstreams, 1)
             st = overrides.reset_session(self.routing.settings, sid, ds_id) if reset else \
                 overrides.upsert_session(self.routing.settings, sid, ds_id, tier, key, value)
-            new = replace(self.routing, settings=st)
-            overrides.settings_from_json(overrides.settings_to_json(st), new.downstreams)  # raises ValueError
-            self._put(new)
+            self._put(replace(self.routing, settings=st))
 
     def prune_settings(self) -> None:
         """Drop session ids not seen for a week from settings lines. Never raises; saves only when something went."""
         try:
-            ids = {i for s in self.routing.settings for i in (overrides.is_session_line(s) or ())}
+            ids = {i for s in self.routing.settings if (lines := overrides.session_ids(s)) for i in lines}
             if isinstance(self.store, NullStore) or not ids:
                 return
             last = self.store.session_last_seen(sorted(ids))
@@ -515,8 +516,7 @@ def main() -> None:
         print("claude-router: config dir unusable: %s" % e, file=sys.stderr)
         sys.exit(2)
     srv = make_server(cfg, app)
-    app.start_price_refresh()
-    app.prune_settings()  # once now, then hourly with the price refresh
+    app.start_price_refresh()  # its thread also prunes settings on its first pass
     print("listening on %s:%d; anthropic=%s downstreams=%s" % (
         cfg.listen_host, cfg.listen_port, cfg.anthropic_url,
         ", ".join("%s (%s)" % (d.id, "key set" if app.keys.has(d.id) else "no key") for d in app.routing.downstreams)),

@@ -431,10 +431,10 @@ class Store:
         return out
 
     def session_last_seen(self, ids):
-        """id -> last_ts for the given session ids; ids are matched lowered, so settings lines' lowered ids hit."""
-        rows = self._all("SELECT id, last_ts FROM sessions WHERE lower(id) IN (%s)" % ",".join("?" * len(ids)),
-                         [i.lower() for i in ids])
-        return {r["id"].lower(): r["last_ts"] for r in rows if r["last_ts"] is not None}
+        """id -> last_ts for the given session ids, matched exactly (the index, not lower(id)): ids arrive lowered,
+        as settings lines hold them, so they hit."""
+        rows = self._all("SELECT id, last_ts FROM sessions WHERE id IN (%s)" % ",".join("?" * len(ids)), ids)
+        return {r["id"]: r["last_ts"] for r in rows if r["last_ts"] is not None}
 
     def turn(self, turn_id):
         r = self._all("SELECT * FROM turns WHERE id=?", (turn_id,))

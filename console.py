@@ -230,8 +230,7 @@ def state(app, query=None):
             "downstreams": {d.id: {"key_set": app.keys.has(d.id), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
             "recent_count": len(app.recent), "session_levers": dict(app.session_levers),
             "collisions": overrides.collisions(app.routing.settings),
-            "clock": {"now": time.time(), "tz": time.strftime("%Z"), "hour": time.localtime().tm_hour,
-                      "hm": time.strftime("%H:%M")}}
+            "clock": {"tz": time.strftime("%Z"), "hm": time.strftime("%H:%M")}}
 
 
 def api(h, app, method, path, query, body):
@@ -336,18 +335,13 @@ def api(h, app, method, path, query, body):
             raise Err(400, "session must be a Claude Code session id")
         if not downstream(app.routing, ds):
             raise Err(400, "no downstream named %r" % ds)
-        reset, tier, key = bool(body.get("reset")), body.get("tier"), body.get("set")
-        if not reset:
-            if key not in ("window", "model"):
-                raise Err(400, "set must be window or model")
-            if tier is not None and (not isinstance(tier, str) or tier not in MODEL_TIERS):
-                raise Err(400, "tier must be one of " + ", ".join(MODEL_TIERS) + " or null")
+        reset = bool(body.get("reset"))
         try:
-            app.set_settings_for_session(sid, ds, tier, key, body.get("value"), reset=reset)
-        except ValueError as e:  # the round-trip inside set_settings_for_session judged the result; nothing was saved
+            app.set_settings_for_session(sid, ds, body.get("tier"), body.get("set"), body.get("value"), reset=reset)
+        except ValueError as e:  # setting_from_json judged the changed line; nothing was saved
             raise Err(400, str(e))
         low = sid.lower()
-        hits = [s for s in app.routing.settings if low in (overrides.is_session_line(s) or frozenset())]
+        hits = [s for s in app.routing.settings if (ids := overrides.session_ids(s)) and low in ids]
         return {"lines": overrides.settings_to_json(hits), "collisions": overrides.collisions(app.routing.settings)}
     if path == "/ui/api/config" and method == "PUT":
         try:
