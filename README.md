@@ -75,6 +75,7 @@ These are read from `~/.config/claude-router/env`; `env.example` lists them.
 | `CLAUDE_ROUTER_CONFIG_DIR` | `~/.config/claude-router` | Config files (see [Data](#data)). |
 | `CLAUDE_ROUTER_STATS_DIR` | the config dir | Where `stats.db` lives. The image sets it to `/data` (the `stats` volume). |
 | `VALAR_URL`, `VALAR_API_KEY` | `https://api.valarhq.ai` | Used once, to seed the Valar downstream. |
+| `TZ` | the host's zone | The router's local time: the settings lines' `hour` field and the console clock. In the container set it to an IANA zone (`TZ=Asia/Jerusalem`); the host's `/etc/localtime` isn't shared into the VM under Colima, and an empty or unset `TZ` means UTC. |
 
 `LITELLM_*`, `CLAUDE_ROUTER_LOCAL_SONNET` and `CLAUDE_ROUTER_LOCAL_HAIKU` are no
 longer used. To keep using LiteLLM, add it as a downstream.
