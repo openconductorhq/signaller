@@ -5,7 +5,7 @@ import unittest
 from dataclasses import replace
 
 from claude_router import load_config
-from routing import (DEFAULT_CONFIG, MODEL_TIERS, ClassResult, Downstream, Features, Rule, is_routed, session_of, config_from_json,
+from routing import (DEFAULT_CONFIG, MODEL_TIERS, ClassResult, Downstream, Features, Rule, latest_tool_results, is_routed, session_of, config_from_json,
                      config_to_json, downstream, references, route, tier_of, track_model, track_window, tracks, valid_id)
 
 
@@ -566,3 +566,27 @@ class DownstreamTests(unittest.TestCase):
                 config_from_json(mod(f))
         ok = mod(ds(1, prices={"in": 1, "out": 2.5, "cache_read": 0.1, "cache_write": 0}))
         self.assertEqual(downstream(config_from_json(ok), "lemmi").prices["out"], 2.5)
+
+
+class ToolStepTest(unittest.TestCase):
+    def test_tool_results_named_from_the_call(self):
+        msgs = [user("do it"),
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "Bash", "input": {}},
+                                                  {"type": "tool_use", "id": "b", "name": "Read", "input": {}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "a", "content": "3 passed", "is_error": False},
+                    {"type": "tool_result", "tool_use_id": "b", "is_error": True,
+                     "content": [{"type": "text", "text": "no such file"}, {"type": "image"}]},
+                    {"type": "text", "text": "<system-reminder>x</system-reminder>"}]}]
+        self.assertEqual(latest_tool_results(msgs), "Bash: 3 passed\nRead (error): no such file [image]")
+        f = Features.from_body(body(msgs))
+        self.assertEqual((f.text, f.step), ("do it", "Bash: 3 passed\nRead (error): no such file [image]"))
+
+    def test_a_typed_prompt_is_not_a_step(self):
+        self.assertIsNone(latest_tool_results([user("hi")]))
+        self.assertIsNone(latest_tool_results([]))
+        self.assertIsNone(Features.from_body(body([user("hi")])).step)
+
+    def test_capped(self):
+        msgs = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "z", "content": "x" * 5000}]}]
+        self.assertEqual(latest_tool_results(msgs), ("tool: " + "x" * 5000)[:600])

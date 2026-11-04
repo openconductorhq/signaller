@@ -415,7 +415,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     app.store.record_request({
                         "id": rid, "ts": t0, "track": route, "reason": d.reason, "explanation": json.dumps(d.explanation),
                         "model_in": model, "model_out": out_model, "status": status, "ttfb_ms": ttfb if ttfb is not None else ms,
-                        "ms": ms, "stream": int(stream), "preview": f.text[:120], "prompt": f.prompt, "turn_id": turn_id,
+                        "ms": ms, "stream": int(stream), "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.text)[:120], "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
                         "session_id": sid, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
                         "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
                         "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window,

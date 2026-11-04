@@ -860,7 +860,8 @@ function explain(d) {
       d.cache_read_tok > 0 && `${tok(d.cache_read_tok)} cache read`,
       d.cache_write_tok > 0 && `${tok(d.cache_write_tok)} cache write` + (d.cache_write_1h_tok > 0 ? ` (${tok(d.cache_write_1h_tok)} 1h)` : "")
     ].filter(Boolean).join(" · ")].filter(Boolean).join(" · ")));
-  if (d.prompt) out.push(el("pre", { class: "prompt" }, d.prompt));
+  if (d.step) out.push(el("div", { class: "facts" }, "Tool results sent back in this step"), el("pre", { class: "prompt" }, d.step));
+  if (d.prompt) out.push(el("div", { class: "facts" }, d.step ? "The prompt it's working on" : "Prompt"), el("pre", { class: "prompt" }, d.prompt));
   if (d.turn_id) {
     let s = null;
     try { s = d.shadow ? JSON.parse(d.shadow.shadow) : null; } catch (_) { /* unreadable pair */ }

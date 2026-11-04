@@ -35,6 +35,29 @@ def latest_human_text(messages: list) -> str:
     return ""
 
 
+STEP_CAP = 600  # stored per request; ponytail: a snippet of each result, not the whole output
+
+
+def latest_tool_results(messages: list) -> str | None:
+    """What a tool-loop step sends back: "Bash: <result>" per tool_result in the last user message; None otherwise."""
+    if not messages or messages[-1].get("role") != "user" or not isinstance(messages[-1].get("content"), list):
+        return None
+    prev = messages[-2].get("content") if len(messages) > 1 and messages[-2].get("role") == "assistant" else None
+    names = {b.get("id"): b.get("name") for b in prev if isinstance(b, dict) and b.get("type") == "tool_use"} \
+        if isinstance(prev, list) else {}
+    out = []
+    for b in messages[-1]["content"]:
+        if not isinstance(b, dict) or b.get("type") != "tool_result":
+            continue
+        c = b.get("content")
+        c = c if isinstance(c, list) else [{"type": "text", "text": c if isinstance(c, str) else ""}]
+        text = " ".join(x.get("text", "") if x.get("type") == "text" else "[%s]" % x.get("type")
+                        for x in c if isinstance(x, dict))
+        out.append("%s%s: %s" % (names.get(b.get("tool_use_id")) or "tool", " (error)" if b.get("is_error") else "",
+                                 text.strip() or "(empty)"))
+    return "\n".join(out)[:STEP_CAP] if out else None
+
+
 def _sid_ok(sid) -> bool:
     """The id becomes a filename and a filter token: plain slug only, and not the null bucket's name."""
     return isinstance(sid, str) and sid != "unknown" and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid) is not None
@@ -97,8 +120,9 @@ def track_window(model: str, ds: Downstream) -> str | None:
 
 
 class Features:
-    def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False):
+    def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None):
         self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
+        self.step = step  # the tool results this request carries back (display only; routing uses text)
         self.prompt = text  # uncapped, for the Traffic view
         self.tier, self.subagent, self.turn_key = tier_of(model), subagent, turn_key
 
@@ -120,10 +144,11 @@ class Features:
             srv = any(isinstance(t, dict) and t.get("type") not in (None, "custom") for t in req.get("tools") or [])
             # Claude Code's own check of the whole conversation (auto-mode permissions): keep it on Anthropic too
             srv = srv or text.startswith("<transcript>")
+            step = latest_tool_results(req["messages"])
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
             return None
         tags = frozenset(t.lower() for t in TAG_RE.findall(text))
-        return cls(text, tags, model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), srv)
+        return cls(text, tags, model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), srv, step)
 
     def get(self, name: str, label: Callable[[], str]):
         return label() if name == "label" else getattr(self, {"tag": "tags"}.get(name, name))

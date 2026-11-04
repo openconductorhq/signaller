@@ -353,6 +353,17 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(ok[1]["in_tok"], 10)
         self.assertEqual((ok[2]["status"], ok[2]["in_tok"], ok[2]["out_tok"]), (529, None, None))
 
+    def test_tool_step_recorded(self):
+        msgs = [{"role": "user", "content": "fix it"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "a.py\nb.py"}]}]
+        self.post(body_for("claude-sonnet-5-5", {"messages": msgs}), HDRS)
+        self.logged(1)
+        self.app.store.close()
+        r = self.app.store.departures()[0]
+        self.assertEqual((r["preview"], r["step"]), ("↳ Bash: a.py · b.py", "Bash: a.py\nb.py"))
+        self.assertEqual(self.app.store.request(r["id"])["prompt"], "fix it")
+
     def test_cost_recorded_and_repriced(self):
         b = body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "USAGE"}]}, stream=True)
         self.post(b)  # Valar, no prices loaded yet
