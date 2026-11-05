@@ -74,7 +74,7 @@ def upstream(app: "App", track: str, routing=None) -> tuple[str, str, str, Downs
     if track == "anthropic":
         return "Anthropic", app.cfg.anthropic_url, "", None
     ds = downstream(routing or app.routing, track)
-    return (ds.name, ds.url, app.keys.get(track), ds) if ds else (track, "", "", None)
+    return (ds.name, ds.url, app.keys.get(track, ds.url), ds) if ds else (track, "", "", None)
 
 
 def upstream_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple[str, str]]:
@@ -206,6 +206,7 @@ class App:
         self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
         self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
         self.keys = Keys(config_dir)
+        self.keys.migrate({d.id: d.url for d in self.routing.downstreams})
         self.seed()
         self.classifier = Classifier(self._classifier_upstream)
         try:
@@ -233,8 +234,9 @@ class App:
             return
         url, key = self.cfg.env_valar
         dss = tuple(replace(d, url=url) if d.id == "valar" and url else d for d in self.routing.downstreams)
-        if key and downstream(self.routing, "valar"):
-            self.keys.set("valar", key)
+        vd = next((d for d in dss if d.id == "valar"), None)
+        if key and vd:
+            self.keys.set("valar", vd.url, key)
         self.set_routing(replace(self.routing, downstreams=dss, seeded=True))
 
     def refresh_prices(self) -> None:
@@ -334,7 +336,7 @@ class App:
             new = config_from_json(j)
             self._put(new)
             if key:
-                self.keys.set(d["id"], key)
+                self.keys.set(d["id"], d["url"], key)
             return new.downstreams[-1]
 
     def delete_downstream(self, id: str) -> list[str]:
@@ -346,8 +348,10 @@ class App:
             j = config_to_json(self.routing)
             j["downstreams"] = [d for d in j["downstreams"] if d["id"] != id]
             del j["doubling"]["shadow"][id]
+            ds = downstream(self.routing, id)  # before _put: the key is tied to the url it was set for
             self._put(config_from_json(j))
-            self.keys.delete(id)
+            if ds:
+                self.keys.delete(id, ds.url)
             return []
 
 
@@ -581,7 +585,7 @@ def main() -> None:
     app.start_price_refresh()  # its thread also prunes settings on its first pass
     print("listening on %s:%d; anthropic=%s downstreams=%s" % (
         cfg.listen_host, cfg.listen_port, cfg.anthropic_url,
-        ", ".join("%s (%s)" % (d.id, "key set" if app.keys.has(d.id) else "no key") for d in app.routing.downstreams)),
+        ", ".join("%s (%s)" % (d.id, "key set" if app.keys.has(d.id, d.url) else "no key") for d in app.routing.downstreams)),
         file=sys.stderr, flush=True)
     try:
         srv.serve_forever()

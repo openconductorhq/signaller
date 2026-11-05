@@ -341,7 +341,7 @@ class DoublingTest(unittest.TestCase):
         self.assertEqual(self.l.seen, [])
 
     def test_shadow_to_generic_downstream(self):
-        self.app.keys.set("lemmi", "LK")
+        self.app.keys.set("lemmi", self.l.url, "LK")
         r = self.app.routing
         self.app.routing = replace(r, downstreams=r.downstreams + (replace(LEMMI, url=self.l.url),),
                                    doubling=replace(r.doubling, shadow={"anthropic": "lemmi", "valar": None, "lemmi": None}))

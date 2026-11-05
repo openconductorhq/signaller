@@ -250,7 +250,7 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(self.a.seen[0][3], body)  # never on the Anthropic route
 
     def test_generic_downstream_passthrough(self):
-        self.app.keys.set("lemmi", "LK")  # after start: keys are read per request
+        self.app.keys.set("lemmi", self.l.url, "LK")  # after start: keys are read per request
         self.app.routing = replace(self.app.routing, lever="lemmi",
                                    downstreams=self.app.routing.downstreams + (replace(LEMMI, url=self.l.url),))
         t = {"name": "late", "input_schema": {"type": "object"}}
@@ -270,7 +270,7 @@ class ProxyTest(unittest.TestCase):
     def test_valar_kind_keeps_window_and_hoist(self):  # Valar extras follow kind, not the id "valar"
         w = {"fable": "asap", "opus": "asap", "sonnet": "standard", "haiku": "asap"}
         fast = replace(VALAR, id="fast", name="Fast", url=self.v.url, windows=w)
-        self.app.keys.set("fast", "FK")
+        self.app.keys.set("fast", self.v.url, "FK")
         self.app.routing = replace(self.app.routing, lever="fast", downstreams=(fast,))
         t = {"name": "late", "input_schema": {"type": "object"}}
         add = {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": t}}
@@ -362,7 +362,7 @@ class ProxyTest(unittest.TestCase):
         self.srv.shutdown()
         self.srv.server_close()
         self.start(self.l.url)
-        self.app.keys.set("cls", "CK")
+        self.app.keys.set("cls", slow.url, "CK")
         self.app.routing = replace(BASE, downstreams=(replace(VALAR, url=self.v.url), replace(LEMMI, id="cls", url=slow.url)),
                                    classifier=replace(BASE.classifier, timeout_s=0.2, upstream="cls"))
         t = time.time()
@@ -470,6 +470,7 @@ class ProxyTest(unittest.TestCase):
         with open(os.path.join(self.dir, "models.json")) as f:
             self.assertEqual(json.load(f)["listed_prices"]["valar"], {"VS": {"asap": [1, 0.5, 2]}})
         self.set_valar_url("http://127.0.0.1:1")
+        self.app.keys.set("valar", "http://127.0.0.1:1", "VK")  # a new host means entering the key again
         self.app.refresh_prices()  # failure is logged, never raised
         self.assertIn("valar prices", self.err.getvalue())
 
@@ -648,13 +649,13 @@ class SeedTest(unittest.TestCase):
         cfg = Config("127.0.0.1", 0, "http://a", ("http://v.example", "k1"))
         with contextlib.redirect_stderr(io.StringIO()):
             app = App(cfg, d)
-            self.assertEqual(app.keys.get("valar"), "k1")
+            self.assertEqual(app.keys.get("valar", "http://v.example"), "k1")
             self.assertTrue(app.routing.seeded)
             self.assertEqual(app.routing.downstreams[0].url, "http://v.example")
             self.assertEqual(oct(os.stat(os.path.join(d, "downstreams.keys.json")).st_mode & 0o777), "0o600")
             self.assertNotIn("k1", open(os.path.join(d, "console.json")).read())
             app.store.close()
-            app.keys.delete("valar")
+            app.keys.delete("valar", "http://v.example")
             lemmi = replace(app.routing.downstreams[0], id="lemmi", kind="generic", windows=None)
             # the person replaced Valar with another downstream
             app.set_routing(replace(app.routing, downstreams=(lemmi,), rules=tuple(replace(r, enabled=False) for r in app.routing.rules), lever="anthropic",
@@ -663,7 +664,7 @@ class SeedTest(unittest.TestCase):
             app.store.close()
             app = App(cfg, d)  # same env, restarted
             self.assertEqual([x.id for x in app.routing.downstreams], ["lemmi"])
-            self.assertFalse(app.keys.has("valar"))
+            self.assertFalse(app.keys.has("valar", "http://v.example"))
             app.store.close()
 
 

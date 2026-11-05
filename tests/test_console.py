@@ -327,6 +327,7 @@ class ConsoleTest(Fixture):
         self.v.models = b'{"data":[{"id":"a"}]}'
         self.js("GET", "/ui/api/models?track=valar")
         self.set_valar_url("http://127.0.0.1:1")
+        self.app.keys.set("valar", "http://127.0.0.1:1", "VK")  # a new host means entering the key again
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual((s, j["models"]), (200, ["a"]))
         self.assertIn("Valar unreachable", j["stale"])
@@ -347,11 +348,11 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.req("GET", "/ui/api/models?track=valar", host="evil.example")[0].status, 403)
         self.assertEqual(self.req("GET", "/ui/api/models?track=valar", origin="http://evil.com")[0].status, 403)
         self.assertEqual(self.v.seen, [])
-        self.app.keys.delete("valar")
+        self.app.keys.delete("valar", self.v.url)
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual((s, j["error"]), (502, "Valar not configured"))
         self.assertEqual(self.v.seen, [])
-        self.app.keys.set("valar", "VK")
+        self.app.keys.set("valar", self.v.url, "VK")
         self.set_valar_url("http://127.0.0.1:1")
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual(s, 502)
@@ -363,7 +364,7 @@ class ConsoleTest(Fixture):
         self.assertEqual(j["downstreams"]["valar"]["url"], self.v.url[7:])
         self.assertNotIn("VK", json.dumps(j))
         self.assertNotIn("LK", json.dumps(j))
-        self.app.keys.delete("valar")
+        self.app.keys.delete("valar", self.v.url)
         self.assertFalse(self.js("GET", "/ui/api/state")[1]["downstreams"]["valar"]["key_set"])
 
     def test_verdict_api_valar(self):
@@ -470,7 +471,7 @@ class DownstreamApiTest(Fixture):
         self.assertEqual(self.l.seen[-1][2]["Authorization"], "Bearer sk-TYPED")
         self.assertEqual(self.add(id="bad", url="lemmi.example")[0], 400)  # no scheme
         self.assertEqual(self.js("PUT", "/ui/api/downstreams/lemmi/key", {"key": "sk-NEW"}), (200, {"key_set": True}))
-        self.assertEqual(self.app.keys.get("lemmi"), "sk-NEW")
+        self.assertEqual(self.app.keys.get("lemmi", self.l.url + "/v1/"), "sk-NEW")
         self.assertEqual(self.js("PUT", "/ui/api/downstreams/lemmi/key", {"key": ""})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/downstreams/nope/key", {"key": "k"})[0], 404)
         self.assertEqual(self.req("PUT", "/ui/api/downstreams/lemmi/key", {"key": "k"}, origin=None)[0].status, 403)

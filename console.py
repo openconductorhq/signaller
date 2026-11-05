@@ -227,7 +227,7 @@ def state(app, query=None):
             "summary": app.store.summary(ids, t0, t1, time.time(), tracks(app.routing)), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
-            "downstreams": {d.id: {"key_set": app.keys.has(d.id), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
+            "downstreams": {d.id: {"key_set": app.keys.has(d.id, d.url), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
             "recent_count": len(app.recent), "session_levers": dict(app.session_levers),
             "collisions": app.collisions(),
             "active_windows": overrides.active_windows(app.routing.settings, time.localtime().tm_hour),
@@ -376,13 +376,14 @@ def api(h, app, method, path, query, body):
     if path == "/ui/api/downstreams" and method == "POST":
         return 201, add_downstream(app, body)
     m = re.fullmatch(r"/ui/api/downstreams/([^/]+)(/key)?", path)
-    if m and method in ("PUT", "DELETE") and not downstream(app.routing, m[1]):
+    ds = downstream(app.routing, m[1]) if m else None
+    if m and method in ("PUT", "DELETE") and not ds:
         raise Err(404, "no downstream named %s" % m[1])
     if m and m[2] and method == "PUT":
         key = body.get("key") if isinstance(body, dict) else None
         if not isinstance(key, str) or not key.strip():
             raise Err(400, "key must be non-empty text")
-        app.keys.set(m[1], key.strip())
+        app.keys.set(m[1], ds.url, key.strip())
         return {"key_set": True}
     if m and not m[2] and method == "DELETE":
         refs = app.delete_downstream(m[1])
