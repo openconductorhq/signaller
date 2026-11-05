@@ -193,6 +193,12 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["session"], None)
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["session_levers"], {})
 
+    def test_dangling_session_lever_shows_the_global(self):
+        self.app.session_levers["s1"] = "lemmi"  # a track this setup lacks, saved before a restart
+        j = self.js("GET", "/ui/api/lever?session=s1")[1]
+        self.assertEqual(j["lever"], "rules")
+        self.assertEqual(j["session"], None)
+
     def test_prompts_saved_and_served_to_the_plugin(self):
         s, j = self.put_cfg(prompts=[{"name": "execute", "text": "1. /signaller anthropic\n2. /simplify"}])
         self.assertEqual(s, 200)

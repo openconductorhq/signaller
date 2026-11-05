@@ -643,6 +643,29 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(self.a.seen[0][3], body)
 
 
+    def test_session_lever_survives_restart(self):
+        self.app.set_session_lever("s1", "valar")
+        self.assertEqual(App(Config("127.0.0.1", 0, self.a.url, (self.v.url, "VK")), self.dir).session_levers, {"s1": "valar"})
+
+    def test_dangling_session_lever_is_ignored(self):
+        self.app.session_levers["s1"] = "lemmi"          # a track the active setup doesn't have
+        self.post(body_for("claude-opus-5-5"), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual(len(self.a.seen), 1)            # followed the setup's own routing, no 502
+        self.assertEqual(self.app.session_levers["s1"], "lemmi")  # kept for when a preset has it again
+
+    def test_prune_levers_drops_gone_sessions(self):
+        self.app.store.touch_session("s1", time.time())
+        self.app.store.touch_session("s2", time.time() - 8 * 86400)
+        t = time.time()
+        while "s1" not in self.app.store.session_last_seen(["s1", "s2"]) and time.time() - t < 2:
+            time.sleep(0.01)  # the writer thread lands the rows
+        self.app.set_session_lever("s1", "valar")
+        self.app.set_session_lever("s2", "valar")
+        self.app.set_session_lever("s3", "valar")  # never sent traffic: no sessions row
+        self.app.prune_levers()
+        self.assertEqual(self.app.session_levers, {"s1": "valar"})
+
+
 class SeedTest(unittest.TestCase):
     def test_env_seeds_valar_once(self):
         d = tempfile.mkdtemp()

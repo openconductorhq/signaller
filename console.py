@@ -308,7 +308,7 @@ def api(h, app, method, path, query, body):
             app.set_session_lever(sid, lever)
         elif method != "GET":
             raise Err(405, "GET or PUT")
-        own = app.session_levers.get(sid)
+        own = app.lever_for(sid)
         return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes,
                 "name": st.session_name(sid), "notice": app.notices.get(sid), "prompts": dict(app.routing.prompts)}
     m = re.fullmatch(r"/ui/api/sessions/([^/]+)", path)

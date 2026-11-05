@@ -24,8 +24,8 @@ from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from prices import Prices, parse_valar
 from routing import (has_images, session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
-                     references, route as decide_route, track_model, track_window)
-from keys import Keys
+                     references, route as decide_route, track_model, track_window, tracks)
+from keys import Keys, write_json
 from store import NullStore, Store, load_console_config, save_console_config
 
 @dataclass
@@ -200,7 +200,8 @@ class App:
             self.banner = " ".join(filter(None, [self.banner, "Switched off because they sent traffic to Local, which is gone: %s."
                                                  % ", ".join(self.routing.migrated_off)]))
         self._rlock = threading.Lock()
-        self.session_levers = {}  # session id -> lever /signaller chose for that session only
+        self.lever_path = os.path.join(config_dir, "session_levers.json")
+        self.session_levers = self._load_levers()  # session id -> lever /signaller chose for that session only
         self.notices = {}  # session id -> {"turn", "text"}: the plugin shows it once (an image fallback)
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
         self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
@@ -263,6 +264,7 @@ class App:
             while True:
                 self.refresh_prices()
                 self.prune_settings()
+                self.prune_levers()
                 time.sleep(every)
         threading.Thread(target=loop, daemon=True).start()
 
@@ -312,11 +314,49 @@ class App:
         return self._turn_hours[turn_key]
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
-        # ponytail: memory only, a restart drops them (the status line shows it); one small entry per session that used /signaller
-        if lever:
-            self.session_levers[sid] = lever
-        else:
-            self.session_levers.pop(sid, None)
+        """One small entry per session that used /signaller; saved so a restart keeps it."""
+        with self._rlock:
+            if lever:
+                self.session_levers[sid] = lever
+            else:
+                self.session_levers.pop(sid, None)
+            write_json(self.lever_path, self.session_levers)
+
+    def _load_levers(self) -> dict[str, str]:
+        try:
+            with open(self.lever_path) as f:
+                levers = json.load(f)
+            if not (isinstance(levers, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in levers.items())):
+                raise ValueError("not a {sid: lever} object")
+            return levers
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:  # reason only, never the file's text; no banner: the levers are a convenience
+            print("session levers unreadable: %s" % type(e).__name__, file=sys.stderr, flush=True)
+            return {}
+
+    def lever_for(self, sid: str | None) -> str | None:
+        """The session's own /signaller lever, but only one the active setup can still follow (a restart, or a preset
+        switch, may have dropped the track it named); otherwise the global lever applies. The raw entry is kept."""
+        lever = self.session_levers.get(sid or "")
+        return lever if lever == "rules" or lever in tracks(self.routing) else None
+
+    def prune_levers(self) -> None:
+        """Drop session ids not seen for a week (no sessions row counts as gone too; same rule as overrides.prune).
+        Never raises; saves only when something went."""
+        try:
+            with self._rlock:
+                if isinstance(self.store, NullStore) or not self.session_levers:
+                    return
+                last = self.store.session_last_seen(list(self.session_levers))
+                dead = [sid for sid in self.session_levers
+                        if (t := last.get(sid.lower())) is None or time.time() - t > 7 * 86400]
+                if dead:
+                    for sid in dead:
+                        self.session_levers.pop(sid, None)
+                    write_json(self.lever_path, self.session_levers)
+        except Exception as e:
+            print("lever prune failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
 
     def set_routing(self, new: RoutingConfig) -> None:
         with self._rlock:  # file and memory must agree under concurrent PUTs
@@ -408,7 +448,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             except (ValueError, AttributeError):
                 pass
             any_sid = session_of(self.headers, req)
-            lever = app.session_levers.get(any_sid)
+            lever = app.lever_for(any_sid)
             if lever:  # /signaller set this session's own lever
                 routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
