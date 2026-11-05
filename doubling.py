@@ -197,7 +197,7 @@ class Doubler:
         self.caps[track].release()
 
     def _run(self, h, track, method, path, headers, body, app, routing=None, f=None):
-        from claude_router import prepare  # late: claude_router imports this module
+        from signaller import prepare  # late: signaller imports this module
         t0, out, conn, cap = time.time(), {"status": None, "ttfb_ms": None, "error": None}, None, None
         model_out, window, ds = None, None, None
         try:

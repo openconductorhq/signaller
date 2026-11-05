@@ -4,7 +4,7 @@ import os
 import unittest
 from dataclasses import replace
 
-from claude_router import load_config
+from signaller import load_config
 from overrides import Setting
 from routing import (DEFAULT_CONFIG, MODEL_TIERS, ClassResult, Downstream, Features, Rule, latest_tool_results, strip_lead_tags, is_routed, session_of, config_from_json,
                      config_to_json, downstream, references, route, tier_of, track_model, track_window, tracks, valid_id)
@@ -421,13 +421,13 @@ class ConfigTests(unittest.TestCase):
     def test_config_rejects_non_loopback(self):
         for listen in ("0.0.0.0:8787", "192.168.1.5:8787", "example.com:8787"):
             with self.assertRaises(ValueError):
-                load_config({"CLAUDE_ROUTER_LISTEN": listen})
-        self.assertEqual(load_config({"CLAUDE_ROUTER_LISTEN": "0.0.0.0:8787", "CLAUDE_ROUTER_IN_CONTAINER": "1"}).listen_host, "0.0.0.0")
+                load_config({"SIGNALLER_LISTEN": listen})
+        self.assertEqual(load_config({"SIGNALLER_LISTEN": "0.0.0.0:8787", "SIGNALLER_IN_CONTAINER": "1"}).listen_host, "0.0.0.0")
         with self.assertRaises(ValueError):  # only the any-address, and only in a container
-            load_config({"CLAUDE_ROUTER_LISTEN": "192.168.1.5:8787", "CLAUDE_ROUTER_IN_CONTAINER": "1"})
-        c = load_config({"CLAUDE_ROUTER_LISTEN": "localhost:9000"})
+            load_config({"SIGNALLER_LISTEN": "192.168.1.5:8787", "SIGNALLER_IN_CONTAINER": "1"})
+        c = load_config({"SIGNALLER_LISTEN": "localhost:9000"})
         self.assertEqual((c.listen_host, c.listen_port), ("localhost", 9000))
-        c = load_config({"CLAUDE_ROUTER_LISTEN": "[::1]:9000"})
+        c = load_config({"SIGNALLER_LISTEN": "[::1]:9000"})
         self.assertEqual((c.listen_host, c.listen_port), ("::1", 9000))
 
 

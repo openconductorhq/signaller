@@ -98,6 +98,22 @@ def resolve(settings, ds_id, model, get):
     return out
 
 
+def active_windows(settings, hour):
+    """Windows the schedule sets for every session at this hour: {ds: {tier: {"value", "line", "when"}}}.
+    Lines that name a session are skipped (they don't apply to everyone)."""
+    # ponytail: only blank or hour-only conditions; a line mixing hour with other fields isn't shown
+    out = {}
+    for n, st in enumerate(settings, 1):
+        if st.key != "window" or not (st.cond is None or _hour_only(st.cond)):
+            continue
+        if st.cond is not None and not evaluate(st.cond, lambda f: hour):
+            continue
+        d = out.setdefault(st.downstream, {})
+        for t in ([st.tier] if st.tier else MODEL_TIERS):
+            d.setdefault(t, {"value": st.value, "line": n, "when": st.when})
+    return out
+
+
 def _hour_only(c):
     return c is not None and fields_of(c) == {"hour"}
 
@@ -166,7 +182,7 @@ def _drop_ids(settings, gone):
 
 def prune(settings, last_seen, now, days=7):
     """Drop ids not seen for `days` from session lines; a line left with no ids goes. An id with no sessions row
-    counts as gone too (a session forgotten via the console's chip has its row deleted; ids written by /router
+    counts as gone too (a session forgotten via the console's chip has its row deleted; ids written by /signaller
     or the picker always have one)."""
     return _drop_ids(settings, lambda st, i: (t := last_seen(i)) is None or now - t > days * 86400)
 

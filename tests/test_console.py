@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 import overrides
-from claude_router import App, Config
+from signaller import App, Config
 from routing import MODEL_TIERS
 from tests import test_proxy
 from tests.test_proxy import body_for, HDRS
@@ -82,7 +82,7 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.req("GET", "/ui/api/state", host="evil.example")[0].status, 403)
 
     def test_static_traversal_404(self):
-        for p in ("/ui/../claude_router.py", "/ui/%2e%2e/claude_router.py", "/ui/..%2fclaude_router.py"):
+        for p in ("/ui/../signaller.py", "/ui/%2e%2e/signaller.py", "/ui/..%2fsignaller.py"):
             self.assertEqual(self.req("GET", p, origin=None)[0].status, 404, p)
 
     def test_put_invalid_config_unchanged(self):
@@ -104,7 +104,7 @@ class ConsoleTest(Fixture):
     def test_config_put_with_a_stale_rev_is_409(self):
         st = self.js("GET", "/ui/api/state")[1]
         cfg, rev = st["config"], st["config_rev"]
-        # a settings line written by /router after the page rendered: the page's copy is stale
+        # a settings line written by /signaller after the page rendered: the page's copy is stale
         self.app.set_settings_for_session("sx", "valar", None, "window", "priority")
         s, j = self.js("PUT", "/ui/api/config", {**cfg, "lever": "anthropic", "rev": rev})
         self.assertEqual((s, j["error"]), (409, "the config changed elsewhere; reloaded"))
@@ -673,7 +673,7 @@ class ListModelsRedirectTest(unittest.TestCase):
 
 class HoistTolerantTest(unittest.TestCase):
     def test_malformed_shapes(self):
-        from claude_router import hoist_inline_tools
+        from signaller import hoist_inline_tools
         good = {"type": "tool_definition", "definition": {"name": "g", "x": 1}}
         req = {"tools": ["junk", {"name": "t"}], "messages": [{"role": "user", "content": [
             {"type": "tool_addition", "tool": "junk"}, {"type": "tool_addition", "tool": {"type": "tool_definition", "definition": "s"}},

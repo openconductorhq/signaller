@@ -287,7 +287,7 @@ def test_list_sessions_and_filtered_reads(tmp_path):
     assert [r["id"] for r in s.departures(sessions=["unknown"])] == [5]
     assert [t["id"] for t in s.turns(sessions=["sb"])] == ["t2"]
     assert len(s.turns()) == 2
-    s.set_session_name("sa", "refactor")  # /router name wins over cwd · branch; None goes back
+    s.set_session_name("sa", "refactor")  # /signaller name wins over cwd · branch; None goes back
     assert [x["label"] for x in s.list_sessions(0, now + 1) if x["id"] == "sa"] == ["refactor"]
     s.set_session_name("sz", "fresh")  # named before any request: listed now, with no requests
     assert [(x["id"], x["label"], x["n"]) for x in s.list_sessions(0, time.time() + 1)][0] == ("sz", "fresh", 0)

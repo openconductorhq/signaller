@@ -230,6 +230,7 @@ def state(app, query=None):
             "downstreams": {d.id: {"key_set": app.keys.has(d.id), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
             "recent_count": len(app.recent), "session_levers": dict(app.session_levers),
             "collisions": app.collisions(),
+            "active_windows": overrides.active_windows(app.routing.settings, time.localtime().tm_hour),
             "clock": {"tz": time.strftime("%Z"), "hm": time.strftime("%H:%M")}}
 
 
@@ -238,7 +239,7 @@ def api(h, app, method, path, query, body):
     if path == "/ui/api/state" and method == "GET":
         return state(app, query)
     if path == "/ui/api/models" and method == "GET":
-        from claude_router import upstream
+        from signaller import upstream
         t = (query.get("track") or [""])[0]
         name, url, key, ds = upstream(app, t)
         if not ds:
@@ -294,7 +295,7 @@ def api(h, app, method, path, query, body):
         if r["turn_id"]:
             r["shadow"] = st.pair_for_request(r["id"])
         return r
-    if path == "/ui/api/lever":  # one Claude Code session's own lever (/router), over the global one
+    if path == "/ui/api/lever":  # one Claude Code session's own lever (/signaller), over the global one
         body = body if isinstance(body, dict) else {}
         sid = body.get("session") if method == "PUT" else (query.get("session") or [None])[0]
         if not _sid_ok(sid):
@@ -318,7 +319,7 @@ def api(h, app, method, path, query, body):
             raise Err(503, "the stats database is busy; try again")
         app.sessions.forget(sid)
         return {"ok": True}
-    if path == "/ui/api/name" and method == "PUT":  # /router name: what the console calls this session
+    if path == "/ui/api/name" and method == "PUT":  # /signaller name: what the console calls this session
         body = body if isinstance(body, dict) else {}
         sid, name = body.get("session"), body.get("name")
         if not _sid_ok(sid):
@@ -351,7 +352,7 @@ def api(h, app, method, path, query, body):
         return {"lines": overrides.settings_to_json(hits), "collisions": coll}
     if path == "/ui/api/config" and method == "PUT":
         if not isinstance(body, dict) or body.get("rev") != app.rev:
-            raise Err(409, "the config changed elsewhere; reloaded")  # don't erase what /router or prune wrote since
+            raise Err(409, "the config changed elsewhere; reloaded")  # don't erase what /signaller or prune wrote since
         try:
             new = config_from_json(body)
         except (ValueError, RecursionError) as e:
@@ -439,7 +440,7 @@ def _handle(h, app):
     if not LOOPBACK_HOST_RE.fullmatch(h.headers.get("host", "")) or \
             (origin is not None and origin not in ok) or h.headers.get("sec-fetch-site", "none") not in ("same-origin", "none") or (h.command in ("PUT", "POST", "DELETE") and origin is None):
         h.close_connection = True  # body left unread: the connection can't carry another request
-        raise Err(403, "claude-router: forbidden origin/host")
+        raise Err(403, "signaller: forbidden origin/host")
     n = int(h.headers.get("content-length") or 0)
     if not 0 <= n <= MAX_BODY:
         raise Err(400, "bad content-length")

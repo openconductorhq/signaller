@@ -12,9 +12,9 @@ from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
-import claude_router
+import signaller
 import overrides
-from claude_router import App, Config, make_server
+from signaller import App, Config, make_server
 from doubling import AnswerCapture, Doubler
 from routing import DEFAULT_CONFIG, Doubling, Features
 from tests.test_proxy import CLASSIFIER_OFF, HDRS, LEMMI
@@ -186,7 +186,7 @@ class RngTest(unittest.TestCase):
 
 class DoublingTest(unittest.TestCase):
     def setUp(self):
-        nowait = mock.patch.object(claude_router, "RETRY_DELAYS", (0, 0, 0))  # shadow to a dead upstream stays fast
+        nowait = mock.patch.object(signaller, "RETRY_DELAYS", (0, 0, 0))  # shadow to a dead upstream stays fast
         nowait.start()
         self.addCleanup(nowait.stop)
         self.err = io.StringIO()

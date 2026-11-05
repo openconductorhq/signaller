@@ -1,6 +1,6 @@
 # AGENTS.md
 
-How to work on claude-router. `README.md` describes what it does; this file
+How to work on signaller. `README.md` describes what it does; this file
 covers how to change it without breaking it.
 
 ## The one rule that matters most
@@ -12,7 +12,7 @@ breaks.
 - **Test on a second router.** Run it on another port with a scratch config
   dir, never on the live 8787:
   ```
-  CLAUDE_ROUTER_CONFIG_DIR=<scratch dir> CLAUDE_ROUTER_LISTEN=127.0.0.1:8788 python3 claude_router.py
+  SIGNALLER_CONFIG_DIR=<scratch dir> SIGNALLER_LISTEN=127.0.0.1:8788 python3 signaller.py
   ```
   To test with real traffic, copy `console.json` into the scratch dir. Never
   copy `downstreams.keys.json` or `stats.db`. If a test needs a key, have the
@@ -34,7 +34,7 @@ breaks.
 - **To inspect it:** use the API, or run a read-only connection inside the
   container:
   ```
-  docker exec claude-router-router-1 python3 -c 'import sqlite3; c = sqlite3.connect("file:/data/stats.db?mode=ro", uri=True); print(c.execute("PRAGMA quick_check").fetchone())'
+  docker exec signaller-router-1 python3 -c 'import sqlite3; c = sqlite3.connect("file:/data/stats.db?mode=ro", uri=True); print(c.execute("PRAGMA quick_check").fetchone())'
   ```
   Or copy it out first: `docker compose cp router:/data/stats.db <dest>`.
 - **To repair it:** stop the router and copy the files out. Run `sqlite3 <copy>
@@ -56,7 +56,7 @@ breaks.
   `strip_lead_tags` removes them from every user prompt before the body goes
   anywhere; the doubling shadow strips its own copy. The console shows the
   prompt as sent (`untagged`).
-- **One request prep for every track:** `prepare()` in `claude_router.py`
+- **One request prep for every track:** `prepare()` in `signaller.py`
   renames the model, applies Valar's tool fix, swaps credentials and sets the
   window, for the served request and its shadow alike. Change it there, once.
 - **Settings lines** (`config.settings`, `overrides.py`) run inside that same
@@ -66,7 +66,7 @@ breaks.
   window the final model isn't priced for falls back to Now (the same rule the
   Tracks row applies); the hour a turn uses is pinned at its first request
   (`App.hour_of`), so a tool loop crossing an hour boundary doesn't switch
-  mid-turn. The plugin's `/router <downstream> window|model …` writes through
+  mid-turn. The plugin's `/signaller <downstream> window|model …` writes through
   `set_settings_for_session` (inserted at the top, under the lock), and
   `prune_settings` drops session ids unseen for a week — an id with no
   sessions row counts as unseen (forgotten sessions go too).
@@ -105,7 +105,7 @@ breaks.
 - **The console API** is under `/ui/api/`. Every PUT, POST or DELETE needs a
   loopback `Origin` (the CSRF check). `PUT /ui/api/config` also needs the
   body's `rev` to equal `state`'s `config_rev` — a page saving a config that
-  changed elsewhere (a `/router` write, a prune) gets 409 and reloads, rather
+  changed elsewhere (a `/signaller` write, a prune) gets 409 and reloads, rather
   than erasing those lines. When testing with curl, send
   `-H 'Origin: http://127.0.0.1:<port>'`.
 - **The config** (`console.json`) is version 4. If you change its shape, add a
@@ -121,7 +121,7 @@ breaks.
 
 ```
 pytest -q tests                        # must stay green; about 240 tests, under 20 s
-claude plugin test plugin/router-lever # the plugin's gate test
+claude plugin test plugin/signaller # the plugin's gate test
 node --check ui/app.js                 # the console has no unit tests; at least parse it
 ```
 
@@ -134,11 +134,11 @@ node --check ui/app.js                 # the console has no unit tests; at least
 
 ## Plugin
 
-- **Where it is:** `plugin/router-lever/` (TypeScript hooks module). Bump the
+- **Where it is:** `plugin/signaller/` (TypeScript hooks module). Bump the
   version in `.claude-plugin/plugin.json` when it changes; users update with
   `/plugin`.
-- **The `router_lever` tool:** it only switches when the user typed
-  `/router <mode>`, and each one typed grants one switch. Keep that gate.
+- **The `signaller_lever` tool:** it only switches when the user typed
+  `/signaller <mode>`, and each one typed grants one switch. Keep that gate.
   Claude must never switch the router on its own judgment.
 
 ## Git

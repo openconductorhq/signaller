@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 
-from overrides import (Setting, collisions, describe, prune, reset_session, resolve,
+from overrides import (Setting, active_windows, collisions, describe, prune, reset_session, resolve,
                         session_ids, settings_from_json, settings_to_json, upsert_session)
 from routing import DEFAULT_CONFIG, MODEL_TIERS, Downstream, config_from_json, config_to_json, slot
 from rulelang import parse_cond
@@ -49,6 +49,16 @@ class ResolveTests(unittest.TestCase):
 
     def test_no_lines_resolves_empty(self):
         self.assertEqual(resolve((), "valar", "claude-opus-5-5", hour(0)), {})
+
+
+class ActiveWindowsTests(unittest.TestCase):
+    def test_schedule_in_force_for_everyone(self):
+        lines = (line("session is abc", value="standard"), line("hour < 7", tier="opus"), line("hour < 11"),
+                 line("", key="model", value="glm-x"))
+        a = active_windows(lines, 3)
+        self.assertEqual(a["valar"]["opus"], {"value": "priority", "line": 2, "when": "hour < 7"})  # session line skipped
+        self.assertEqual(a["valar"]["haiku"]["line"], 3)
+        self.assertEqual(active_windows(lines, 12), {})
 
 
 class CollisionTests(unittest.TestCase):

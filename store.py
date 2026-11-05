@@ -1,4 +1,4 @@
-"""Console config file and SQLite stats store. Independent of claude_router.py."""
+"""Console config file and SQLite stats store. Independent of signaller.py."""
 import itertools
 import json
 import os
@@ -426,7 +426,7 @@ class Store:
         rows = self._all(
             "SELECT r.session_id id, s.cwd, s.branch, s.name, s.first_ts, s.last_ts, COUNT(*) n, MAX(r.ts) last FROM requests r "
             "LEFT JOIN sessions s ON s.id=r.session_id WHERE r.ts BETWEEN ? AND ? GROUP BY r.session_id", (t0, t1))
-        # a session just named with /router shows right away, before its next request is saved
+        # a session just named with /signaller shows right away, before its next request is saved
         rows += self._all("SELECT id, cwd, branch, name, first_ts, last_ts, 0 n, last_ts last FROM sessions WHERE name IS NOT NULL "
                           "AND last_ts BETWEEN ? AND ? AND id NOT IN (SELECT DISTINCT session_id FROM requests WHERE ts BETWEEN ? AND ? "
                           "AND session_id IS NOT NULL)", (t0, t1, t0, t1))
@@ -465,7 +465,7 @@ class Store:
             c.close()
 
     def set_session_name(self, sid, name):
-        """Name a session (from /router name); None clears it. Synchronous so the console shows it on the next poll."""
+        """Name a session (from /signaller name); None clears it. Synchronous so the console shows it on the next poll."""
         now = time.time()
         c = self._conn()
         try:

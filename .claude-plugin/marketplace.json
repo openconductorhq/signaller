@@ -1,5 +1,5 @@
 {
-  "name": "claude-router",
+  "name": "signaller",
   "owner": { "name": "Amir Wilf" },
-  "plugins": [{ "name": "router-lever", "source": "./plugin/router-lever" }]
+  "plugins": [{ "name": "signaller", "source": "./plugin/signaller" }]
 }
