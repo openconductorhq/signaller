@@ -193,7 +193,9 @@ test('/signaller run fills the prompt box with a saved prompt; sent, its /signal
   const PLAN = 'execute it.\n  1. /signaller anthropic\n  2. /simplify\n  3. /signaller rules'
   on('prompt.fill', (_, e) => { filled.push(e.text); return { isFilled: true } })
   await stub($, on, () => ({ value: { ok: true, status: 200, text: JSON.stringify({ ...JSON.parse(LEVER), prompts: { execute: PLAN } }) } }))
-  expect((await $.command.run({ command: 'signaller', args: 'run' })).text).toContain('Saved prompts: execute')
+  const list = (await $.command.run({ command: 'signaller', args: 'run' })).text!
+  expect(list).toContain('▸ /signaller run execute')
+  expect(list).toContain('    1. /signaller anthropic')  // the content, indented under its name
   expect((await $.command.run({ command: 'signaller', args: 'run nope' })).text).toContain('No prompt named "nope"')
   expect((await $.command.run({ command: 'signaller', args: 'run execute' })).text).toContain('press Enter')
   expect(filled).toEqual([PLAN])

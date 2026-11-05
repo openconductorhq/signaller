@@ -212,8 +212,10 @@ export const register: Register = on => {
         return { text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
       }
       const name = run[1]?.toLowerCase()
-      const names = Object.keys(ps).join(', ') || 'none yet (add them in the console under Prompts)'
-      if (!name || !Object.hasOwn(ps, name)) return { text: `${name ? `No prompt named "${name}". ` : ''}Saved prompts: ${names}.` }
+      if (!name || !Object.hasOwn(ps, name)) {
+        const list = Object.entries(ps).map(([n, t]) => `▸ /signaller run ${n}\n${t.replace(/^/gm, '    ')}`).join('\n\n')
+        return { text: `${name ? `No prompt named "${name}". ` : ''}${list ? `Saved prompts:\n\n${list}` : 'No saved prompts yet: add them in the console under Prompts.'}` }
+      }
       // into the prompt box, not submitted: the person reads it, can add to it, and sends it with Enter, so its
       // /signaller steps are theirs (a command can't submit a prompt anyway: it holds the turn)
       const { isFilled } = await $.prompt.fill({ text: ps[name]! })

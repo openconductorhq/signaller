@@ -163,7 +163,7 @@ idle, so a change made in the console shows within a minute.
 | `/signaller rules\|anthropic\|<downstream id>` | Switch this session only; its subagents follow. Other sessions keep the console's lever. |
 | `/signaller reset` | Go back to the global lever. |
 | `/signaller name <text>` | Name this session in the console. `/signaller name` alone clears the name. |
-| `/signaller run <name>` | Put a prompt saved in the console (**Prompts**) in the prompt box. You can add to it, then Enter sends it as your own, so the `/signaller` steps in it count as typed. `/signaller run` alone lists them. |
+| `/signaller run <name>` | Put a prompt saved in the console (**Prompts**) in the prompt box. You can add to it, then Enter sends it as your own, so the `/signaller` steps in it count as typed. `/signaller run` alone lists them with their text. |
 | `/signaller <downstream> [<tier>] window\|model <value>` | Set this session's own settings line on a downstream: its completion window (`/signaller valar window priority`) or the model it serves for a tier (`/signaller valar sonnet model glm-4.8`; without a tier, every tier). It goes in at the top of the settings list, so it beats schedules. |
 | `/signaller <downstream> reset` | Clear this session's settings lines for that downstream. |
 
