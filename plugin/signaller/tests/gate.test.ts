@@ -167,6 +167,7 @@ test('an image fallback shows once, as a transcript line and a band above the pr
   await ui.redraw(BAND.props)  // the survey is gone
   await $.turn.complete({ reason: 'answer' })  // the same turn's notice again: not repeated
   await settle()
+  expect(logs).toEqual(['⚠ signaller: This turn went to Anthropic, not valar.'])  // the line, once
   expect(JSON.stringify(await ui.drawn())).toContain('⚠ signaller: ')
   await $.prompt.submit({ text: 'next' })
   expect(JSON.stringify(await ui.drawn())).toBe(quiet)  // the next prompt clears it
