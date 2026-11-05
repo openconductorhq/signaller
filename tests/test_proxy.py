@@ -3,6 +3,7 @@ import io
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -34,6 +35,12 @@ class Fake(ThreadingHTTPServer):
         self.hang = False
         self.models = b"{}"
         threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+
+    def handle_error(self, request, client_address):
+        # the router may hang up before the fake finishes writing; that traceback isn't the router's and must not
+        # reach the stderr the tests check
+        if not isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            super().handle_error(request, client_address)
 
     @property
     def url(self):

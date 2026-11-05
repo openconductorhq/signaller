@@ -309,7 +309,8 @@ def api(h, app, method, path, query, body):
         elif method != "GET":
             raise Err(405, "GET or PUT")
         own = app.session_levers.get(sid)
-        return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes}
+        return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes,
+                "name": st.session_name(sid)}
     m = re.fullmatch(r"/ui/api/sessions/([^/]+)", path)
     if m and method == "DELETE":  # the X on a session chip: its history goes; a live session starts again from zero
         sid = unquote(m[1])

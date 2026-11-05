@@ -7,7 +7,7 @@ const SETTINGS = `${BASE}/ui/api/settings`
 let MODES = ['rules', 'anthropic'] // the router's list, refreshed by every lever answer
 const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the console takes writes from its own origin only
 
-type Lever = { lever: string; session: string | null; global: string; modes?: string[] }
+type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null }
 type Line = { downstream: string; tier: string | null; set: string; value: string }
 type Form = { ds: string; tier: string | null; key: 'window' | 'model'; value: string } | { ds: string; reset: true }
 
@@ -95,8 +95,8 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
       return { ok: false, text: `signaller answered ${r.status}: ${r.text.slice(0, 200)}` }
     }
     const back = JSON.parse(r.text) as { lines: Line[]; collisions: { text: string }[] }
-    if ('reset' in f) return { ok: true, text: `signaller: this session's ${f.ds} settings cleared` }
-    const lines = back.lines.map(l => `signaller: ${l.downstream} ${l.set} ${l.value} for this session${l.tier ? ` (${l.tier})` : ''}`)
+    if ('reset' in f) return { ok: true, text: `this session's ${f.ds} settings cleared` }
+    const lines = back.lines.map(l => `${l.downstream} ${l.set} ${l.value} for this session${l.tier ? ` (${l.tier})` : ''}`)
     return { ok: true, text: [...lines, ...back.collisions.map(x => x.text)].join('\n') }
   } catch (err) {
     if (typed !== undefined) grantedSettings.push(c)
@@ -109,14 +109,15 @@ const switchTo = async ($: EngineInterface, want: string): Promise<{ ok: boolean
   try {
     const l = await lever($, want ? { lever: want === 'reset' ? null : want } : undefined)
     show($, l)
-    return { ok: true, text: `signaller: ${label(l)}` }
+    return { ok: true, text: label(l) }
   } catch (err) {
     show($)
     return { ok: false, text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
   }
 }
 
-const label = (l: Lever) => (l.session ? `${l.lever} (this session)` : `${l.lever} (global)`)
+const label = (l: Lever) => `${l.lever} (${l.session ? 'this session' : 'global'})${l.name ? `, session name: ${l.name}` : ''}`
+const poll = ($: EngineInterface) => { lever($).then(l => show($, l), () => show($)) }
 const show = ($: EngineInterface, l?: Lever) => $.ui.status(l ? `signaller: ${label(l)}` : 'signaller: down')
 
 export const register: Register = on => {
@@ -145,9 +146,18 @@ export const register: Register = on => {
       },
       isDeferred: false,
     })
-    const poll = () => lever($).then(l => show($, l), () => show($))
-    poll()
-    $.clock.every(15_000, poll)
+    poll($)
+    $.clock.every(60_000, () => poll($)) // idle fallback: a console change shows within a minute
+    return next(e)
+  })
+
+  // the status line refreshes when it matters: as a turn starts and ends (the main loop's, not each subagent's)
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) poll($)
+    return next(e)
+  })
+  on('turn.complete', ($, e, next) => {
+    if (e.agentId === undefined) poll($)
     return next(e)
   })
 
@@ -178,7 +188,9 @@ export const register: Register = on => {
     if (/^name(\s|$)/i.test(args)) {
       try {
         const n = await rename($, args.slice(4).trim())
-        return { text: n ? `signaller: this session is "${n}" in the console` : 'signaller: session name cleared' }
+        const l = await lever($).catch(() => undefined)
+        if (l) show($, l) // the status line picks the new name up now, not at the next turn
+        return { text: n ? `this session is "${n}" in the console` : 'session name cleared' }
       } catch (err) {
         return { text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
       }

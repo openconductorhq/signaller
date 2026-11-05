@@ -464,6 +464,11 @@ class Store:
         finally:
             c.close()
 
+    def session_name(self, sid):
+        """The name /signaller name gave this session, or None."""
+        r = self._all("SELECT name FROM sessions WHERE id=?", (sid,))
+        return r[0]["name"] if r else None
+
     def set_session_name(self, sid, name):
         """Name a session (from /signaller name); None clears it. Synchronous so the console shows it on the next poll."""
         now = time.time()
@@ -535,6 +540,7 @@ class NullStore:
     def set_verdict(self, turn_id, verdict, tracks): return False
     def forget_pairs(self): pass
     def set_session_name(self, sid, name): pass
+    def session_name(self, sid): return None
     def forget_session(self, sid): return True
     def reprice(self, prices, downstreams): return 0
     def session_last_seen(self, ids): return {}

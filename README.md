@@ -131,8 +131,10 @@ longer used. To keep using LiteLLM, add it as a downstream.
 ## `/signaller` in Claude Code
 
 The `signaller` plugin (in `plugin/`) adds `/signaller`. It answers without a
-model turn, and the status line shows `router: <mode> (this session|global)`,
-checked every 15 s.
+model turn, and the status line shows `signaller: <mode> (this session|global)`,
+plus `, session name: <name>` once you've named it. It refreshes as each turn
+starts and ends, right after a `/signaller` command, and once a minute while
+idle, so a change made in the console shows within a minute.
 
 | Command | What it does |
 |---------|--------------|

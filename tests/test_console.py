@@ -179,7 +179,7 @@ class ConsoleTest(Fixture):
 
     def test_session_lever_applies_to_that_session_only(self):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules",
-                                                                         "modes": ["rules", "anthropic", "valar"]})
+                                                                         "modes": ["rules", "anthropic", "valar"], "name": None})
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})[1]["lever"], "valar")
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "bogus"})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "unknown", "lever": "valar"})[0], 400)
@@ -194,6 +194,7 @@ class ConsoleTest(Fixture):
 
     def test_session_name(self):
         self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": "  fix   login "})[1], {"session": "s1", "name": "fix login"})
+        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["name"], "fix login")  # the plugin's status line shows it
         self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": ""})[1]["name"], None)
         self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "unknown", "name": "x"})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": 5})[0], 400)

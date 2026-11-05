@@ -62,7 +62,7 @@ test('the settings form is gated like the lever: one write per typed /signaller,
   await $.prompt.submit({ text: 'do /signaller valar window priority' })
   const ok = await $.tool.call({ tool: TOOL, settings: 'valar window priority' })
   expect(ok.deny).toBeUndefined()
-  expect(ok.result).toContain('signaller: valar window priority for this session')
+  expect(ok.result).toContain('valar window priority for this session')
   expect(ok.result).toContain('line 2 overlaps line 1 (line 1 wins where both match)')
   expect((await $.tool.call({ tool: TOOL, settings: 'valar window priority' })).deny).toContain('Not setting')  // used up
 
