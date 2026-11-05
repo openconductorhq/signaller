@@ -220,6 +220,10 @@ function applyState(st) {
   const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f) || $("prm").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }  // again after a save: fresh collisions, fresh settings
   renderCollisions();  // every poll: /signaller or the picker can change them without this tab's config JSON changing
+  $("presetGo").hidden = !st.preset;
+  $("presetName").textContent = st.preset || "";
+  renderKeyBanner(st.missing_keys);
+  renderPresets();
   if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /signaller at any time
 }
 // Downstream POST/DELETE/key PUT change the config on the server: reload it (even after an error or a timeout),
@@ -792,6 +796,123 @@ $("prAdd").addEventListener("click", () => {
   while (ps.some((p) => p.name === "prompt-" + n)) n++;
   setPrompts([...ps, { name: "prompt-" + n, text: "Once done, run:\n  1. /signaller anthropic\n  2. /simplify\n  3. /signaller rules" }]);
 });
+
+/* presets: saved setups, one card each; the active one's config is the live one */
+// Which card shows an inline form: the save-as form, or a preset's edit / export / delete confirm.
+const PUI = { save: false, edit: null, exp: null, del: null };
+let presetKey = "", keyBannerKey = "";
+// A preset call changes the config on the server: reload it (even after an error or a timeout),
+// so the next config PUT starts from the switched-in preset, as dsCall does.
+async function presetCall(method, path, body) {
+  const r = await api(method, path, body, 15000);
+  try {
+    const st = await api("GET", "state" + qs(sessQ(), spanQ()));
+    applyState(st);
+    cfg = st.config;
+    renderConfig(true);
+  } catch (_) { /* offline: the poll reloads when it's back */ }
+  return r;
+}
+$("presetGo").addEventListener("click", () => $("presets").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" }));
+function renderKeyBanner(mk) {
+  const key = JSON.stringify(mk || []);
+  if (key === keyBannerKey) return;
+  keyBannerKey = key;
+  $("keyBanner").hidden = !mk || !mk.length;
+  if (!mk || !mk.length) return;
+  const ns = mk.map(NAME);
+  $("keyBanner").replaceChildren(ns.length === 1 ? `${ns[0]} needs a key: enter it in Tracks` : `${ns.join(", ")} need keys: enter them in Tracks`, " — ",
+    el("button", { type: "button", class: "linkish", onclick: () => $("tracks").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" }) }, "Tracks"));
+}
+const summaryLine = (s) => s && [plural(s.rules || 0, "rule"),
+  (s.downstreams || []).length && (s.downstreams || []).map((d) => dsOf(d) ? dsOf(d).name : d).join(", "),
+  plural(s.settings || 0, "schedule line"), plural(s.prompts || 0, "prompt")].filter(Boolean).join(" · ");
+const keyLine = (ids) => { const ns = ids.map((x) => dsOf(x) ? dsOf(x).name : x); return `${ns.join(", ")} ${ids.length === 1 ? "needs" : "need"} a key`; };
+const perr = () => el("p", { class: "err", role: "alert", hidden: true });
+const showPresetErr = (e, err) => showErr(err, e.status === 400 || e.status === 404 ? e.message : "Couldn't save: " + e.message);
+// The page re-renders on every poll; a form the user is typing in redraws after blur instead of eating the text.
+const typingPreset = () => { const f = document.activeElement; return !!f && $("presets").contains(f) && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea"); };
+function renderPresets(force) {
+  if (!S) return;
+  const key = JSON.stringify([S.preset, S.presets]);
+  if (!force && (key === presetKey || typingPreset())) return;
+  presetKey = key;
+  $("presetRows").replaceChildren(...S.presets.map(presetCard), saveCard());
+}
+function presetCard(p) {
+  const err = perr();
+  const card = el("div", { class: "pcard" + (p.active ? " active" : "") },
+    el("div", { class: "pname" }, p.name, p.active && el("span", { class: "prun" }, " · running")),
+    p.tagline && el("div", { class: "ptag" }, p.tagline),
+    el("div", { class: "psum" }, summaryLine(p.summary)),
+    p.missing_keys && p.missing_keys.length ? el("div", { class: "pkeys" }, keyLine(p.missing_keys)) : null,
+    err);
+  if (PUI.edit === p.name && p.active) return presetEdit(p, card, err);
+  if (PUI.exp === p.name) return presetExport(p, card, err);
+  const acts = el("div", { class: "pacts" });
+  if (PUI.del === p.name && !p.active) {
+    acts.append(el("span", { class: "pdel" }, `Delete ${p.name}? `),
+      el("button", { type: "button", class: "mini", onclick: async () => {
+        PUI.del = null;
+        try { await presetCall("DELETE", "presets/" + encodeURIComponent(p.name)); renderPresets(true); }
+        catch (e) { showPresetErr(e, err); renderPresets(true); }
+      } }, "Yes"),
+      el("button", { type: "button", class: "mini", onclick: () => { PUI.del = null; renderPresets(true); } }, "No"));
+  } else {
+    if (p.active) acts.append(el("button", { type: "button", class: "mini", onclick: () => { PUI.edit = p.name; renderPresets(true); } }, "Edit"));
+    else acts.append(el("button", { type: "button", class: "mini", onclick: async () => {
+      try { await presetCall("POST", "presets/" + encodeURIComponent(p.name) + "/activate"); }
+      catch (e) { showPresetErr(e, err); }
+    } }, "Switch"));
+    acts.append(el("button", { type: "button", class: "mini", onclick: () => { PUI.exp = p.name; renderPresets(true); } }, "Export"));
+    if (!p.active) acts.append(el("button", { type: "button", class: "mini del", onclick: () => { PUI.del = p.name; renderPresets(true); } }, "Delete"));
+  }
+  card.append(acts);
+  return card;
+}
+function presetEdit(p, card, err) {
+  const n = el("input", { value: p.name, "aria-label": "Preset name", autocomplete: "off", spellcheck: "false", "data-k": "pname" });
+  const t = el("input", { value: p.tagline || "", "aria-label": "Preset tagline", autocomplete: "off", spellcheck: "false", "data-k": "ptag" });
+  card.append(n, t,
+    el("button", { type: "button", class: "btn primary", onclick: async () => {
+      try {
+        await presetCall("PUT", "presets/" + encodeURIComponent(p.name), { name: n.value.trim(), tagline: t.value });
+        PUI.edit = null; renderPresets(true);
+      } catch (e) { showPresetErr(e, err); }
+    } }, "Save"),
+    el("button", { type: "button", class: "btn", onclick: () => { PUI.edit = null; renderPresets(true); } }, "Cancel"));
+  return card;
+}
+function presetExport(p, card, err) {
+  const n = el("input", { value: p.name, "aria-label": "Name in the exported file", autocomplete: "off", spellcheck: "false", "data-k": "xname" });
+  const t = el("input", { value: p.tagline || "", "aria-label": "Tagline in the exported file", autocomplete: "off", spellcheck: "false", "data-k": "xtag" });
+  const a = el("a", { class: "btn", download: true }, "Download");
+  const setHref = () => { a.href = "/ui/api/presets/" + encodeURIComponent(p.name) + "/export?name=" + encodeURIComponent(n.value.trim() || p.name) + "&tagline=" + encodeURIComponent(t.value); };
+  n.addEventListener("input", setHref); t.addEventListener("input", setHref); setHref();
+  card.append(n, t, a,
+    el("button", { type: "button", class: "btn", onclick: () => { PUI.exp = null; renderPresets(true); } }, "Done"));
+  return card;
+}
+function saveCard() {
+  const card = el("div", { class: "pcard psave" }, el("b", {}, "Save current as…"));
+  if (!PUI.save) {
+    card.append(el("button", { type: "button", class: "btn", onclick: () => { PUI.save = true; renderPresets(true); } }, "+ Save current as…"));
+  } else {
+    const n = el("input", { placeholder: "name", "aria-label": "Name for the saved setup", autocomplete: "off", spellcheck: "false", "data-k": "sname" });
+    const t = el("input", { placeholder: "tagline (optional)", "aria-label": "Tagline for the saved setup", autocomplete: "off", spellcheck: "false", "data-k": "stag" });
+    const err = perr();
+    card.append(n, t, el("button", { type: "button", class: "btn primary", onclick: async () => {
+      try {
+        await presetCall("POST", "presets", { name: n.value.trim(), tagline: t.value });
+        PUI.save = false; renderPresets(true);
+      } catch (e) { showPresetErr(e, err); }
+    } }, "Save"),
+      el("button", { type: "button", class: "btn", onclick: () => { PUI.save = false; renderPresets(true); } }, "Cancel"), err);
+  }
+  // Task 6 (the import preview) hooks its file picker onto #importBtn.
+  card.append(el("button", { type: "button", class: "btn", id: "importBtn" }, "Import…"));
+  return card;
+}
 
 /* doubling strip */
 function renderStrip() {

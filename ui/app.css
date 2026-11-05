@@ -82,6 +82,24 @@ h3{font-size:20px;margin:0 0 10px;font-weight:600;letter-spacing:.3px}
 .dot{r:6px}
 .dot{fill:var(--c)}.dot.x{fill:var(--stop)}.dot.s{fill:var(--shadow);opacity:.55}
 
+/* presets */
+.presetgo{border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer;color:var(--muted)}
+.presetgo b{color:var(--ink)}
+.presetgo::before{content:"";display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--ok);margin-right:8px;vertical-align:1px}
+#presets{margin-top:22px}
+.pcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;align-items:start}
+.pcard{background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:12.5px;display:grid;gap:3px;align-content:start}
+.pcard.active{border:2px solid var(--anth)}
+.pname{font-weight:600;font-size:14px}
+.prun{color:var(--anth);font-weight:600}
+.ptag,.psum{color:var(--muted)}
+.pkeys{color:#B45309;font-weight:600}
+.pacts{display:flex;gap:2px;align-items:center;flex-wrap:wrap;margin-top:5px}
+.pcard input{border:1px solid var(--off);background:var(--paper);border-radius:6px;padding:4px 7px;width:100%}
+.pcard .btn{margin-top:5px}
+.psave{border-style:dashed;color:var(--muted)}
+.pdel{color:var(--stop);font-weight:600}
+
 /* tracks */
 #tracks{margin-top:22px}
 .tracks{display:grid;gap:10px}
