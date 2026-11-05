@@ -217,7 +217,7 @@ function applyState(st) {
   if (t) t.textContent = tallyText();
   // don't clobber a field the user is typing in, or an optimistic edit in flight
   const f = document.activeElement;
-  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f));
+  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f) || $("prm").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }  // again after a save: fresh collisions, fresh settings
   renderCollisions();  // every poll: /signaller or the picker can change them without this tab's config JSON changing
   if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /signaller at any time
@@ -301,7 +301,7 @@ function renderConfig(force) {
   const key = JSON.stringify([cfg, S && S.active_windows]);  // a schedule line coming into force redraws the Tracks row
   if (!cfg || (key === rendered && !force)) return;
   rendered = key;
-  keepFocus(() => { renderYard(); renderLever(); renderTracks(); renderRules(); renderOtherwise(); renderSettings(); renderStrip(); });
+  keepFocus(() => { renderYard(); renderLever(); renderTracks(); renderRules(); renderOtherwise(); renderSettings(); renderPrompts(); renderStrip(); });
 }
 
 /* lever: Anthropic, Rules, then one button per downstream */
@@ -770,6 +770,27 @@ $("stAdd").addEventListener("click", () => {
   setSettings([{ when: view.pick.filter((x) => x !== "unknown").map((x) => "session is " + x).join(" or "),
     downstream: ds.id, tier: "sonnet", set: valar ? "window" : "model",
     value: (valar ? ds.windows : ds.models).sonnet }, ...cfg.settings]);
+});
+
+/* saved prompts: /signaller run <name> in Claude Code */
+const setPrompts = (prompts) => save({ ...cfg, prompts }, $("prmErr"));
+function renderPrompts() {
+  const ps = cfg.prompts || [];
+  $("prList").replaceChildren(...ps.map((p, i) => el("li", { class: "prrow" },
+    el("div", { class: "prhead" },
+      el("code", {}, "/signaller run"),
+      el("input", { class: "prname", value: p.name, spellcheck: "false", autocomplete: "off", "data-k": "pn:" + i,
+        "aria-label": `Name of prompt ${i + 1}`, onchange: (e) => setPrompts(ps.map((x, k) => k === i ? { ...x, name: e.target.value.trim().toLowerCase() } : x)) }),
+      el("button", { type: "button", class: "mini del", "aria-label": `Delete prompt ${p.name}`,
+        onclick: () => setPrompts(ps.filter((_, k) => k !== i)) }, "Delete")),
+    el("textarea", { class: "prtext", rows: Math.min(14, p.text.split("\n").length + 1), spellcheck: "false", "data-k": "pt:" + i,
+      "aria-label": `Text of prompt ${p.name}`, onchange: (e) => setPrompts(ps.map((x, k) => k === i ? { ...x, text: e.target.value } : x)) }, p.text))));
+}
+$("prAdd").addEventListener("click", () => {
+  const ps = cfg.prompts || [];
+  let n = ps.length + 1;
+  while (ps.some((p) => p.name === "prompt-" + n)) n++;
+  setPrompts([...ps, { name: "prompt-" + n, text: "Once done, run:\n  1. /signaller anthropic\n  2. /simplify\n  3. /signaller rules" }]);
 });
 
 /* doubling strip */

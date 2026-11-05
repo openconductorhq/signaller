@@ -187,3 +187,18 @@ test('pasting a refusal back grants nothing', async ($, on) => {
   await $.prompt.submit({ text: `how come? ${deny}` })
   expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toContain('Not switching')
 })
+
+test('/signaller run fills the prompt box with a saved prompt; sent, its /signaller steps are queued', async ($, on) => {
+  const filled: string[] = []
+  const PLAN = 'execute it.\n  1. /signaller anthropic\n  2. /simplify\n  3. /signaller rules'
+  on('prompt.fill', (_, e) => { filled.push(e.text); return { isFilled: true } })
+  await stub($, on, () => ({ value: { ok: true, status: 200, text: JSON.stringify({ ...JSON.parse(LEVER), prompts: { execute: PLAN } }) } }))
+  expect((await $.command.run({ command: 'signaller', args: 'run' })).text).toContain('Saved prompts: execute')
+  expect((await $.command.run({ command: 'signaller', args: 'run nope' })).text).toContain('No prompt named "nope"')
+  expect((await $.command.run({ command: 'signaller', args: 'run execute' })).text).toContain('press Enter')
+  expect(filled).toEqual([PLAN])
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toContain('Not switching')  // not sent yet
+  await $.prompt.submit({ text: filled[0]! })  // the person presses Enter
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: TOOL, lever: 'rules' })).deny).toBeUndefined()
+})

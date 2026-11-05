@@ -7,7 +7,7 @@ const SETTINGS = `${BASE}/ui/api/settings`
 let MODES = ['rules', 'anthropic'] // the router's list, refreshed by every lever answer
 const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the console takes writes from its own origin only
 
-type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null; notice?: { turn: string; text: string } | null }
+type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null; prompts?: Record<string, string>; notice?: { turn: string; text: string } | null }
 type Line = { downstream: string; tier: string | null; set: string; value: string }
 type Form = { ds: string; tier: string | null; key: 'window' | 'model'; value: string } | { ds: string; reset: true }
 
@@ -202,6 +202,22 @@ export const register: Register = on => {
       } catch (err) {
         return { text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
       }
+    }
+    const run = /^run(?:\s+(\S+))?$/i.exec(args) // before the settings form: a downstream named "run" can't be set from here
+    if (run) {
+      let ps: Record<string, string>
+      try {
+        ps = (await lever($)).prompts ?? {}
+      } catch (err) {
+        return { text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
+      }
+      const name = run[1]?.toLowerCase()
+      const names = Object.keys(ps).join(', ') || 'none yet (add them in the console under Prompts)'
+      if (!name || !Object.hasOwn(ps, name)) return { text: `${name ? `No prompt named "${name}". ` : ''}Saved prompts: ${names}.` }
+      // into the prompt box, not submitted: the person reads it, can add to it, and sends it with Enter, so its
+      // /signaller steps are theirs (a command can't submit a prompt anyway: it holds the turn)
+      const { isFilled } = await $.prompt.fill({ text: ps[name]! })
+      return { text: isFilled ? `"${name}" is in the prompt box: press Enter to send it` : ps[name]! }
     }
     const f = parseForm(args)
     if (f) return { text: (await setSettings($, f)).text }

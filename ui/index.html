@@ -152,6 +152,14 @@
       <button type="button" class="btn" id="stAdd">+ Add line</button>
       <ul id="stColl" class="stcoll" hidden></ul>
     </section>
+
+    <section id="prm" aria-labelledby="prmH">
+      <h2 id="prmH">Prompts</h2>
+      <p class="hint">Saved prompts for Claude Code: <code>/signaller run &lt;name&gt;</code> puts one in the prompt box, and pressing Enter sends it as yours, so the <code>/signaller</code> steps in it count as typed. Don't start one with <code>/</code>: Claude Code would run that line as a command.</p>
+      <p id="prmErr" class="err" role="alert" hidden></p>
+      <ol class="prlist" id="prList"></ol>
+      <button type="button" class="btn" id="prAdd">+ Add prompt</button>
+    </section>
   </div>
 
   <section class="pair" id="pair" aria-labelledby="pairH">

@@ -266,6 +266,7 @@ class RoutingConfig:
     seeded: bool = False  # the valar downstream got its url/key from the env once
     migrated_off: tuple[str, ...] = field(default=(), compare=False)  # rules the v2→v3 migration switched off; banner only
     settings: tuple = ()  # overrides.Setting lines; last so positional constructors stay valid
+    prompts: tuple = ()  # (name, text): what /signaller run <name> submits in Claude Code
 
 
 def tracks(cfg: RoutingConfig) -> tuple[str, ...]:
@@ -411,6 +412,26 @@ def _downstream(d, taken):
     return Downstream(i, d["name"], d["url"], d["kind"], {t: m[t] for t in MODEL_TIERS}, d["color"], windows, prices)
 
 
+PROMPT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+
+
+def prompts_from_json(items) -> tuple:
+    """console.json's prompts -> ((name, text), ...); ValueError on bad input."""
+    if not isinstance(items, list):
+        raise ValueError("prompts must be a list")
+    out = []
+    for n, p in enumerate(items, 1):
+        name, text = (p.get("name"), p.get("text")) if isinstance(p, dict) else (None, None)
+        if not isinstance(name, str) or not PROMPT_NAME.fullmatch(name):
+            raise ValueError(f"prompt {n}: name must be 1–32 of a-z, 0-9, - and _, starting with a letter or digit")
+        if any(name == x for x, _ in out):
+            raise ValueError(f"prompt {n}: another prompt is already named {name}")
+        if not isinstance(text, str) or not text.strip() or len(text) > 20000:
+            raise ValueError(f"prompt {n}: text must be 1–20000 characters")
+        out.append((name, text))
+    return tuple(out)
+
+
 def config_from_json(obj: dict) -> RoutingConfig:
     try:
         if obj.get("version") == 1:
@@ -465,7 +486,8 @@ def config_from_json(obj: dict) -> RoutingConfig:
         return RoutingConfig(obj["lever"], otherwise, rules,
                              ClassifierSettings(str(c["model"]), thr,
                                                 float(_num(c["timeout_s"], 0.1, 30, "classifier time limit must be 0.1–30 s")), labels,
-                                                c["upstream"]), dbl, tuple(dss), bool(obj.get("seeded", False)), off, settings)
+                                                c["upstream"]), dbl, tuple(dss), bool(obj.get("seeded", False)), off, settings,
+                             prompts_from_json(obj.get("prompts", [])))
     except (KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"bad config: {e!r}") from None
 
@@ -474,6 +496,7 @@ def config_to_json(cfg: RoutingConfig) -> dict:
     import overrides  # local: overrides imports routing, so the module can't import it at the top
     return {
         "version": 4, "settings": overrides.settings_to_json(cfg.settings),
+        "prompts": [{"name": n, "text": t} for n, t in cfg.prompts],
         "lever": cfg.lever, "otherwise": cfg.otherwise, "seeded": cfg.seeded,
         "rules": [{"name": r.name, "kind": r.kind, "enabled": r.enabled, "text": r.text, "builtin": r.builtin}
                   for r in cfg.rules],

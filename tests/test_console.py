@@ -180,7 +180,7 @@ class ConsoleTest(Fixture):
     def test_session_lever_applies_to_that_session_only(self):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules",
                                                                          "modes": ["rules", "anthropic", "valar"], "name": None,
-                                                                         "notice": None})
+                                                                         "notice": None, "prompts": {}})
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})[1]["lever"], "valar")
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "bogus"})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "unknown", "lever": "valar"})[0], 400)
@@ -192,6 +192,14 @@ class ConsoleTest(Fixture):
         self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["session"], None)
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["session_levers"], {})
+
+    def test_prompts_saved_and_served_to_the_plugin(self):
+        s, j = self.put_cfg(prompts=[{"name": "execute", "text": "1. /signaller anthropic\n2. /simplify"}])
+        self.assertEqual(s, 200)
+        self.assertEqual(j["prompts"], [{"name": "execute", "text": "1. /signaller anthropic\n2. /simplify"}])
+        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["prompts"], {"execute": "1. /signaller anthropic\n2. /simplify"})
+        for bad in ([{"name": "Run It", "text": "x"}], [{"name": "a", "text": " "}], [{"name": "a", "text": "x"}, {"name": "a", "text": "y"}]):
+            self.assertEqual(self.put_cfg(prompts=bad)[0], 400, bad)
 
     def test_session_name(self):
         self.assertEqual(self.js("PUT", "/ui/api/name", {"session": "s1", "name": "  fix   login "})[1], {"session": "s1", "name": "fix login"})
