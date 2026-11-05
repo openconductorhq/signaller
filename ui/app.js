@@ -919,10 +919,11 @@ function saveCard() {
 /* import: a file picked, dropped or pasted is previewed before anything is added */
 // Everything the file carries — names, taglines, rule text, hosts, prompt names — is untrusted:
 // it reaches the page as text nodes and input values only, never as markup.
-let imPv = null, imName = null, imTag = null, imSeq = 0, imTimer = null;
+let imPv = null, imName = null, imTag = null, imNote = null, imSeq = 0, imTimer = null;
 function impOpen(open) {
   $("impanel").hidden = !open;
   if (!open) return;
+  imSeq++;  // a preview still in flight must not land in the fresh panel
   imPv = null;
   imShow(null);
   $("imFile").value = "";
@@ -988,6 +989,14 @@ const imList = (vals, fmt) => {
   return gs.length === 1 ? `every tier → ${fmt(gs[0].v)}` : gs.map((g) => g.t.join("/") + " → " + fmt(g.v)).join(" · ");
 };
 const imHost = (u) => { try { return new URL(u).host; } catch (_) { return u; } };
+// The name field's state: "already used, rename it" + a disabled Add while it holds the taken name.
+const imTakenState = () => !!imPv && imPv.taken && !!imName && imName.value.trim() === (imPv.name || "");
+const imSetAdd = () => {
+  const taken = imTakenState();
+  if (imNote) imNote.textContent = taken ? "already used, rename it" : "";
+  $("imAdd").disabled = taken || !imName || !imName.value.trim();
+};
+const andList = (a) => a.length <= 2 ? a.join(" and ") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1];
 function imPanel(pv) {
   const c = pv.config, pds = c.downstreams || [], keys = pv.keys || {};
   const pName = (t) => t === "anthropic" ? "Anthropic" : ((pds.find((d) => d.id === t) || {}).name || t);
@@ -995,17 +1004,12 @@ function imPanel(pv) {
   const ptrk = (t) => el("span", { class: "to", style: "--c:" + pCol(t) }, pName(t));
   imName = el("input", { class: "imn", value: pv.name || "", placeholder: "Name", "aria-label": "Name for the imported preset", autocomplete: "off", spellcheck: "false", "data-k": "imname" });
   imTag = el("input", { class: "imt", value: pv.tagline || "", placeholder: "Tagline: what this is good for", "aria-label": "Tagline for the imported preset", autocomplete: "off", spellcheck: "false", "data-k": "imtag" });
-  const takenNote = el("span", { class: "imtaken" });
-  const updateTaken = () => {
-    const taken = pv.taken && imName.value.trim() === (pv.name || "");
-    takenNote.textContent = taken ? "already used, rename it" : "";
-    $("imAdd").disabled = taken || !imName.value.trim();
-  };
-  imName.addEventListener("input", updateTaken);
-  updateTaken();
+  imNote = el("span", { class: "imtaken" });
+  imName.addEventListener("input", imSetAdd);
+  imSetAdd();
   const tracks = el("div", { class: "imbox" }, el("div", { class: "lbl" }, "Tracks"),
     pds.length ? pds.map((d) => {
-      const valar = d.kind === "valar", bits = [!valar && imHost(d.url), imList(d.models, (m) => m || "–")];
+      const valar = d.kind === "valar", bits = [imHost(d.url), imList(d.models, (m) => m || "–")];
       if (valar) {
         const wins = [...new Set(Object.values(d.windows || {}))];
         bits.push(wins.length === 1 ? "window: " + (WIN[wins[0]] || wins[0]) : imList(d.windows || {}, (w) => WIN[w] || w));
@@ -1040,8 +1044,8 @@ function imPanel(pv) {
   const miss = pds.filter((d) => !keys[d.id]).map((d) => d.name);
   const imKeys = $("imKeys");
   imKeys.hidden = !miss.length;
-  imKeys.textContent = miss.length ? `After adding: enter ${miss.join(" and ")}'s key${miss.length === 1 ? "" : "s"} in Tracks before switching` : "";
-  return [el("div", { class: "imname" }, imName, imTag, pv.exported && el("span", { class: "imexp" }, "exported " + pv.exported), takenNote),
+  imKeys.textContent = miss.length ? `After adding: enter ${andList(miss)}'s key${miss.length === 1 ? "" : "s"} in Tracks before switching` : "";
+  return [el("div", { class: "imname" }, imName, imTag, pv.exported && el("span", { class: "imexp" }, "exported " + pv.exported), imNote),
     el("div", { class: "imgrid" }, tracks, routed, sched, prompts)];
 }
 $("imAdd").addEventListener("click", async () => {
@@ -1054,7 +1058,7 @@ $("imAdd").addEventListener("click", async () => {
   } catch (e) {
     showPresetErr(e, err);
   } finally {
-    $("imAdd").disabled = false;
+    imSetAdd();  // recompute, don't blindly re-enable: the name may have gone back to the taken one
   }
 });
 
