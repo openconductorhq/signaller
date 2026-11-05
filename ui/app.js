@@ -1,5 +1,5 @@
 "use strict";
-// claude-router cockpit: polls the JSON API once a second and edits the routing config as a whole.
+// signaller cockpit: polls the JSON API once a second and edits the routing config as a whole.
 const $ = (id) => document.getElementById(id);
 // Tracks: Anthropic (fixed) then the config's downstreams; a track id seen in history but no longer configured is "removed".
 const DS = () => (cfg ? cfg.downstreams : []);
@@ -71,7 +71,7 @@ function keepFocus(fn) {
 
 /* ---------- what's shown: picked sessions + time span ---------- */
 const SPANS = { "15m": "last 15 min", "1h": "last hour", "24h": "last 24 h", whole: "whole session", custom: null };
-const VIEW_KEY = "claude-router.view";
+const VIEW_KEY = "signaller.view";
 let view = { pick: [], span: "1h", from: "", to: "" }, sessions = null, moreOpen = false, viewGen = 0;
 try { Object.assign(view, JSON.parse(localStorage.getItem(VIEW_KEY)) || {}); } catch (_) { /* no storage: defaults */ }
 if (!Array.isArray(view.pick) || !Object.hasOwn(SPANS, view.span)) view = { pick: [], span: "1h", from: "", to: "" };
@@ -219,8 +219,8 @@ function applyState(st) {
   const f = document.activeElement;
   const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }  // again after a save: fresh collisions, fresh settings
-  renderCollisions();  // every poll: /router or the picker can change them without this tab's config JSON changing
-  if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /router at any time
+  renderCollisions();  // every poll: /signaller or the picker can change them without this tab's config JSON changing
+  if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /signaller at any time
 }
 // Downstream POST/DELETE/key PUT change the config on the server: reload it (even after an error or a timeout),
 // so the next config PUT starts from it, and let the touched downstream's models load afresh.
@@ -273,7 +273,7 @@ async function save(next, errNode) {
   renderConfig();
   saving++;
   try {
-    cfg = await api("PUT", "config", { ...next, rev: cfgRev });  // the rev this page rendered: a stale copy would erase /router's lines
+    cfg = await api("PUT", "config", { ...next, rev: cfgRev });  // the rev this page rendered: a stale copy would erase /signaller's lines
     cfgRev = cfg.rev;
     showErr(errNode, "");
     renderConfig();
@@ -281,7 +281,7 @@ async function save(next, errNode) {
   } catch (e) {
     cfg = prev;
     renderConfig(true);
-    if (e.status === 409) {  // changed elsewhere (/router, prune, another tab): reload and show why
+    if (e.status === 409) {  // changed elsewhere (/signaller, prune, another tab): reload and show why
       try {
         const st = await api("GET", "state" + qs(sessQ(), spanQ()));
         applyState(st);
@@ -298,7 +298,7 @@ async function save(next, errNode) {
 const withRules = (rules) => ({ ...cfg, rules });
 
 function renderConfig(force) {
-  const key = JSON.stringify(cfg);
+  const key = JSON.stringify([cfg, S && S.active_windows]);  // a schedule line coming into force redraws the Tracks row
   if (!cfg || (key === rendered && !force)) return;
   rendered = key;
   keepFocus(() => { renderYard(); renderLever(); renderTracks(); renderRules(); renderOtherwise(); renderSettings(); renderStrip(); });
@@ -306,7 +306,7 @@ function renderConfig(force) {
 
 /* lever: Anthropic, Rules, then one button per downstream */
 const leverBtns = () => [...$("lever").querySelectorAll(".lever")];
-// One picked session: the lever shows and sets that session's own lever (/router), falling back to the global one.
+// One picked session: the lever shows and sets that session's own lever (/signaller), falling back to the global one.
 const oneSess = () => view.pick.length === 1 && view.pick[0] !== "unknown" ? view.pick[0] : null;
 const ownLever = () => { const id = oneSess(); return id && S && S.session_levers ? S.session_levers[id] || null : null; };
 const curLever = () => ownLever() || cfg.lever;
@@ -442,13 +442,17 @@ function trow(d) {
     el("div", {}, el("input", { class: "tname", value: d.name, spellcheck: "false", "data-k": "n:" + t, "aria-label": `Name of ${d.name}`,
       onchange: (e) => { const v = e.target.value.trim(); if (v) saveDs(t, { name: v }); else renderConfig(true); } }),
       el("div", { class: "tmeta" }, el("code", {}, t), " · ", el("span", { class: "turl" }, k ? k.url : ""), " · ", el("span", { class: "tkey " + (keyed ? "ok" : "no") }, keyed ? "key set" : "no key"))),
-    Object.entries(TIER).map(([m, tn]) => el("label", { class: "f" }, tn + " ",
+    Object.entries(TIER).map(([m, tn]) => { const act = S && S.active_windows && (S.active_windows[t] || {})[m]; return el("label", { class: "f" }, tn + " ",
       modelPick(t, d.models[m], { "data-m": m, "data-k": `m:${t}:${m}`, "aria-label": `${d.name} model for ${m}` },
         // a model without the slot's window falls back to Now
         (v) => { const c = cur(); saveDs(t, { models: { ...c.models, [m]: v }, ...(valar && { windows: { ...c.windows, [m]: windowsFor(v).includes(c.windows[m]) ? c.windows[m] : "asap" } }) }); }),
       valar && el("span", { class: "seg win", role: "group", "aria-label": `${d.name} completion window for ${m}` },
         windowsFor(d.models[m]).map((w) => el("button", { type: "button", "data-k": `w:${t}:${m}:${w}`, "aria-pressed": String(d.windows[m] === w),
-          onclick: () => { const c = cur(); if (c.windows[m] !== w) saveDs(t, { windows: { ...c.windows, [m]: w } }); } }, WIN[w]))))),
+          class: act && act.value === w && act.value !== d.windows[m] ? "now" : null,
+          title: act && act.value === w ? `In force now for every session: settings line ${act.line} (${act.when || "always"})` : null,
+          onclick: () => { const c = cur(); if (c.windows[m] !== w) saveDs(t, { windows: { ...c.windows, [m]: w } }); } }, WIN[w]))),
+      valar && act && act.value !== d.windows[m] && windowsFor(d.models[m]).includes(act.value) &&
+        el("small", { class: "wnow", title: act.when || "always" }, `${WIN[act.value]} now · line ${act.line}`)); }),
     !valar && el("div", { class: "tprices" }, "USD per 1M tokens", priceInputs(d.name, d.prices, (pk) => ({ "data-k": `p:${t}:${pk}`,
       onchange: (e) => {
         const p = readPrices([...e.target.closest(".tprices").querySelectorAll("input")]);
@@ -697,7 +701,7 @@ function renderOtherwise() {
 
 /* settings lines: window and model overrides by session and hour, per downstream */
 // The rows render from renderConfig (a render here needs MODELS/WINDOWS too) and after every save; the
-// collision list re-renders on every poll (renderCollisions), since /router can change it without
+// collision list re-renders on every poll (renderCollisions), since /signaller can change it without
 // this tab's config JSON changing.
 const clashSet = () => new Set(((S && S.collisions) || []).flatMap((c) => [c.line, c.by]));
 function renderCollisions() {

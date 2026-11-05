@@ -1,33 +1,81 @@
-# claude-router
+<div align="center">
 
-A loopback HTTP proxy that sits at Claude Code's `ANTHROPIC_BASE_URL`. Each
-request goes either to Anthropic (untouched, on your own login) or to a
-**downstream**: any Anthropic-compatible service you add in the console. On a
-downstream the router swaps in that service's key and renames the model. A
-console at `/ui` shows live traffic and cost, and it is where you edit the rules
-and manage downstreams. Python 3 standard library only.
+# Signaller
+
+**Keep the thinking on Anthropic. Send the typing somewhere cheaper.**
+
+A loopback proxy for Claude Code that decides, request by request, which model
+answers — and shows you what it saved.
+
+`Python 3 stdlib only` · `no dependencies` · `loopback only` · `keys never leave one 0600 file` · `MIT`
+
+<sub>Unofficial · not affiliated with Anthropic or Valar · runs locally with your own accounts — see <a href="#terms-and-disclaimer">Terms and disclaimer</a></sub>
+
+![The signaller console: traffic flowing from Claude Code through the rulebook to Anthropic and Valar, with cost cards](docs/images/console.png)
+
+</div>
+
+## What it does
+
+signaller sits at Claude Code's `ANTHROPIC_BASE_URL`. Each request goes
+either to **Anthropic** (untouched, on your own login) or to a **downstream**:
+any Anthropic-compatible service you add in the console. On a downstream the
+router swaps in that service's key and renames the model. A console at `/ui`
+shows live traffic and cost, and it is where you edit the rules and manage
+downstreams.
+
+<p align="center"><img src="docs/images/flow.svg" alt="Claude Code sends every request to signaller, which forwards it to Anthropic untouched, or to Valar or another downstream with that service's key and model name" width="100%"></p>
+
+| | |
+|---|---|
+| 🎚️ **One lever, steerable from the prompt** | Anthropic, Rules, or one downstream — globally from the console, or per session with `/signaller` without leaving Claude Code. |
+| 📜 **A readable rulebook** | `when tier is opus go anthropic`. Tags, model tier, prompt size, or a classifier's guess at what the prompt is about. |
+| 🕐 **Settings by session and time** | "Background sessions and 00:00–07:00 use Valar's cheaper Priority window." |
+| 💸 **Cost you can see** | What each track cost, what the same traffic would cost on the Anthropic API, and the difference. |
+| 🪞 **Side by side** | Double a share of turns to a second track and judge the answers. |
+| 🛟 **Never fails closed** | A bad config, broken stats or a slow classifier falls back with a banner; routing carries on. |
+
+## Steer it from inside Claude Code
+
+The **signaller** plugin puts the router in your prompt. `/signaller` answers
+instantly without a model turn, the status line always shows where this
+session is going, and nothing you change here touches your other sessions.
+
+<p align="center"><img src="docs/images/steer.svg" alt="In Claude Code: /signaller valar switches this session to Valar, /signaller valar window priority sets its window, /signaller name labels it, and when asked Claude calls signaller_lever to switch to Anthropic; the status line reads signaller: anthropic (this session)" width="100%"></p>
 
 ```
-claude ──ANTHROPIC_BASE_URL──▶ claude-router (127.0.0.1:8787) ──┬─▶ api.anthropic.com   (your auth, untouched)
-                                                                ├─▶ Valar               (its key, model renamed)
-                                                                └─▶ any downstream      (its key, model renamed)
+/plugin install signaller --marketplace openconductorhq/signaller
 ```
+
+| You type | It does |
+|---|---|
+| `/signaller valar` · `/signaller anthropic` · `/signaller rules` | Switch **this session** (and its subagents); `/signaller reset` goes back to the global lever. |
+| `/signaller valar window priority` | This session's Valar window, saved as a settings line that beats schedules. |
+| `/signaller valar sonnet model glm-4.8` | The model this session gets for a tier on that downstream. |
+| `/signaller name nightly infra cleanup` | How the session shows in the console. |
+| "…then do `/signaller anthropic` for the review" | Claude may switch, once, to exactly what you typed. |
+
+Full reference: [`/signaller` in Claude Code](#signaller-in-claude-code).
+
+### What happens to one request
+
+<p align="center"><img src="docs/images/journey.svg" alt="A request passes the lever, then the rulebook in order: tools, tags, classifier, model tier, otherwise. The first that decides picks Anthropic or Valar; prepare() renames, swaps the key and applies settings lines; doubling can send a shadow copy" width="100%"></p>
 
 ## Install
 
 ### In a container (recommended)
 
 ```
-mkdir -p ~/.config/claude-router
-cp env.example ~/.config/claude-router/env
-chmod 600 ~/.config/claude-router/env      # set VALAR_API_KEY here if you use Valar (read once, see Downstreams)
+mkdir -p ~/.config/signaller
+cp env.example ~/.config/signaller/env
+chmod 600 ~/.config/signaller/env      # set VALAR_API_KEY here if you use Valar (read once, see Downstreams)
 docker compose up -d --build
 ```
 
 - **Network:** `compose.yaml` publishes the router on `127.0.0.1:8787` only.
   Inside the container it listens on `0.0.0.0`, which the router allows only
-  with `CLAUDE_ROUTER_IN_CONTAINER=1` (set by the image).
-- **Files:** config lives in `~/.config/claude-router`. Stats live in the
+  with `SIGNALLER_IN_CONTAINER=1` (set by the image).
+- **Files:** config lives in `~/.config/signaller`. Stats live in the
   `stats` Docker volume, not in that folder (see [Data](#data)).
 - **Session labels:** `~/.claude/projects` is mounted read-only to label
   sessions.
@@ -40,17 +88,17 @@ To rebuild after pulling changes, run `docker compose up -d --build`. Logs:
 ### As a systemd user service
 
 ```
-mkdir -p ~/.config/claude-router
-cp env.example ~/.config/claude-router/env
-chmod 600 ~/.config/claude-router/env
+mkdir -p ~/.config/signaller
+cp env.example ~/.config/signaller/env
+chmod 600 ~/.config/signaller/env
 mkdir -p ~/.config/systemd/user
-ln -s $PWD/claude-router.service ~/.config/systemd/user/
-systemctl --user enable --now claude-router
+ln -s $PWD/signaller.service ~/.config/systemd/user/
+systemctl --user enable --now signaller
 ```
 
 The unit runs Python with `-E -s`, which ignores `PYTHON*` env vars and the user
 site directory, so only the standard library is ever loaded. Logs:
-`journalctl --user -u claude-router -f`.
+`journalctl --user -u signaller -f`.
 
 ### Turn it on in Claude Code
 
@@ -66,51 +114,51 @@ Add this to `~/.claude/settings.json`:
 
 ### Environment
 
-These are read from `~/.config/claude-router/env`; `env.example` lists them.
+These are read from `~/.config/signaller/env`; `env.example` lists them.
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `CLAUDE_ROUTER_LISTEN` | `127.0.0.1:8787` | Must be a loopback address, or the router exits with code 2 (outside a container). |
-| `CLAUDE_ROUTER_ANTHROPIC_URL` | `https://api.anthropic.com` | Where the Anthropic track goes. |
-| `CLAUDE_ROUTER_CONFIG_DIR` | `~/.config/claude-router` | Config files (see [Data](#data)). |
-| `CLAUDE_ROUTER_STATS_DIR` | the config dir | Where `stats.db` lives. The image sets it to `/data` (the `stats` volume). |
+| `SIGNALLER_LISTEN` | `127.0.0.1:8787` | Must be a loopback address, or the router exits with code 2 (outside a container). |
+| `SIGNALLER_ANTHROPIC_URL` | `https://api.anthropic.com` | Where the Anthropic track goes. |
+| `SIGNALLER_CONFIG_DIR` | `~/.config/signaller` | Config files (see [Data](#data)). |
+| `SIGNALLER_STATS_DIR` | the config dir | Where `stats.db` lives. The image sets it to `/data` (the `stats` volume). |
 | `VALAR_URL`, `VALAR_API_KEY` | `https://api.valarhq.ai` | Used once, to seed the Valar downstream. |
 | `TZ` | the host's zone | The router's local time: the settings lines' `hour` field and the console clock. In the container set it to an IANA zone (`TZ=Asia/Jerusalem`); the host's `/etc/localtime` isn't shared into the VM under Colima, and an empty or unset `TZ` means UTC. |
 
-`LITELLM_*`, `CLAUDE_ROUTER_LOCAL_SONNET` and `CLAUDE_ROUTER_LOCAL_HAIKU` are no
+`LITELLM_*`, `SIGNALLER_LOCAL_SONNET` and `SIGNALLER_LOCAL_HAIKU` are no
 longer used. To keep using LiteLLM, add it as a downstream.
 
-## `/router` in Claude Code
+## `/signaller` in Claude Code
 
-The `router-lever` plugin (in `plugin/`) adds `/router`. It answers without a
+The `signaller` plugin (in `plugin/`) adds `/signaller`. It answers without a
 model turn, and the status line shows `router: <mode> (this session|global)`,
 checked every 15 s.
 
 | Command | What it does |
 |---------|--------------|
-| `/router` | Show the mode. |
-| `/router rules\|anthropic\|<downstream id>` | Switch this session only; its subagents follow. Other sessions keep the console's lever. |
-| `/router reset` | Go back to the global lever. |
-| `/router name <text>` | Name this session in the console. `/router name` alone clears the name. |
-| `/router <downstream> [<tier>] window\|model <value>` | Set this session's own settings line on a downstream: its completion window (`/router valar window priority`) or the model it serves for a tier (`/router valar sonnet model glm-4.8`; without a tier, every tier). It goes in at the top of the settings list, so it beats schedules. |
-| `/router <downstream> reset` | Clear this session's settings lines for that downstream. |
+| `/signaller` | Show the mode. |
+| `/signaller rules\|anthropic\|<downstream id>` | Switch this session only; its subagents follow. Other sessions keep the console's lever. |
+| `/signaller reset` | Go back to the global lever. |
+| `/signaller name <text>` | Name this session in the console. `/signaller name` alone clears the name. |
+| `/signaller <downstream> [<tier>] window\|model <value>` | Set this session's own settings line on a downstream: its completion window (`/signaller valar window priority`) or the model it serves for a tier (`/signaller valar sonnet model glm-4.8`; without a tier, every tier). It goes in at the top of the settings list, so it beats schedules. |
+| `/signaller <downstream> reset` | Clear this session's settings lines for that downstream. |
 
 A session's own lever lives in the router's memory, so a router restart drops
-it. Settings lines set with `/router` are saved in `console.json`, so they
+it. Settings lines set with `/signaller` are saved in `console.json`, so they
 survive a restart; a session id unseen for a week — including one the stats
 no longer know at all — is dropped from them.
 
-Claude can switch the lever too, through the plugin's `router_lever` tool, but
-only when you typed `/router <mode>` in a message. That can be "do /router
-anthropic", or a plan with "/router rules" at a later step. Each one you type
+Claude can switch the lever too, through the plugin's `signaller_lever` tool, but
+only when you typed `/signaller <mode>` in a message. That can be "do /signaller
+anthropic", or a plan with "/signaller rules" at a later step. Each one you type
 allows one switch to that mode; any other switch is refused. Setting this
 session's window or model through the tool needs a typed
-`/router <downstream> [<tier>] window|model <value>` the same way.
+`/signaller <downstream> [<tier>] window|model <value>` the same way.
 
 The plugin talks to `127.0.0.1:8787` only. Install:
 
 ```
-/plugin install router-lever --marketplace wilfoa/claude-router
+/plugin install signaller --marketplace openconductorhq/signaller
 ```
 
 ## Routing
@@ -126,6 +174,7 @@ unchanged.
 
 **The Rulebook:** rules are checked in order and the first one that decides
 wins. If none decides, the request goes to "Otherwise" (Anthropic by default).
+
 A fresh config ships these rules:
 
 | Rule | Sends |
@@ -134,6 +183,8 @@ A fresh config ships these rules:
 | Tags in your message | `#planning` → Anthropic, `#execution` → Valar |
 | What the prompt is about | the classifier: planning and design & review → Anthropic; coding and chit-chat → Valar |
 | Model the request asked for | opus or fable → Anthropic; sonnet, haiku or other → Valar |
+
+<p align="center"><img src="docs/images/rulebook.png" alt="The Rulebook panel: four built-in rules, each with how many requests it decided" width="480"></p>
 
 **Tags** match whole words, case-insensitive:
 - **Where:** only at the very start of the prompt (`#execution fix it`, or
@@ -247,10 +298,13 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
 
 - **Lever:** Anthropic, Rules, or one of your downstreams. With one session
   picked, the lever shows and sets that session's own lever (the same one
-  `/router` sets, updated live). "back to global" drops it.
+  `/signaller` sets, updated live). "back to global" drops it.
 - **Tracks:** one row per downstream. Each row shows whether a key is set, the
   model map and the prices, with Rename, Replace key and Delete. The classifier's
-  upstream and model are set here too.
+  upstream and model are set here too. When a schedule line is in force for
+  every session (a blank or hour-only condition), the window it sets is
+  outlined on the row with "Priority now · line N"; the filled pill stays the
+  default the row saves.
 - **Rulebook:** add, edit and switch off rules. A new rule goes on top. Each
   rule shows how many requests it decided in the span.
 - **Settings by session and time:** override the window or the model a
@@ -266,7 +320,7 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
   clock shows beside the list, because `hour` is the router's local time (in
   the container set `TZ` in the env file; see [Environment](#environment)). A
   line an earlier line beats where both match is listed as a collision — it
-  still saves, since a deliberate override overlaps on purpose. `/router`'s
+  still saves, since a deliberate override overlaps on purpose. `/signaller`'s
   per-session form writes the same lines; a whole-config save that would land
   on lines written since the page loaded is refused and the page reloads them.
 - **Classifier:** a rule that asks a small model which label the newest human
@@ -292,6 +346,21 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
     finds its direction full is marked "skipped, busy".
   - **Judging:** compare pairs in Side by side. "Forget all pairs" deletes them.
 
+### A night schedule, end to end
+
+The router's clock reads 01:33. Line 2 puts Valar on Priority from 00:00 to
+07:00 for every session, so the Tracks row outlines Priority as in force while
+Now stays the saved default. Line 1 already holds one background session on
+Priority all day; line 3 overlaps both and is flagged, but still saves.
+
+![Tracks row for Valar: Now is the saved default, Priority is outlined as in force from settings line 2](docs/images/tracks.png)
+
+<p align="center"><img src="docs/images/settings.png" alt="Settings lines: a session line, a 00:00–07:00 Priority schedule, and a colliding Standard line flagged below" width="520"></p>
+
+![Departures for the nightly session: each tool-loop step on Valar is marked window: priority](docs/images/departures.png)
+
+<p align="center"><img src="docs/images/day.svg" alt="Over a day, every session runs Valar on Priority from 00:00 to 07:00 and Now after; the picked nightly session stays on Priority all day" width="100%"></p>
+
 ### Sessions, span and cost
 
 Pills at the top filter by Claude Code session. The time control sets the span:
@@ -304,7 +373,7 @@ the span are remembered in the browser.
   - **Which show:** only sessions with activity in the span, the first 8 plus
     "+ N more".
   - **Labels:** `folder · branch`, read from Claude Code's transcripts
-    (`cwd` and `gitBranch` only), or the name set with `/router name`. Subagents
+    (`cwd` and `gitBranch` only), or the name set with `/signaller name`. Subagents
     count toward their parent session. Requests with no session id show as
     "unknown session".
 - **Deleting a session:** the ✕ on a pill deletes that session's history:
@@ -354,8 +423,8 @@ the span are remembered in the browser.
 
 ## Data
 
-**Config:** these files live in `~/.config/claude-router/` (or
-`CLAUDE_ROUTER_CONFIG_DIR`), mode 0600:
+**Config:** these files live in `~/.config/signaller/` (or
+`SIGNALLER_CONFIG_DIR`), mode 0600:
 
 - `console.json`: the routing config. If it's unreadable at startup, the router
   uses defaults, keeps the bad file as `console.json.bad`, and shows a banner.
@@ -368,7 +437,7 @@ the span are remembered in the browser.
   input by default; 5-minute writes use `cache_write`, 1.25 times). A missing
   key falls back to the built-in default, and it doesn't follow an edited `in`.
 
-**`stats.db`** is the SQLite stats database. It lives in `CLAUDE_ROUTER_STATS_DIR`,
+**`stats.db`** is the SQLite stats database. It lives in `SIGNALLER_STATS_DIR`,
 which is the `stats` volume in Docker.
 - **What it holds:** per request, the routing decision, models, tokens and
   cost. It also stores the latest user message in full, saved as compressed
@@ -379,7 +448,7 @@ which is the `stats` volume in Docker.
   until "Forget all pairs".
 - **Why a volume:** SQLite corrupts over a folder shared from the host, such as
   Colima's or Docker Desktop's virtiofs. That happened twice before the database
-  moved to a volume. Never point `CLAUDE_ROUTER_STATS_DIR` at a bind mount.
+  moved to a volume. Never point `SIGNALLER_STATS_DIR` at a bind mount.
 - **Inspecting or backing it up:** don't open the live file from the host.
   Copy it out:
   ```
@@ -409,19 +478,68 @@ conversation. The router does no history cleaning.
 as Valar's `zai-org/GLM-5.3`) answers 400 "this model does not support image
 input" once the conversation holds a screenshot. The router doesn't swap
 models for it. Send that turn to Anthropic (no `#execution`, or
-`/router anthropic`), or map the tier to a model that takes images.
+`/signaller anthropic`), or map the tier to a model that takes images.
+
+## Terms and disclaimer
+
+**Unofficial.** This project is not affiliated with, endorsed by or supported
+by Anthropic or Valar. Claude and Claude Code are trademarks of Anthropic.
+
+**You run it, with your own accounts.** The router runs on your machine, for
+you. It holds no account of its own:
+- **Anthropic:** your own Claude login or API key, set in Claude Code as usual.
+- **Downstreams:** your own keys, added in the console.
+
+Each provider's terms apply to you as if you used it directly:
+- **Anthropic:** the [Consumer Terms](https://www.anthropic.com/legal/consumer-terms)
+  (Free, Pro, Max) or the [Commercial Terms](https://www.anthropic.com/legal/commercial-terms)
+  (API keys, Team, Enterprise), plus the [Usage Policy](https://www.anthropic.com/legal/aup).
+- **Valar:** its [Terms of Service](https://valarhq.ai/terms).
+- **Any other downstream:** its own terms.
+
+**How it treats your Anthropic login.** It works as an LLM gateway set through
+`ANTHROPIC_BASE_URL`, the setup Claude Code
+[documents](https://code.claude.com/docs/en/llm-gateway#subscriptions-and-gateways).
+- **Who sends requests:** every request is one Claude Code sent. The router
+  forwards it to Anthropic with your login as it came, and never starts its own.
+- **Doubling:** a comparison copy is still that same request, sent to the other
+  track instead. It counts against your plan's usage like any other request.
+- **Storage:** your login is never stored or logged.
+
+**Don't run it for other people.** Anthropic
+[forbids](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use)
+routing requests through Free, Pro, Max or Ultra credentials on behalf of
+others. So:
+- Don't host the router as a service.
+- Don't share one router, or one downstream key, across people who aren't
+  covered by that key's account.
+
+**Non-Claude models are your call.** Anthropic doesn't support routing Claude
+Code to non-Claude models. Features can break, and so can a conversation that
+mixes tracks (see [Limitations](#limitations)).
+
+**Comparing providers.** Valar's terms (§6.2(v)) forbid using its service "for
+benchmarking". The cost cards, latency figures and Side by side exist to help
+you pick a route for your own work. Check with Valar before you publish
+comparisons made with them.
+
+**No warranty.** Released under the [MIT License](LICENSE), "as is". The
+router sits on the path of every Claude Code session on your machine. If it
+breaks, those sessions break until you bypass it
+(`ANTHROPIC_BASE_URL= claude`).
 
 ## Development
 
 ```
 pytest -q tests                      # the router (stdlib only; pytest just runs it)
-claude plugin test plugin/router-lever
+claude plugin test plugin/signaller
 ```
 
 | File | Role |
 |------|------|
-| `claude_router.py` | the HTTP proxy, the `App` and startup |
-| `routing.py` | config model (v3), request features, rule evaluation and explanations |
+| `signaller.py` | the HTTP proxy, the `App` and startup |
+| `routing.py` | config model (v4), request features, rule evaluation and explanations |
+| `overrides.py` | settings lines: resolve, collisions, pruning, what's in force now |
 | `rulelang.py` | the `when … go …` parser, pure (no eval) |
 | `classifier.py` | the classifier rule's model call, cached per turn |
 | `doubling.py` | shadow copies and pairs |
@@ -431,7 +549,7 @@ claude plugin test plugin/router-lever
 | `store.py` | `console.json` load/save and the SQLite stats store (one writer thread) |
 | `console.py` | `/ui` static files and the JSON API, loopback Host/Origin checks |
 | `ui/` | the console: vanilla JS and CSS, no build step, strict CSP |
-| `plugin/router-lever/` | the Claude Code plugin (`/router`, `router_lever` tool) |
+| `plugin/signaller/` | the Claude Code plugin (`/signaller`, `signaller_lever` tool) |
 
 Design specs and plans are in `docs/superpowers/`. `AGENTS.md` has the
 conventions for working on this repo.

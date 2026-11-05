@@ -1,0 +1,10 @@
+[Unit]
+Description=signaller: route Claude Code requests to Anthropic or other downstreams
+
+[Service]
+ExecStart=/usr/bin/python3 -E -s %h/Development/signaller/signaller.py
+EnvironmentFile=%h/.config/signaller/env
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

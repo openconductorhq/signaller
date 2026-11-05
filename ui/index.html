@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>claude-router</title>
+<title>signaller</title>
 <link rel="icon" href="/ui/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/ui/app.css">
 <script src="/ui/app.js" defer></script>
@@ -14,7 +14,7 @@
 
 <main class="sb">
   <header class="top">
-    <h1>claude-router</h1>
+    <h1>signaller</h1>
     <span class="who"><span id="who">connecting…</span> <span id="errs" class="errs" hidden></span></span>
     <div class="frame" id="lever" role="radiogroup" aria-label="Lever: where requests go">
       <button type="button" class="lever" role="radio" data-v="anthropic" data-t="anthropic" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
@@ -68,7 +68,7 @@
         <legend>1 · Connect</legend>
         <label class="fld">Name <input id="wName" autocomplete="off" spellcheck="false" placeholder="lemmi"></label>
         <label class="fld">Id <input id="wId" autocomplete="off" spellcheck="false" aria-describedby="wIdHint"></label>
-        <p id="wIdHint" class="hint">Used in rules (<code>go id</code>), the lever and <code>/router id</code>. Can't change once saved.</p>
+        <p id="wIdHint" class="hint">Used in rules (<code>go id</code>), the lever and <code>/signaller id</code>. Can't change once saved.</p>
         <p id="wReuse" class="warn" role="status" hidden></p>
         <label class="fld">URL <input id="wUrl" type="url" autocomplete="off" spellcheck="false" placeholder="the service's base url"></label>
         <label class="fld">Key <input id="wKey" type="password" autocomplete="off" placeholder="sent as a bearer key; never shown again"></label>
@@ -87,6 +87,14 @@
       <p id="wErr" class="err" role="alert" hidden></p>
       <div class="edbtns"><button type="button" class="btn primary" id="wSave">Save</button><button type="button" class="btn" id="wCancel">Cancel</button></div>
     </div>
+  </section>
+
+  <section class="board" aria-labelledby="depH">
+    <h2 id="depH">Departures</h2>
+    <p class="hint"><span id="depFrom">Every request</span>, newest first. Open one to see which rule decided.</p>
+    <div id="deps" class="deps"></div>
+    <p id="depEmpty" class="hint empty">No requests yet. Point Claude Code at the router and they'll show up here.</p>
+    <button type="button" class="btn" id="older" hidden>Load older</button>
   </section>
 
   <div class="cols">
@@ -143,14 +151,6 @@
       <ol class="stlines" id="stLines"></ol>
       <button type="button" class="btn" id="stAdd">+ Add line</button>
       <ul id="stColl" class="stcoll" hidden></ul>
-    </section>
-
-    <section class="board" aria-labelledby="depH">
-      <h2 id="depH">Departures</h2>
-      <p class="hint"><span id="depFrom">Every request</span>, newest first. Open one to see which rule decided.</p>
-      <div id="deps" class="deps"></div>
-      <p id="depEmpty" class="hint empty">No requests yet. Point Claude Code at the router and they'll show up here.</p>
-      <button type="button" class="btn" id="older" hidden>Load older</button>
     </section>
   </div>
 

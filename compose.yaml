@@ -1,16 +1,17 @@
-# docker compose up -d --build   (config stays in ~/.config/claude-router; stats in the "stats" volume)
+# docker compose up -d --build   (config stays in ~/.config/signaller; stats in the "signaller_stats" volume)
+name: signaller
 services:
   router:
     build: .
-    image: claude-router
+    image: signaller
     restart: unless-stopped
     ports: ["127.0.0.1:8787:8787"]  # this machine only
-    env_file: ${HOME}/.config/claude-router/env
+    env_file: ${HOME}/.config/signaller/env
     environment:  # wins over the env file
-      CLAUDE_ROUTER_LISTEN: 0.0.0.0:8787
+      SIGNALLER_LISTEN: 0.0.0.0:8787
     extra_hosts: ["host.docker.internal:host-gateway"]
     volumes:
-      - ${HOME}/.config/claude-router:/config
+      - ${HOME}/.config/signaller:/config
       # stats.db on the VM's own disk: SQLite over a host-shared folder (virtiofs) corrupted it twice
       - stats:/data
       - ${HOME}/.claude/projects:/claude/projects:ro  # session labels (cwd, branch) only

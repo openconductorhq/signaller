@@ -10,7 +10,7 @@ from dataclasses import replace
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from claude_router import App, Config, make_server
+from signaller import App, Config, make_server
 from routing import DEFAULT_CONFIG, Rule
 
 BUDGET_MS = 5

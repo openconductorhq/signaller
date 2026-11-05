@@ -153,12 +153,12 @@ ol.rules>li.off .rbody{opacity:.5}
 .seg.win{justify-self:start;padding:2px;gap:2px}.seg.win button{padding:1px 7px;font-size:11.5px;color:var(--muted)}.seg.win button[aria-pressed=true]{color:var(--c)}
 .seg button[aria-pressed=true]{background:#fff;box-shadow:0 1px 2px #0002}
 .seg button[style][aria-pressed=true]{color:var(--c)}
+.seg.win button.now{color:var(--c);outline:1.5px dashed var(--c);outline-offset:-2px}.wnow{display:block;font-size:11px;color:var(--c);margin-top:2px}
 .btn{border:1px solid var(--off);background:#fff;border-radius:7px;padding:6px 12px;cursor:pointer;margin-top:10px;font-size:13px}
 .btn:hover{border-color:var(--ink)}
 .btn.primary{background:var(--ink);color:#fff;border-color:var(--ink)}
 
 /* settings lines */
-#stt{margin-top:22px}
 ol.stlines{list-style:none;padding:0;margin:0}
 ol.stlines>li{display:grid;grid-template-columns:28px 1fr;gap:10px;align-items:start;padding:10px 4px;border-top:1px solid var(--line)}
 ol.stlines .num{font-family:var(--cond);font-size:22px;color:var(--muted);line-height:1;padding:0 4px}
@@ -199,7 +199,7 @@ ol.stlines>li.clash .num{color:var(--anth)}
 .refcols{columns:2;margin-top:6px;line-height:1.75}
 
 /* departures */
-.board{font-size:13px}
+.board{font-size:13px;margin-top:22px}
 .deps{max-height:620px;overflow:auto;padding:0 10px;margin:0 -10px}
 .dep{border-top:1px solid var(--line)}
 .dephead{display:grid;grid-template-columns:58px 10px minmax(0,1fr) auto;gap:10px;align-items:center;padding:7px 0;cursor:pointer}
@@ -210,7 +210,7 @@ ol.stlines>li.clash .num{color:var(--anth)}
 .sw{background:var(--c)}.sw.x{background:var(--stop)}
 .stag{font-family:var(--mono);font-size:11px;color:var(--muted);background:var(--well);border-radius:4px;padding:1px 5px;margin-right:6px}
 .dep .what{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dep .why{font-size:12px;color:var(--muted);white-space:nowrap;max-width:170px;overflow:hidden;text-overflow:ellipsis}
+.dep .why{font-size:12px;color:var(--muted);white-space:nowrap;max-width:380px;overflow:hidden;text-overflow:ellipsis}
 .dep .why.x{color:var(--stop);font-weight:600}
 .dep .lat{display:block;font-weight:400;color:var(--muted)}
 .dep .dbl{color:var(--shadow);font-weight:700;margin-left:4px}
@@ -264,6 +264,7 @@ ol.stlines>li.clash .num{color:var(--anth)}
 @media (max-width:820px){
   .sb{padding:16px 16px 50px}
   .cols,.twin,.trow,.shadows,.wmodels{grid-template-columns:1fr}
+  #stt{margin-top:22px}
   .tacts{grid-column:auto}
   .money{grid-template-columns:1fr 1fr}
   .tf .seg button{padding:3px 7px}

@@ -12,9 +12,9 @@ from unittest import mock
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-import claude_router
+import signaller
 import overrides
-from claude_router import App, Config, make_server, upstream_headers
+from signaller import App, Config, make_server, upstream_headers
 from routing import DEFAULT_CONFIG, Downstream
 
 VALAR = replace(DEFAULT_CONFIG.downstreams[0], models={"fable": "VS", "opus": "VS", "sonnet": "VS", "haiku": "VH"})
@@ -105,7 +105,7 @@ HDRS = {"Authorization": "Bearer sk-ant-oat01-X", "anthropic-beta": "claude-code
 
 class ProxyTest(unittest.TestCase):
     def setUp(self):
-        nowait = mock.patch.object(claude_router, "RETRY_DELAYS", (0, 0, 0))  # down-upstream tests stay fast
+        nowait = mock.patch.object(signaller, "RETRY_DELAYS", (0, 0, 0))  # down-upstream tests stay fast
         nowait.start()
         self.addCleanup(nowait.stop)
         self.err = io.StringIO()
@@ -256,7 +256,7 @@ class ProxyTest(unittest.TestCase):
                                    downstreams=self.app.routing.downstreams + (replace(LEMMI, url=self.l.url),))
         status, data = self.post(body_for("claude-sonnet-5-5"))
         self.assertEqual(status, 502)
-        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Lemmi has no key; set it in the console")
+        self.assertEqual(json.loads(data)["error"]["message"], "signaller: Lemmi has no key; set it in the console")
         self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
 
     def test_valar_not_configured_502(self):
@@ -265,7 +265,7 @@ class ProxyTest(unittest.TestCase):
         self.start(self.l.url, valar_key="")
         status, data = self.post(body_for("claude-sonnet-5-5"))
         self.assertEqual(status, 502)
-        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: Valar has no key; set it in the console")
+        self.assertEqual(json.loads(data)["error"]["message"], "signaller: Valar has no key; set it in the console")
         self.assertEqual(self.v.seen + self.a.seen + self.l.seen, [])
 
     def test_bad_content_length_answers_400(self):
@@ -481,7 +481,7 @@ class ProxyTest(unittest.TestCase):
 
     def test_upstream_timeout_says_timed_out(self):
         self.a.hang = True
-        with mock.patch.object(claude_router, "UPSTREAM_TIMEOUT", 0.2):
+        with mock.patch.object(signaller, "UPSTREAM_TIMEOUT", 0.2):
             s, data = self.post(body_for("claude-opus-5-5"))
         self.assertEqual(s, 502)
         self.assertIn("timed out", json.loads(data)["error"]["message"])
@@ -511,10 +511,10 @@ class ProxyTest(unittest.TestCase):
 
 
     def test_routing_failure_is_a_500_not_a_dropped_connection(self):
-        with mock.patch.object(claude_router, "decide_route", side_effect=RuntimeError("boom")):
+        with mock.patch.object(signaller, "decide_route", side_effect=RuntimeError("boom")):
             s, data = self.post(body_for("claude-sonnet-5-5"))
         self.assertEqual(s, 500)
-        self.assertEqual(json.loads(data)["error"]["message"], "claude-router: routing failed")
+        self.assertEqual(json.loads(data)["error"]["message"], "signaller: routing failed")
         self.assertEqual(self.l.seen + self.a.seen + self.v.seen, [])
         self.logged()
         self.assertRegex(self.err.getvalue(), r"route=- reason=error status=500 .*shadow=-")
@@ -627,18 +627,18 @@ class SeedTest(unittest.TestCase):
 
 class MainTest(unittest.TestCase):
     def test_config_dir_tilde_expanded(self):
-        with mock.patch.dict(os.environ, {"CLAUDE_ROUTER_CONFIG_DIR": "~/x-router"}):
-            self.assertEqual(claude_router.default_config_dir(), os.path.expanduser("~/x-router"))
+        with mock.patch.dict(os.environ, {"SIGNALLER_CONFIG_DIR": "~/x-router"}):
+            self.assertEqual(signaller.default_config_dir(), os.path.expanduser("~/x-router"))
 
     def test_unusable_config_dir_exits_2(self):
         f = tempfile.NamedTemporaryFile()
         err = io.StringIO()
-        env = {"CLAUDE_ROUTER_CONFIG_DIR": os.path.join(f.name, "sub")}
+        env = {"SIGNALLER_CONFIG_DIR": os.path.join(f.name, "sub")}
         with mock.patch.dict(os.environ, env), contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
-            claude_router.main()
+            signaller.main()
         self.assertEqual(cm.exception.code, 2)
         self.assertEqual(err.getvalue().count("\n"), 1)
-        self.assertIn("claude-router: ", err.getvalue())
+        self.assertIn("signaller: ", err.getvalue())
         self.assertNotIn("Traceback", err.getvalue())
 
 
@@ -651,10 +651,10 @@ class RetryTest(unittest.TestCase):
             if isinstance(o, BaseException):
                 raise o
             return o
-        with mock.patch.object(claude_router, "_open_upstream", fake), \
-                mock.patch.object(claude_router, "RETRY_DELAYS", (0, 0, 0)):
+        with mock.patch.object(signaller, "_open_upstream", fake), \
+                mock.patch.object(signaller, "RETRY_DELAYS", (0, 0, 0)):
             try:
-                return claude_router.open_upstream("http://v", "POST", "/v1/messages", iter([("h", "v")]), b"{}"), calls
+                return signaller.open_upstream("http://v", "POST", "/v1/messages", iter([("h", "v")]), b"{}"), calls
             except Exception as e:
                 return e, calls
 

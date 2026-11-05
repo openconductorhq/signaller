@@ -1,4 +1,4 @@
-"""claude-router: route Claude Code requests to Anthropic or one of the downstreams set up in the console."""
+"""signaller: route Claude Code requests to Anthropic or one of the downstreams set up in the console."""
 import collections
 import http.client
 import http.server
@@ -37,7 +37,7 @@ class Config:
 
 
 def load_config(env: Mapping[str, str]) -> Config:
-    listen = env.get("CLAUDE_ROUTER_LISTEN", "127.0.0.1:8787")
+    listen = env.get("SIGNALLER_LISTEN", "127.0.0.1:8787")
     host, _, port = listen.rpartition(":")
     host = host.strip("[]")
     try:
@@ -46,14 +46,14 @@ def load_config(env: Mapping[str, str]) -> Config:
     except ValueError:
         loopback = False
     # in a container the router must take connections from the bridge; the host publishes the port on 127.0.0.1 only
-    if host == "0.0.0.0" and env.get("CLAUDE_ROUTER_IN_CONTAINER") == "1":
+    if host == "0.0.0.0" and env.get("SIGNALLER_IN_CONTAINER") == "1":
         loopback = True
     if not loopback:
-        raise ValueError("CLAUDE_ROUTER_LISTEN must be a loopback host:port, got %r" % listen)
+        raise ValueError("SIGNALLER_LISTEN must be a loopback host:port, got %r" % listen)
     return Config(
         listen_host=host,
         listen_port=port,
-        anthropic_url=env.get("CLAUDE_ROUTER_ANTHROPIC_URL", "https://api.anthropic.com"),
+        anthropic_url=env.get("SIGNALLER_ANTHROPIC_URL", "https://api.anthropic.com"),
         env_valar=(env.get("VALAR_URL", "").rstrip("/").removesuffix("/v1"), env.get("VALAR_API_KEY", "")),
     )
 
@@ -64,7 +64,7 @@ OAUTH_BETA = "oauth-2025-04-20"
 WINDOW_HEADER = "X-Valar-Completion-Window"  # the router owns it: a client's own is dropped
 UPSTREAM_TIMEOUT = 600
 MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
-                 b'"message":"claude-router: upstream ended mid-stream"}}\n\n')
+                 b'"message":"signaller: upstream ended mid-stream"}}\n\n')
 
 
 def upstream(app: "App", track: str, routing=None) -> tuple[str, str, str, Downstream | None]:
@@ -200,7 +200,7 @@ class App:
             self.banner = " ".join(filter(None, [self.banner, "Switched off because they sent traffic to Local, which is gone: %s."
                                                  % ", ".join(self.routing.migrated_off)]))
         self._rlock = threading.Lock()
-        self.session_levers = {}  # session id -> lever /router chose for that session only
+        self.session_levers = {}  # session id -> lever /signaller chose for that session only
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
         self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
         self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
@@ -208,8 +208,8 @@ class App:
         self.seed()
         self.classifier = Classifier(self._classifier_upstream)
         try:
-            # CLAUDE_ROUTER_STATS_DIR: SQLite needs a real local disk, not a folder shared from the host (see compose.yaml)
-            self.store = Store(os.path.join(os.path.expanduser(os.environ.get("CLAUDE_ROUTER_STATS_DIR") or config_dir), "stats.db"))
+            # SIGNALLER_STATS_DIR: SQLite needs a real local disk, not a folder shared from the host (see compose.yaml)
+            self.store = Store(os.path.join(os.path.expanduser(os.environ.get("SIGNALLER_STATS_DIR") or config_dir), "stats.db"))
         except (OSError, sqlite3.Error) as e:  # broken stats must never cost Claude Code its router
             print("stats off: %s" % e, file=sys.stderr, flush=True)
             self.store = NullStore()
@@ -309,7 +309,7 @@ class App:
         return self._turn_hours[turn_key]
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
-        # ponytail: memory only, a restart drops them (the status line shows it); one small entry per session that used /router
+        # ponytail: memory only, a restart drops them (the status line shows it); one small entry per session that used /signaller
         if lever:
             self.session_levers[sid] = lever
         else:
@@ -351,7 +351,7 @@ class App:
 
 
 def default_config_dir() -> str:
-    return os.path.expanduser(os.environ.get("CLAUDE_ROUTER_CONFIG_DIR") or "~/.config/claude-router")
+    return os.path.expanduser(os.environ.get("SIGNALLER_CONFIG_DIR") or "~/.config/signaller")
 
 
 def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTTPServer:
@@ -383,7 +383,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             # reading the body, which is then left unread, so the connection closes
             if "origin" in self.headers or not LOOPBACK_HOST_RE.fullmatch(self.headers.get("host", "")):
                 self.close_connection = True
-                self._error(403, "claude-router: forbidden origin/host")
+                self._error(403, "signaller: forbidden origin/host")
                 print("%s route=- reason=forbidden status=403 shadow=-" % time.strftime("%Y-%m-%d %H:%M:%S"),
                       file=sys.stderr, flush=True)
                 return
@@ -393,7 +393,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     raise ValueError
             except ValueError:
                 self.close_connection = True
-                return self._error(400, "claude-router: bad content-length")
+                return self._error(400, "signaller: bad content-length")
             body = self.rfile.read(n)
             routing = app.routing  # read once; a concurrent set_routing doesn't affect this request
             model, stream, req = "-", False, None
@@ -404,7 +404,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 pass
             any_sid = session_of(self.headers, req)
             lever = app.session_levers.get(any_sid)
-            if lever:  # /router set this session's own lever
+            if lever:  # /signaller set this session's own lever
                 routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
                 f = Features.from_body(body, req) if is_routed(self.command, self.path) else None
@@ -412,7 +412,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     f.session, f.hour = any_sid, app.hour_of(f.turn_key, time.localtime(t0).tm_hour)
                 d = decide_route(routing, f, app.classifier) if f else None
             except Exception as e:
-                self._error(500, "claude-router: routing failed")
+                self._error(500, "signaller: routing failed")
                 print("%s route=- reason=error status=500 err=%s shadow=-" % (
                     time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__), file=sys.stderr, flush=True)
                 return
@@ -450,7 +450,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             try:
                 if route != "anthropic" and not key:  # never fall back to another track
                     status = 502
-                    self._error(502, "claude-router: %s has no key; set it in the console" % name)
+                    self._error(502, "signaller: %s has no key; set it in the console" % name)
                     return
                 try:
                     conn, resp = open_upstream(base, self.command, self.path, headers, body)
@@ -458,7 +458,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 except (OSError, http.client.HTTPException) as e:
                     status = 502
                     what = "timed out" if isinstance(e, TimeoutError) else "unreachable"
-                    self._error(502, "claude-router: %s %s at %s" % (
+                    self._error(502, "signaller: %s %s at %s" % (
                         name, what, base))
                     return
                 status = resp.status
@@ -537,12 +537,12 @@ def main() -> None:
     try:
         cfg = load_config(os.environ)
     except ValueError as e:
-        print("claude-router: %s" % e, file=sys.stderr)
+        print("signaller: %s" % e, file=sys.stderr)
         sys.exit(2)
     try:
         app = App(cfg, default_config_dir())
     except OSError as e:
-        print("claude-router: config dir unusable: %s" % e, file=sys.stderr)
+        print("signaller: config dir unusable: %s" % e, file=sys.stderr)
         sys.exit(2)
     srv = make_server(cfg, app)
     app.start_price_refresh()  # its thread also prunes settings on its first pass
