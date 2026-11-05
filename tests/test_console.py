@@ -179,7 +179,8 @@ class ConsoleTest(Fixture):
 
     def test_session_lever_applies_to_that_session_only(self):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules",
-                                                                         "modes": ["rules", "anthropic", "valar"], "name": None})
+                                                                         "modes": ["rules", "anthropic", "valar"], "name": None,
+                                                                         "notice": None})
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})[1]["lever"], "valar")
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "bogus"})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "unknown", "lever": "valar"})[0], 400)

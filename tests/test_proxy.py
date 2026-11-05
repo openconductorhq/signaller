@@ -33,6 +33,7 @@ class Fake(ThreadingHTTPServer):
         self.error = False
         self.die = False
         self.hang = False
+        self.no_images = False  # answer a request carrying an image the way a text-only model does
         self.models = b"{}"
         threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
@@ -65,9 +66,11 @@ class FakeHandler(BaseHTTPRequestHandler):
         self.server.seen.append((self.command, self.path, self.headers, body))
         if self.server.hang:
             time.sleep(0.6)
-        if self.server.error:
-            out = b'{"type":"error","error":{"type":"overloaded_error"}}'
-            self.send_response(529)
+        if self.server.error or (self.server.no_images and b'"image"' in body):
+            img = not self.server.error
+            out = b'{"type":"error","error":{"message":"this model does not support image input"}}' if img \
+                else b'{"type":"error","error":{"type":"overloaded_error"}}'
+            self.send_response(400 if img else 529)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(out)))
             self.end_headers()
@@ -164,6 +167,26 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(h["Authorization"], HDRS["Authorization"])
         self.assertEqual(h["anthropic-beta"], HDRS["anthropic-beta"])
         self.assertEqual(self.l.seen, [])
+
+    def test_image_fallback_to_anthropic(self):
+        img = {"messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}},
+                                                         {"type": "text", "text": "#execution what is this"}]}]}
+        self.v.no_images = True
+        h = {**HDRS, "X-Claude-Code-Session-Id": "s1"}
+        status, data = self.post(body_for("claude-opus-5-5", img), h)
+        self.assertEqual((status, data), (200, b"{}"))  # Claude Code never sees the 400
+        self.assertEqual((len(self.v.seen), len(self.a.seen)), (1, 1))
+        _, _, ah, got = self.a.seen[0]
+        self.assertEqual(ah["Authorization"], HDRS["Authorization"])  # the person's own login, as on any Anthropic request
+        self.assertEqual(json.loads(got)["model"], "claude-opus-5-5")  # not the downstream's name
+        self.assertEqual(json.loads(got)["messages"][0]["content"][1]["text"], "what is this")  # tags still stripped
+        self.assertIn("this turn went to anthropic, not valar", self.app.notices["s1"]["text"].lower())
+        self.post(body_for("claude-opus-5-5", img), h)  # nothing remembered: each request tries valar first
+        self.assertEqual((len(self.v.seen), len(self.a.seen)), (2, 2))
+        self.logged(2)
+        self.assertIn("fallback=valar", self.err.getvalue())
+        self.v.error = True  # any other downstream error passes through as it came
+        self.assertEqual(self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "#execution hi"}]}), h)[0], 529)
 
     def test_valar_swaps_credentials_and_model(self):
         self.post(body_for("claude-sonnet-5-5", {"max_tokens": 7}), {**HDRS, "x-api-key": "client"})

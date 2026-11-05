@@ -139,3 +139,21 @@ test('a settings value stops before trailing punctuation, and reset is a whole w
   expect((await $.tool.call({ tool: TOOL, settings: 'valar reset' })).deny).toContain('Not setting')
   expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')
 })
+
+test('an image fallback shows once, as a transcript line and a toast', async ($, on) => {
+  const logs: string[] = [], toasts: string[] = []
+  let notice: any = null
+  on('ui.log', (_, e) => { logs.push(e.text); return { value: undefined } })
+  on('ui.toast', (_, e) => { toasts.push(e.text); return { value: undefined } })
+  on('turn.complete', () => ({ text: 'answer' }))
+  await stub($, on, () => ({ value: { ok: true, status: 200, text: JSON.stringify({ ...JSON.parse(LEVER), notice }) } }))
+  const settle = () => new Promise(r => setTimeout(r, 20))  // polls run in the background
+  await settle()  // the first poll only takes note
+  notice = { turn: 't1', text: 'This turn went to Anthropic, not valar.' }
+  await $.turn.complete({ reason: 'answer' })
+  await settle()
+  await $.turn.complete({ reason: 'answer' })  // the same turn's notice again: not repeated
+  await settle()
+  expect(logs).toEqual(['⚠ signaller: This turn went to Anthropic, not valar.'])
+  expect(toasts).toEqual(['This turn went to Anthropic, not valar.'])
+})

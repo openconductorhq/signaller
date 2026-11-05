@@ -226,10 +226,23 @@ A fresh config ships these rules:
   `oauth-2025-04-20` beta are removed.
 - **Its credentials:** the downstream's key is added.
 - **Failures:** a downstream with no key, or one that is down, answers 502. It
-  never falls back to another track.
+  never falls back to another track, with one exception: images (below).
+
+**Images:** when the conversation holds an image and a downstream answers 400
+about it (a text-only model, like Valar's `zai-org/GLM-5.3`: "this model does
+not support image input"), the router sends that same request to Anthropic
+instead. Claude Code gets Anthropic's answer, not the error.
+- **The warning:** the plugin writes a ⚠ line into the conversation and shows
+  a toast. The line is for you; the model never sees it.
+- **The record:** the explanation gains a "Fallback" step, and the log line
+  ends in `fallback=<downstream>`.
+- **Nothing is remembered:** every request tries its downstream first, so a
+  model that takes images, or a rewound conversation with no image, stays on
+  the downstream.
+- **Any other error passes through unchanged.**
 
 **Logging:** each request is one line on stderr:
-`time route= reason= model=in[→out] status= ms= stream= [err=midstream] shadow=`. Bodies,
+`time route= reason= model=in[→out] status= ms= stream= [err=midstream] shadow= [fallback=]`. Bodies,
 prompts and keys are never logged.
 
 ### Rule language
@@ -496,11 +509,12 @@ conversation. The router does no history cleaning.
 - **Doubled copies:** one that Anthropic rejects only shows up as an error on
   its pair.
 
-**Images on a text-only model:** a downstream model that takes no images (such
-as Valar's `zai-org/GLM-5.3`) answers 400 "this model does not support image
-input" once the conversation holds a screenshot. The router doesn't swap
-models for it. Send that turn to Anthropic (no `#execution`, or
-`/signaller anthropic`), or map the tier to a model that takes images.
+**Images on a text-only model:** once the conversation holds a screenshot, a
+downstream model that takes no images refuses it, and each request then goes
+to Anthropic (see [Images](#routing)). Every request still tries the
+downstream first, which costs one quick failed call. To skip that, map the
+tier to a model that takes images, or use `/signaller anthropic` for that
+session.
 
 ## Terms and disclaimer
 

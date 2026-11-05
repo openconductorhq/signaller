@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Callable
 
-from rulelang import FIELDS, KEYWORDS, RuleError, evaluate, parse
+from rulelang import FIELDS, KEYWORDS, RuleError, evaluate, fields_of, parse
 
 ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
 TAG_RE = re.compile(r"(?<!\w)#(\w+)", re.I)
@@ -93,6 +93,17 @@ def latest_tool_results(messages: list) -> str | None:
         out.append("%s%s: %s" % (names.get(b.get("tool_use_id")) or "tool", " (error)" if b.get("is_error") else "",
                                  text.strip() or "(empty)"))
     return "\n".join(out)[:STEP_CAP] if out else None
+
+
+def has_images(req) -> bool:
+    """Any image in the conversation, typed by the person or returned by a tool. Claude Code resends history, so once
+    one is in, every later request of the session carries it."""
+    def any_image(blocks):
+        return isinstance(blocks, list) and any(
+            isinstance(b, dict) and (b.get("type") == "image" or (b.get("type") == "tool_result" and any_image(b.get("content"))))
+            for b in blocks)
+    msgs = req.get("messages") if isinstance(req, dict) else None
+    return isinstance(msgs, list) and any(isinstance(m, dict) and any_image(m.get("content")) for m in msgs)
 
 
 def _sid_ok(sid) -> bool:
@@ -526,7 +537,8 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
                 if evaluate(ln.cond, lambda name: f.get(name, label)):
                     track, item["decided"] = ln.track, True
                     reason = f"rule:{rule.name}" + (f":{n}" if len(rule.lines) > 1 else "")
-                    item["outcome"] = f"line {n} matched → {track}"
+                    item["outcome"] = f"line {n} matched → {track}" + (
+                        " (%s)" % " ".join("#" + t for t in sorted(f.tags)) if f.tags and "tag" in fields_of(ln.cond) else "")
                     break
         elif f.tier in ("opus", "fable"):
             item["outcome"] = f"skipped: main session ({f.tier})"

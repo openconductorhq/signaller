@@ -23,7 +23,7 @@ from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from prices import Prices, parse_valar
-from routing import (session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
+from routing import (has_images, session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
                      references, route as decide_route, track_model, track_window)
 from keys import Keys
 from store import NullStore, Store, load_console_config, save_console_config
@@ -201,6 +201,7 @@ class App:
                                                  % ", ".join(self.routing.migrated_off)]))
         self._rlock = threading.Lock()
         self.session_levers = {}  # session id -> lever /signaller chose for that session only
+        self.notices = {}  # session id -> {"turn", "text"}: the plugin shows it once (an image fallback)
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
         self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
         self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
@@ -436,6 +437,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             except Exception as e:
                 print("doubling failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
                 pair, shadow, turn_id = None, "-", None
+            orig_body = body  # an image fallback to Anthropic starts again from the request as Claude Code sent it
             stripped = False
             try:  # routing already read the tags; no upstream needs them
                 stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
@@ -446,15 +448,38 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 body = json.dumps(req).encode()
             if out_model != model:
                 shown = "%s→%s" % (model, out_model)
-            status, err, ttfb, conn = 0, "", None, None
+            status, err, ttfb, conn, first, fell = 0, "", None, None, None, None
+            images = route != "anthropic" and has_images(req)
             try:
                 if route != "anthropic" and not key:  # never fall back to another track
                     status = 502
                     self._error(502, "signaller: %s has no key; set it in the console" % name)
                     return
                 try:
+                    # every request is tried where it was sent: a rewound or forked conversation may have no image
                     conn, resp = open_upstream(base, self.command, self.path, headers, body)
                     ttfb = int((time.time() - t0) * 1000)
+                    if images and resp.status == 400:  # an error body is small and nothing is sent yet: read it
+                        first = resp.read()
+                        if b"image" in first.lower():
+                            fell, first = route, None
+                            conn.close()
+                    if fell:  # the only fallback: a downstream that can't read the conversation's images
+                        route = "anthropic"
+                        req2 = json.loads(orig_body)
+                        stripped2 = strip_lead_tags(req2)
+                        name, base, key, ds, headers, out_model, window, _, override = prepare(app, route, model, req2, self.headers.items(), routing, f)
+                        body, shown = json.dumps(req2).encode() if stripped2 else orig_body, model
+                        d.explanation.append({"rule": "Fallback", "outcome": f"{fell} can't take images → anthropic", "decided": True})
+                        if sid:
+                            app.notices[sid] = {"turn": f.turn_key[:16], "text": f"This turn went to Anthropic, not {fell}: "
+                                                f"{fell}'s model can't read the image in this conversation."}
+                        if pair:  # the served side of the pair was the downstream, and it didn't answer
+                            pair.finish({**AnswerCapture.EMPTY, "status": 400, "ttfb_ms": ttfb, "ms": int((time.time() - t0) * 1000),
+                                         "error": "no image input; served by anthropic"})
+                            pair = None
+                        conn, resp = open_upstream(base, self.command, self.path, headers, body)
+                        ttfb = int((time.time() - t0) * 1000)
                 except (OSError, http.client.HTTPException) as e:
                     status = 502
                     what = "timed out" if isinstance(e, TimeoutError) else "unreachable"
@@ -469,7 +494,11 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 self.end_headers()
                 if rec:
                     cap = AnswerCapture(resp.getheader("content-type", ""), resp.getheader("content-encoding", ""))
-                while True:
+                if first is not None:  # a 400 read above that wasn't about images: pass it on as it came
+                    self.wfile.write(first)
+                    if cap:
+                        cap.feed(first)
+                while first is None:
                     try:
                         chunk = resp.read1(65536)
                     except (OSError, http.client.HTTPException):
@@ -519,8 +548,9 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     f.prompt = None  # recorded; the preview deque keeps only the capped text
                     app.recent.append((f, d, rid))
                 shown_reason = '"%s"' % reason if re.search(r"\s", reason) else reason
-                print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s shadow=%s" % (
-                    time.strftime("%Y-%m-%d %H:%M:%S"), route, shown_reason, shown, status, ms, stream, err, shadow),
+                print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s shadow=%s%s" % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"), route, shown_reason, shown, status, ms, stream, err, shadow,
+                    " fallback=%s" % fell if fell else ""),
                     file=sys.stderr, flush=True)
 
         do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = handle_any

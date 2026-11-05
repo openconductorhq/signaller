@@ -56,6 +56,13 @@ breaks.
   `strip_lead_tags` removes them from every user prompt before the body goes
   anywhere; the doubling shadow strips its own copy. The console shows the
   prompt as sent (`untagged`).
+- **The one fallback:** a downstream that answers 400 about images, on a
+  request that carries one (`has_images`), is retried on Anthropic from the
+  original body (`orig_body`) and the person's own headers. The session gets a
+  notice (`App.notices`, served on `/ui/api/lever`), which the plugin turns
+  into a transcript line and a toast. Nothing is remembered between requests,
+  because a rewound or forked conversation may have no image. Every other
+  error passes through as it came.
 - **One request prep for every track:** `prepare()` in `signaller.py`
   renames the model, applies Valar's tool fix, swaps credentials and sets the
   window, for the served request and its shadow alike. Change it there, once.

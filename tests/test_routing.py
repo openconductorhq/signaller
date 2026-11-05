@@ -161,7 +161,7 @@ class EngineTests(unittest.TestCase):
     def test_first_match_and_explanation(self):
         d = self.go(OFF, [user("#execution")])
         self.assertEqual(d.reason, "rule:Tags in your message:2")
-        self.assertEqual([e["outcome"] for e in d.explanation], ["no match", "line 2 matched \u2192 valar", "not reached", "not reached"])
+        self.assertEqual([e["outcome"] for e in d.explanation], ["no match", "line 2 matched \u2192 valar (#execution)", "not reached", "not reached"])
 
     def test_disabled_rule_skipped(self):
         d = self.go(rules_with(OFF, tags=False), [user("#execution")])

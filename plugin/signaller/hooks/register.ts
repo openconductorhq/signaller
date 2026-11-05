@@ -7,7 +7,7 @@ const SETTINGS = `${BASE}/ui/api/settings`
 let MODES = ['rules', 'anthropic'] // the router's list, refreshed by every lever answer
 const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the console takes writes from its own origin only
 
-type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null }
+type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null; notice?: { turn: string; text: string } | null }
 type Line = { downstream: string; tier: string | null; set: string; value: string }
 type Form = { ds: string; tier: string | null; key: 'window' | 'model'; value: string } | { ds: string; reset: true }
 
@@ -117,8 +117,19 @@ const switchTo = async ($: EngineInterface, want: string): Promise<{ ok: boolean
 }
 
 const label = (l: Lever) => `${l.lever} (${l.session ? 'this session' : 'global'})${l.name ? `, session name: ${l.name}` : ''}`
-const poll = ($: EngineInterface) => { lever($).then(l => show($, l), () => show($)) }
-const show = ($: EngineInterface, l?: Lever) => $.ui.status(l ? `signaller: ${label(l)}` : 'signaller: down')
+// an image fallback the router reports for this session: a line in the transcript (shown, never sent to the model)
+// and a toast, once per turn; the first poll after a (re)load only takes note, so an old one isn't shown again
+let seen: string | null | undefined
+const warn = ($: EngineInterface, l: Lever) => {
+  const n = l.notice
+  if (seen !== undefined && n && n.turn !== seen) {
+    $.ui.log(`⚠ signaller: ${n.text}`)
+    $.ui.toast(n.text, { timeoutMs: 12_000 })
+  }
+  seen = n ? n.turn : null
+}
+const poll = ($: EngineInterface) => { lever($).then(l => (show($, l), warn($, l)), () => show($)) }
+const show = ($: EngineInterface, l?: Lever) => $.ui.status(l ? label(l) : 'down')
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
