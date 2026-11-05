@@ -174,12 +174,13 @@ def track_window(model: str, ds: Downstream) -> str | None:
 
 
 class Features:
-    def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None, session=None, hour=None):
+    def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None, session=None, hour=None,
+                 teammate=False):
         self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
         self.step = step  # the tool results this request carries back (display only; routing uses text)
         self.prompt = untagged(text)  # uncapped and as sent upstream (no leading tags), for display
         self.tier, self.subagent, self.turn_key = tier_of(model), subagent, turn_key
-        self.session, self.hour = session, hour
+        self.session, self.hour, self.teammate = session, hour, teammate
 
     @classmethod
     def from_body(cls, body: bytes, req=None):

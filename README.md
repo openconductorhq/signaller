@@ -263,6 +263,7 @@ The first matching line decides; if no line matches, the next rule runs.
 | `model` | the full model id |
 | `tokens` | rough size: request bytes / 4 (`100k` means 100 000) |
 | `subagent` | yes/no, from `cc_is_subagent=true` in the first system block (an undocumented marker, so it may break) |
+| `teammate` | yes/no: an agent-team teammate, not the lead. Claude Code sends `x-claude-code-agent-id` on every request that isn't the main thread's; one without the subagent marker is a teammate (undocumented too) |
 | `servertool` | yes/no: the request carries a tool that runs on Anthropic's side |
 | `label` | the classifier's label for this turn, or `none` |
 
@@ -278,6 +279,7 @@ The first matching line decides; if no line matches, the next rule runs.
 when tag is plan go anthropic
 when not subagent and tier is opus go anthropic
 when subagent and (tier is sonnet or tier is haiku) go valar
+when teammate go valar
 when text contains "migration" and tier is sonnet go anthropic
 when tokens > 120k go anthropic
 ```
@@ -506,8 +508,9 @@ main session. But later requests to Anthropic then carry assistant turns that
 the downstream's model generated, such as thinking blocks without valid
 Anthropic signatures. Anthropic may reject those, which breaks that
 conversation. The router does no history cleaning.
-- **Rule of thumb:** keep the main session on Anthropic, and send subagents to
-  downstreams.
+- **Rule of thumb:** keep the main session on Anthropic, and send subagents
+  (`when subagent go …`) and agent-team teammates (`when teammate go …`) to
+  downstreams. The team lead is the main session: it is neither.
 - **Switching mid-conversation:** the same applies when you switch the lever or
   a rule back to Anthropic partway through. If a conversation fails after a
   switch, start a new one.

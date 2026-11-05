@@ -588,7 +588,7 @@ const DEFAULT_TEXT = {
 const lines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
 // "Can send your main session off Anthropic": a line going to a downstream whose condition never looks at tier or subagent.
 const GO_OFF = /\bgo\s+(?!anthropic\s*$)[\w-]+\s*$/i;
-const risky = (r) => r.kind === "dsl" && lines(r.text).some((l) => GO_OFF.test(l) && !/\btier\b|\bsubagent\b/i.test(l.replace(GO_OFF, "")));
+const risky = (r) => r.kind === "dsl" && lines(r.text).some((l) => GO_OFF.test(l) && !/\btier\b|\bsubagent\b|\bteammate\b/i.test(l.replace(GO_OFF, "")));
 
 function describe(r) {
   if (r.kind === "classifier") return el("div", { class: "rdesc" }, `A small model on ${NAME(cfg.classifier.upstream)} reads your newest message once per turn and labels it.`);
@@ -667,7 +667,7 @@ function ruleItem(r, i) {
   },
     num,
     el("div", { class: "rbody" },
-      el("div", { class: "rname" }, r.name, risky(r) && el("span", { class: "badge", title: "A line sends requests to a downstream without checking tier or subagent, so it can move your main (opus) conversation." }, "Can send your main session off Anthropic")),
+      el("div", { class: "rname" }, r.name, risky(r) && el("span", { class: "badge", title: "A line sends requests to a downstream without checking tier, subagent or teammate, so it can move your main (opus) conversation." }, "Can send your main session off Anthropic")),
       describe(r),
       r.kind === "classifier" ? classifierBits(r, i) : null,
       el("div", { class: "hint dec", "data-r": r.kind === "classifier" ? "classifier" : r.name }),
@@ -814,7 +814,7 @@ $("dTag").addEventListener("change", (e) => setDbl({ tag: e.target.value.trim().
 
 /* ---------- rule editor ---------- */
 let ed = null, edSeq = 0, edTimer = null;
-const TOK = /("(?:\\.|[^"\\])*"?)|(\/(?:\\.|[^/\\])*\/?[ims]*)|\b(when|and|or|not|is|contains|matches|go)\b|\b(anthropic)\b|(?<=\bgo\s+)([a-z][\w-]*)|\b(text|tag|tier|model|tokens|subagent|servertool|label)\b/gi;
+const TOK = /("(?:\\.|[^"\\])*"?)|(\/(?:\\.|[^/\\])*\/?[ims]*)|\b(when|and|or|not|is|contains|matches|go)\b|\b(anthropic)\b|(?<=\bgo\s+)([a-z][\w-]*)|\b(text|tag|tier|model|tokens|subagent|teammate|servertool|label)\b/gi;
 const TOKCLS = [null, "st", "st", "kw", "an", "ds", "fd"];
 function highlight() {
   const src = $("edText").value, out = [];

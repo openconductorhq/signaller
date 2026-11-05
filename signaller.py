@@ -411,6 +411,9 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 f = Features.from_body(body, req) if is_routed(self.command, self.path) else None
                 if f is not None:
                     f.session, f.hour = any_sid, app.hour_of(f.turn_key, time.localtime(t0).tm_hour)
+                    # Claude Code sends an agent id on every request that isn't the main thread's (the team lead's,
+                    # in a team); a subagent also has cc_is_subagent=true, so the rest are teammates
+                    f.teammate = not f.subagent and bool(self.headers.get("x-claude-code-agent-id"))
                 d = decide_route(routing, f, app.classifier) if f else None
             except Exception as e:
                 self._error(500, "signaller: routing failed")

@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 
 FIELDS = {"text": "text", "tag": "tags", "tier": "word", "model": "text",
-          "tokens": "number", "subagent": "bool", "servertool": "bool", "label": "word",
+          "tokens": "number", "subagent": "bool", "teammate": "bool", "servertool": "bool", "label": "word",
           "session": "word",
           # ponytail: whole hours only — no minute or day-of-week schedules; add a field when one is needed
           "hour": "number"}

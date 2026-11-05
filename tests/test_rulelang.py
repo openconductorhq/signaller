@@ -6,7 +6,7 @@ from rulelang import parse, parse_cond, evaluate, fields_used, RuleError
 
 
 def ev(src, **f):
-    defaults = dict(text="", tag=set(), tier="other", model="", tokens=0, subagent=False, servertool=False, label="none")
+    defaults = dict(text="", tag=set(), tier="other", model="", tokens=0, subagent=False, teammate=False, servertool=False, label="none")
     defaults.update(f)
     return [(evaluate(l.cond, defaults.__getitem__), l.track) for l in parse(src)]
 
@@ -41,6 +41,7 @@ class RuleLangTests(unittest.TestCase):
         self.assertEqual(ev("when tokens >= 100k go anthropic", tokens=100_000), [(True, "anthropic")])
         self.assertEqual(ev("when not subagent and tier is opus go anthropic", tier="opus"), [(True, "anthropic")])
         self.assertEqual(ev("when subagent is no go local"), [(True, "local")])
+        self.assertEqual(ev("when teammate go valar", teammate=True), [(True, "valar")])
         self.assertEqual(ev('when text is "a \\"q\\" \\\\" go local', text='A "Q" \\'), [(True, "local")])
 
     def test_precedence(self):

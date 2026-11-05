@@ -52,6 +52,11 @@ breaks.
   last message. In a tool loop that text is the same on every step, so the
   turn, its tags, the classifier cache and `turn_key` all hold for the whole
   turn. Step-only details (`Features.step`) are for display.
+- **Subagent and teammate** are separate rule fields. `subagent` is the
+  `cc_is_subagent=true` marker in the first system block; `teammate` is a
+  request with Claude Code's `x-claude-code-agent-id` header (sent for every
+  agent but the main thread, which is the team lead in a team) and no marker.
+  Both are undocumented, so a Claude Code update can break them.
 - **Tags** count only at the very start of the prompt (`lead_tags`).
   `strip_lead_tags` removes them from every user prompt before the body goes
   anywhere; the doubling shadow strips its own copy. The console shows the

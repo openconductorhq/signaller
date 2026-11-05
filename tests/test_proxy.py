@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import signaller
 import overrides
 from signaller import App, Config, make_server, upstream_headers
-from routing import DEFAULT_CONFIG, Downstream
+from routing import DEFAULT_CONFIG, Downstream, Rule
 
 VALAR = replace(DEFAULT_CONFIG.downstreams[0], models={"fable": "VS", "opus": "VS", "sonnet": "VS", "haiku": "VH"})
 LEMMI = Downstream("lemmi", "Lemmi", "", "generic", dict.fromkeys(("fable", "opus", "sonnet", "haiku"), "deepseek-v4.1-flash"), "#888888")
@@ -326,6 +326,18 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual((len(self.v.seen), len(self.a.seen)), (1, 1))
         with open(os.path.join(self.dir, "console.json")) as f:
             self.assertEqual(json.load(f)["lever"], "anthropic")
+
+    def test_teammate_is_an_agent_id_without_the_subagent_marker(self):
+        rule = Rule("Who asked", "dsl", True, "when teammate go valar\nwhen subagent go anthropic")
+        self.app.routing = replace(self.app.routing, rules=(rule,), otherwise="anthropic")
+        sub = {"system": [{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.318; cc_is_subagent=true;"}]}
+        agent = {**HDRS, "x-claude-code-agent-id": "a1b2c3"}
+        self.post(body_for("claude-opus-5-5"))                # the main thread (the team lead in a team): no agent id
+        self.post(body_for("claude-opus-5-5"), agent)         # a teammate: an agent id, no marker
+        self.post(body_for("claude-opus-5-5", sub), agent)    # a subagent: both; it is not a teammate
+        self.assertEqual((len(self.a.seen), len(self.v.seen)), (2, 1))
+        self.logged(3)
+        self.assertEqual(self.err.getvalue().count("route=valar"), 1)
 
     def test_request_recorded(self):
         long = "x" * 300
