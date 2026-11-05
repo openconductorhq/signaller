@@ -28,7 +28,7 @@ breaks.
 - **Never open the live `stats.db` from the host** with `sqlite3` or any other
   client. A host read of the WAL-mode database through a shared folder corrupted
   it once.
-- **Where it lives:** in Docker it is on the `stats` volume (`/data`), on the
+- **Where it lives:** in Docker it is on the `signaller_stats` volume (`/data`), on the
   VM's own disk. Keep it off bind mounts. SQLite over virtiofs corrupted it
   again in normal use (2026-11-03).
 - **To inspect it:** use the API, or run a read-only connection inside the
@@ -120,7 +120,7 @@ breaks.
 ## Tests
 
 ```
-pytest -q tests                        # must stay green; about 240 tests, under 20 s
+pytest -q tests                        # must stay green; about 270 tests, under 30 s
 claude plugin test plugin/signaller # the plugin's gate test
 node --check ui/app.js                 # the console has no unit tests; at least parse it
 ```

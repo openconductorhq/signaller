@@ -66,6 +66,7 @@ Full reference: [`/signaller` in Claude Code](#signaller-in-claude-code).
 ### In a container (recommended)
 
 ```
+git clone git@github.com:openconductorhq/signaller.git && cd signaller
 mkdir -p ~/.config/signaller
 cp env.example ~/.config/signaller/env
 chmod 600 ~/.config/signaller/env      # set VALAR_API_KEY here if you use Valar (read once, see Downstreams)
@@ -76,7 +77,7 @@ docker compose up -d --build
   Inside the container it listens on `0.0.0.0`, which the router allows only
   with `SIGNALLER_IN_CONTAINER=1` (set by the image).
 - **Files:** config lives in `~/.config/signaller`. Stats live in the
-  `stats` Docker volume, not in that folder (see [Data](#data)).
+  `signaller_stats` Docker volume, not in that folder (see [Data](#data)).
 - **Session labels:** `~/.claude/projects` is mounted read-only to label
   sessions.
 - **User:** the image runs as uid 1000. On Linux, if your uid differs, add
@@ -100,6 +101,25 @@ The unit runs Python with `-E -s`, which ignores `PYTHON*` env vars and the user
 site directory, so only the standard library is ever loaded. Logs:
 `journalctl --user -u signaller -f`.
 
+### Moving from claude-router
+
+Signaller was called claude-router. Its folder, variables and volume were
+renamed, so an existing install moves over once. Run this from the new
+checkout; it stops the router for a moment and keeps your stats:
+
+```
+docker compose -p claude-router down                       # stop the old project
+mv ~/.config/claude-router ~/.config/signaller
+sed -i '' 's/^CLAUDE_ROUTER_/SIGNALLER_/' ~/.config/signaller/env   # GNU sed: -i without ''
+docker compose build && docker compose create              # creates signaller_stats, doesn't start
+docker run --rm --user 0 -v claude-router_stats:/from -v signaller_stats:/to signaller sh -c 'cp -a /from/. /to/'
+docker compose start
+```
+
+In Claude Code, swap the plugin: `/plugin uninstall router-lever`,
+`/plugin marketplace remove claude-router`, then install as below. Once the
+console shows your history, `docker volume rm claude-router_stats`.
+
 ### Turn it on in Claude Code
 
 Add this to `~/.claude/settings.json`:
@@ -121,7 +141,7 @@ These are read from `~/.config/signaller/env`; `env.example` lists them.
 | `SIGNALLER_LISTEN` | `127.0.0.1:8787` | Must be a loopback address, or the router exits with code 2 (outside a container). |
 | `SIGNALLER_ANTHROPIC_URL` | `https://api.anthropic.com` | Where the Anthropic track goes. |
 | `SIGNALLER_CONFIG_DIR` | `~/.config/signaller` | Config files (see [Data](#data)). |
-| `SIGNALLER_STATS_DIR` | the config dir | Where `stats.db` lives. The image sets it to `/data` (the `stats` volume). |
+| `SIGNALLER_STATS_DIR` | the config dir | Where `stats.db` lives. The image sets it to `/data` (the `signaller_stats` volume). |
 | `VALAR_URL`, `VALAR_API_KEY` | `https://api.valarhq.ai` | Used once, to seed the Valar downstream. |
 | `TZ` | the host's zone | The router's local time: the settings lines' `hour` field and the console clock. In the container set it to an IANA zone (`TZ=Asia/Jerusalem`); the host's `/etc/localtime` isn't shared into the VM under Colima, and an empty or unset `TZ` means UTC. |
 
@@ -440,7 +460,7 @@ the span are remembered in the browser.
   key falls back to the built-in default, and it doesn't follow an edited `in`.
 
 **`stats.db`** is the SQLite stats database. It lives in `SIGNALLER_STATS_DIR`,
-which is the `stats` volume in Docker.
+which is the `signaller_stats` volume in Docker.
 - **What it holds:** per request, the routing decision, models, tokens and
   cost. It also stores the latest user message in full, saved as compressed
   edits of earlier ones from the same session, the first 600 characters of the
