@@ -18,10 +18,12 @@ from urllib.parse import urlsplit
 
 import console
 import overrides  # after routing: overrides imports routing
+import presets
 from sessions import SessionDirectory, claude_dir
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
+from keys import host_of
 from prices import Prices, parse_valar
 from routing import (has_images, session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
                      references, route as decide_route, track_model, track_window, tracks)
@@ -209,6 +211,9 @@ class App:
         self.keys = Keys(config_dir)
         self.keys.migrate({d.id: d.url for d in self.routing.downstreams})
         self.seed()
+        self.presets, pbanner = presets.load(config_dir)
+        if pbanner:
+            self.banner = " ".join(filter(None, [self.banner, pbanner]))
         self.classifier = Classifier(self._classifier_upstream)
         try:
             # SIGNALLER_STATS_DIR: SQLite needs a real local disk, not a folder shared from the host (see compose.yaml)
@@ -380,7 +385,8 @@ class App:
             return new.downstreams[-1]
 
     def delete_downstream(self, id: str) -> list[str]:
-        """Remove a downstream, its own shadow and its key; if anything still points at it, remove nothing and return those."""
+        """Remove a downstream, its own shadow and its key; if anything still points at it, remove nothing and return those.
+        The key survives when an inactive preset still has the same id at the same host."""
         with self._rlock:
             refs = references(self.routing, id, self.session_levers)
             if refs:
@@ -390,9 +396,85 @@ class App:
             del j["doubling"]["shadow"][id]
             ds = downstream(self.routing, id)  # before _put: the key is tied to the url it was set for
             self._put(config_from_json(j))
-            if ds:
+            shared = any(isinstance(d, dict) and d.get("id") == id and host_of(d.get("url", "")) == host_of(ds.url)
+                         for p in self.presets["presets"]
+                         if isinstance(p.get("config"), dict) and p["name"] != self.presets["active"]
+                         for d in p["config"].get("downstreams", []))
+            if ds and not shared:
                 self.keys.delete(id, ds.url)
             return []
+
+    def preset_names(self) -> list[str]:
+        return [p["name"] for p in self.presets["presets"]]
+
+    def _preset(self, name: str) -> dict:  # caller holds _rlock
+        entry = next((p for p in self.presets["presets"] if p["name"] == name), None)
+        if entry is None:
+            raise KeyError(name)
+        return entry
+
+    def _save_presets(self) -> None:  # caller holds _rlock
+        presets.save(self.config_dir, self.presets)
+
+    def save_preset(self, name: str, tagline: str) -> None:
+        """Save the current setup as a new inactive preset: session-bound lines and machine state dropped."""
+        with self._rlock:
+            name, tagline = presets.check_name(name), presets.check_tagline(tagline)
+            if name in self.preset_names():
+                raise ValueError(f"a preset named {name} exists")
+            self.presets["presets"].append({"name": name, "tagline": tagline,
+                                            "config": presets.portable(config_to_json(self.routing))})
+            self._save_presets()
+
+    def add_preset(self, name: str, tagline: str, config: dict) -> None:
+        """Add an inactive preset from a config JSON (an import): session-bound lines and machine state dropped."""
+        with self._rlock:
+            new = config_from_json(presets.portable(config))  # ValueError propagates; nothing is stored then
+            name, tagline = presets.check_name(name), presets.check_tagline(tagline)
+            if name in self.preset_names():
+                raise ValueError(f"a preset named {name} exists")
+            self.presets["presets"].append({"name": name, "tagline": tagline, "config": config_to_json(new)})
+            self._save_presets()
+
+    def activate_preset(self, name: str) -> None:
+        """Switch setups: the active preset keeps its current config as-is, the target's config is put (rev bumps).
+        KeyError on an unknown name."""
+        with self._rlock:
+            if name == self.presets["active"]:
+                return
+            target = self._preset(name)
+            new = replace(config_from_json(target["config"]), seeded=True, migrated_off=())
+            self._preset(self.presets["active"])["config"] = config_to_json(self.routing)
+            self._put(new)
+            target["config"] = None
+            self.presets["active"] = name
+            self._save_presets()
+
+    def delete_preset(self, name: str) -> None:
+        with self._rlock:
+            if name == self.presets["active"]:
+                raise ValueError(f"{name} is active; switch to another preset first")
+            self.presets["presets"].remove(self._preset(name))
+            self._save_presets()
+
+    def rename_preset(self, old: str, name: str, tagline: str) -> None:
+        """Edit any preset's name and tagline, active or not."""
+        with self._rlock:
+            entry = self._preset(old)
+            name, tagline = presets.check_name(name), presets.check_tagline(tagline)
+            if name != old and name in self.preset_names():
+                raise ValueError(f"a preset named {name} exists")
+            entry["name"], entry["tagline"] = name, tagline
+            if self.presets["active"] == old:
+                self.presets["active"] = name
+            self._save_presets()
+
+    def preset_config(self, name: str) -> dict:
+        """The config JSON of any preset; the active one's is the live config. KeyError on an unknown name."""
+        with self._rlock:
+            if name == self.presets["active"]:
+                return config_to_json(self.routing)
+            return self._preset(name)["config"]
 
 
 def default_config_dir() -> str:
