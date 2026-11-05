@@ -911,10 +911,152 @@ function saveCard() {
     } }, "Save"),
       el("button", { type: "button", class: "btn", onclick: () => { PUI.save = false; renderPresets(true); } }, "Cancel"), err);
   }
-  // Task 6 (the import preview) hooks its file picker onto #importBtn.
+  // the import panel (below the cards) is opened from here
   card.append(el("button", { type: "button", class: "btn", id: "importBtn" }, "Import…"));
   return card;
 }
+
+/* import: a file picked, dropped or pasted is previewed before anything is added */
+// Everything the file carries — names, taglines, rule text, hosts, prompt names — is untrusted:
+// it reaches the page as text nodes and input values only, never as markup.
+let imPv = null, imName = null, imTag = null, imSeq = 0, imTimer = null;
+function impOpen(open) {
+  $("impanel").hidden = !open;
+  if (!open) return;
+  imPv = null;
+  imShow(null);
+  $("imFile").value = "";
+  $("imText").value = "";
+  showErr($("imErr"), "");
+  $("impanel").scrollIntoView({ block: "nearest", behavior: reduceMotion.matches ? "auto" : "smooth" });
+  $("imFile").focus();
+}
+document.addEventListener("click", (e) => { if (e.target.closest("#importBtn")) impOpen(true); });  // importBtn is redrawn with the cards
+const imReadFile = (f) => {
+  if (!f) return;
+  f.text().then(imPreviewText, (e) => showErr($("imErr"), "Couldn't read the file: " + e.message));
+};
+$("imFile").addEventListener("change", () => imReadFile($("imFile").files[0]));
+$("impanel").addEventListener("dragover", (e) => { e.preventDefault(); $("impanel").classList.add("drag"); });
+$("impanel").addEventListener("dragleave", () => $("impanel").classList.remove("drag"));
+$("impanel").addEventListener("drop", (e) => {
+  e.preventDefault();
+  $("impanel").classList.remove("drag");
+  imReadFile(e.dataTransfer.files && e.dataTransfer.files[0]);
+});
+$("imText").addEventListener("input", () => {  // paste or type; a moment's pause means it's meant
+  clearTimeout(imTimer);
+  imTimer = setTimeout(() => { const v = $("imText").value; if (v.trim()) imPreviewText(v); }, 300);
+});
+$("imCancel").addEventListener("click", () => impOpen(false));
+$("impanel").addEventListener("keydown", (e) => { if (e.key === "Escape") impOpen(false); });
+async function imPreviewText(text) {
+  const seq = ++imSeq, err = $("imErr");
+  let j;
+  try { j = JSON.parse(text); }
+  catch (e) { imShow(null); showErr(err, "That isn't valid JSON: " + e.message); return; }
+  try {
+    const pv = await api("POST", "presets/preview", j);
+    if (seq !== imSeq) return;  // the text changed meanwhile
+    showErr(err, "");
+    imShow(pv);
+  } catch (e) {
+    if (seq !== imSeq) return;
+    imShow(null);
+    showErr(err, e.status === 400 ? e.message : "Couldn't preview: " + e.message);
+  }
+}
+function imShow(pv) {
+  imPv = pv;
+  $("imAdd").hidden = !pv;
+  $("imPick").hidden = !!pv;
+  $("imKeys").hidden = true;
+  if (!pv) { $("imView").replaceChildren(); return; }
+  $("imView").replaceChildren(...imPanel(pv));
+}
+// equal neighbouring tiers share a line: "Fable/Opus → x · Sonnet → y"
+const imGroups = (vals) => {
+  const gs = [];
+  for (const [m, tn] of Object.entries(TIER)) {
+    const g = gs[gs.length - 1];
+    if (g && g.v === vals[m]) g.t.push(tn); else gs.push({ v: vals[m], t: [tn] });
+  }
+  return gs;
+};
+const imList = (vals, fmt) => {
+  const gs = imGroups(vals);
+  return gs.length === 1 ? `every tier → ${fmt(gs[0].v)}` : gs.map((g) => g.t.join("/") + " → " + fmt(g.v)).join(" · ");
+};
+const imHost = (u) => { try { return new URL(u).host; } catch (_) { return u; } };
+function imPanel(pv) {
+  const c = pv.config, pds = c.downstreams || [], keys = pv.keys || {};
+  const pName = (t) => t === "anthropic" ? "Anthropic" : ((pds.find((d) => d.id === t) || {}).name || t);
+  const pCol = (t) => t === "anthropic" ? "var(--anth)" : ((pds.find((d) => d.id === t) || {}).color || "var(--off)");
+  const ptrk = (t) => el("span", { class: "to", style: "--c:" + pCol(t) }, pName(t));
+  imName = el("input", { class: "imn", value: pv.name || "", placeholder: "Name", "aria-label": "Name for the imported preset", autocomplete: "off", spellcheck: "false", "data-k": "imname" });
+  imTag = el("input", { class: "imt", value: pv.tagline || "", placeholder: "Tagline: what this is good for", "aria-label": "Tagline for the imported preset", autocomplete: "off", spellcheck: "false", "data-k": "imtag" });
+  const takenNote = el("span", { class: "imtaken" });
+  const updateTaken = () => {
+    const taken = pv.taken && imName.value.trim() === (pv.name || "");
+    takenNote.textContent = taken ? "already used, rename it" : "";
+    $("imAdd").disabled = taken || !imName.value.trim();
+  };
+  imName.addEventListener("input", updateTaken);
+  updateTaken();
+  const tracks = el("div", { class: "imbox" }, el("div", { class: "lbl" }, "Tracks"),
+    pds.length ? pds.map((d) => {
+      const valar = d.kind === "valar", bits = [!valar && imHost(d.url), imList(d.models, (m) => m || "–")];
+      if (valar) {
+        const wins = [...new Set(Object.values(d.windows || {}))];
+        bits.push(wins.length === 1 ? "window: " + (WIN[wins[0]] || wins[0]) : imList(d.windows || {}, (w) => WIN[w] || w));
+      }
+      return el("div", { class: "imtrk", style: "--c:" + pCol(d.id) },
+        el("span", { class: "imk" }, d.name), " ",
+        el("span", { class: keys[d.id] ? "imok" : "imnew" }, keys[d.id] ? "· your key works here" : "· new · needs a key"),
+        el("small", {}, bits.filter(Boolean).join(" · ")));
+    }) : el("div", { class: "imtrk" }, "Anthropic only"));
+  const route = [];
+  if (c.lever && c.lever !== "rules") route.push(el("div", {}, "the lever sends everything → ", ptrk(c.lever)));
+  for (const r of c.rules || []) if (r.enabled) {
+    if (r.kind === "classifier") for (const l of (c.classifier && c.classifier.labels) || []) route.push(el("div", {}, l.name, " → ", ptrk(l.track)));
+    else for (const l of lines(r.text)) {
+      const m = l.match(/^when\s+(.*?)\s+go\s+([\w-]+)$/i);
+      route.push(el("div", {}, m ? [m[1], " → ", ptrk(m[2].toLowerCase())] : l));
+    }
+  }
+  const routed = el("div", { class: "imbox" }, el("div", { class: "lbl" }, "How a request is routed"),
+    route.length ? el("ol", { class: "imroute" }, route.map((x) => el("li", {}, x))) : el("div", { class: "immeta" }, "no rules"),
+    el("div", { class: "immeta" }, [
+      "classifier " + (c.classifier && c.classifier.upstream !== "none" ? "on" : "off"),
+      "otherwise " + pName(c.otherwise),
+      c.doubling && c.doubling.rate > 0 ? "doubling " + Math.round(c.doubling.rate * 100) + "%" : "no doubling",
+    ].join(" · ")));
+  const sched = el("div", { class: "imbox" }, el("div", { class: "lbl" }, "Schedule"), el("div", { class: "immeta" },
+    (c.settings || []).length ? c.settings.map((s) => el("div", {},
+      `${s.when || "always"}: ${pName(s.downstream)} ${s.tier ? s.tier + " " : ""}${s.set} ${s.set === "window" ? WIN[s.value] || s.value : s.value}`)) : "none"));
+  const pnames = (c.prompts || []).flatMap((p, i) => i ? [" · ", el("code", {}, p.name)] : [el("code", {}, p.name)]);
+  const prompts = el("div", { class: "imbox" }, el("div", { class: "lbl" }, "Prompts"), el("div", { class: "immeta" },
+    pnames.length ? pnames : "none"));
+  const miss = pds.filter((d) => !keys[d.id]).map((d) => d.name);
+  const imKeys = $("imKeys");
+  imKeys.hidden = !miss.length;
+  imKeys.textContent = miss.length ? `After adding: enter ${miss.join(" and ")}'s key${miss.length === 1 ? "" : "s"} in Tracks before switching` : "";
+  return [el("div", { class: "imname" }, imName, imTag, pv.exported && el("span", { class: "imexp" }, "exported " + pv.exported), takenNote),
+    el("div", { class: "imgrid" }, tracks, routed, sched, prompts)];
+}
+$("imAdd").addEventListener("click", async () => {
+  if (!imPv) return;
+  const err = $("imErr");
+  $("imAdd").disabled = true;
+  try {
+    await presetCall("POST", "presets", { name: imName.value.trim(), tagline: imTag.value, config: imPv.config });
+    impOpen(false);
+  } catch (e) {
+    showPresetErr(e, err);
+  } finally {
+    $("imAdd").disabled = false;
+  }
+});
 
 /* doubling strip */
 function renderStrip() {

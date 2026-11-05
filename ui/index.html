@@ -60,6 +60,18 @@
     <h2 id="prH">Presets</h2>
     <p class="hint">A preset is a whole setup — tracks, rules, settings and prompts — saved under a name. Switching swaps it in; each preset keeps its own keys. The running preset's config is the live one.</p>
     <div class="pcards" id="presetRows"></div>
+    <div id="impanel" class="editor impanel" hidden>
+      <h3>Import a preset</h3>
+      <p class="hint">Nothing changes until you add it: you see the tracks, the rules and what needs a key first.</p>
+      <div id="imPick">
+        <label class="fld">Choose a .json file <input type="file" id="imFile" accept=".json,application/json"></label>
+        <label class="fld" for="imText">…or paste the file's contents</label>
+        <textarea id="imText" class="imtext" rows="5" spellcheck="false" autocomplete="off" placeholder="paste an exported preset here"></textarea>
+      </div>
+      <p id="imErr" class="err" role="alert" hidden></p>
+      <div id="imView"></div>
+      <div class="edbtns imfoot"><button type="button" class="btn primary" id="imAdd" hidden>Add to my presets</button><button type="button" class="btn" id="imCancel">Cancel</button><span id="imKeys" class="imkeys" hidden></span></div>
+    </div>
   </section>
 
   <section id="tracks" aria-labelledby="trH">
