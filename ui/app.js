@@ -804,13 +804,15 @@ let presetKey = "", keyBannerKey = "";
 // A preset call changes the config on the server: reload it (even after an error or a timeout),
 // so the next config PUT starts from the switched-in preset, as dsCall does.
 async function presetCall(method, path, body) {
-  const r = await api(method, path, body, 15000);
+  let r, err = null;
+  try { r = await api(method, path, body, 15000); } catch (e) { err = e; }
   try {
     const st = await api("GET", "state" + qs(sessQ(), spanQ()));
     applyState(st);
     cfg = st.config;
     renderConfig(true);
-  } catch (_) { /* offline: the poll reloads when it's back */ }
+  } catch (e) { if (!err) throw e; }  // the call's own error is the one to show
+  if (err) throw err;
   return r;
 }
 $("presetGo").addEventListener("click", () => $("presets").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" }));
@@ -871,8 +873,8 @@ function presetCard(p) {
   return card;
 }
 function presetEdit(p, card, err) {
-  const n = el("input", { value: p.name, "aria-label": "Preset name", autocomplete: "off", spellcheck: "false", "data-k": "pname" });
-  const t = el("input", { value: p.tagline || "", "aria-label": "Preset tagline", autocomplete: "off", spellcheck: "false", "data-k": "ptag" });
+  const n = el("input", { value: p.name, placeholder: "Name", "aria-label": "Preset name", autocomplete: "off", spellcheck: "false", "data-k": "pname" });
+  const t = el("input", { value: p.tagline || "", placeholder: "Tagline: what this is good for", "aria-label": "Preset tagline", autocomplete: "off", spellcheck: "false", "data-k": "ptag" });
   card.append(n, t,
     el("button", { type: "button", class: "btn primary", onclick: async () => {
       try {
@@ -884,8 +886,8 @@ function presetEdit(p, card, err) {
   return card;
 }
 function presetExport(p, card, err) {
-  const n = el("input", { value: p.name, "aria-label": "Name in the exported file", autocomplete: "off", spellcheck: "false", "data-k": "xname" });
-  const t = el("input", { value: p.tagline || "", "aria-label": "Tagline in the exported file", autocomplete: "off", spellcheck: "false", "data-k": "xtag" });
+  const n = el("input", { value: p.name, placeholder: "Name", "aria-label": "Name in the exported file", autocomplete: "off", spellcheck: "false", "data-k": "xname" });
+  const t = el("input", { value: p.tagline || "", placeholder: "Tagline: what this is good for", "aria-label": "Tagline in the exported file", autocomplete: "off", spellcheck: "false", "data-k": "xtag" });
   const a = el("a", { class: "btn", download: true }, "Download");
   const setHref = () => { a.href = "/ui/api/presets/" + encodeURIComponent(p.name) + "/export?name=" + encodeURIComponent(n.value.trim() || p.name) + "&tagline=" + encodeURIComponent(t.value); };
   n.addEventListener("input", setHref); t.addEventListener("input", setHref); setHref();
@@ -894,12 +896,12 @@ function presetExport(p, card, err) {
   return card;
 }
 function saveCard() {
-  const card = el("div", { class: "pcard psave" }, el("b", {}, "Save current as…"));
+  const card = el("div", { class: "pcard psave" });
   if (!PUI.save) {
     card.append(el("button", { type: "button", class: "btn", onclick: () => { PUI.save = true; renderPresets(true); } }, "+ Save current as…"));
   } else {
-    const n = el("input", { placeholder: "name", "aria-label": "Name for the saved setup", autocomplete: "off", spellcheck: "false", "data-k": "sname" });
-    const t = el("input", { placeholder: "tagline (optional)", "aria-label": "Tagline for the saved setup", autocomplete: "off", spellcheck: "false", "data-k": "stag" });
+    const n = el("input", { placeholder: "Name", "aria-label": "Name for the saved setup", autocomplete: "off", spellcheck: "false", "data-k": "sname" });
+    const t = el("input", { placeholder: "Tagline: what this is good for", "aria-label": "Tagline for the saved setup", autocomplete: "off", spellcheck: "false", "data-k": "stag" });
     const err = perr();
     card.append(n, t, el("button", { type: "button", class: "btn primary", onclick: async () => {
       try {
