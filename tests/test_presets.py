@@ -118,6 +118,12 @@ class PresetTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.delete_preset("my setup")
 
+    def test_reserved_names_refused(self):
+        # preview/activate/export would shadow the /ui/api/presets verb routes, so no preset can take them
+        for name in ("preview", "activate", "export", "Preview"):
+            with self.assertRaises(ValueError):
+                presets.check_name(name)
+
 
 if __name__ == "__main__":
     unittest.main()

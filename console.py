@@ -431,8 +431,11 @@ def api(h, app, method, path, query, body):
         entry = next((p for p in app.presets["presets"] if p["name"] == name), None)
         if entry is None:
             raise Err(404, "no preset named %s" % name)
-        out_name = presets.check_name((query.get("name") or [entry["name"]])[0])
-        tagline = presets.check_tagline((query.get("tagline") or [entry["tagline"]])[0])
+        try:
+            out_name = presets.check_name((query.get("name") or [entry["name"]])[0])
+            tagline = presets.check_tagline((query.get("tagline") or [entry["tagline"]])[0])
+        except ValueError as e:
+            raise Err(400, str(e))
         out = {"signaller_preset": presets.PRESET_FORMAT, "name": out_name, "tagline": tagline,
                "exported": time.strftime("%Y-%m-%d"), "config": presets.portable(app.preset_config(name))}
         slug = re.sub(r"[^a-z0-9]+", "-", out_name.lower()).strip("-") or "preset"

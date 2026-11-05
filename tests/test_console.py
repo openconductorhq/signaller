@@ -450,6 +450,8 @@ class ConsoleTest(Fixture):
         r, j = self.export("?name=Shared&tagline=for%20a%20friend")
         self.assertEqual((j["name"], j["tagline"]), ("Shared", "for a friend"))
         self.assertEqual(r.getheader("Content-Disposition"), 'attachment; filename="shared.signaller.json"')
+        s, j = self.js("GET", "/ui/api/presets/my%20setup/export?name=" + "x" * 61)  # a bad override answers with the reason
+        self.assertEqual((s, j["error"]), (400, "a preset name must be 1–60 characters"))
 
     def test_preview_and_import(self):
         self.save_night()

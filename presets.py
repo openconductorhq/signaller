@@ -10,6 +10,7 @@ PRESET_FORMAT = 1
 NAME_MAX = 60
 TAGLINE_MAX = 200
 DEFAULT_NAME = "my setup"
+RESERVED = ("preview", "activate", "export")  # they'd shadow the /ui/api/presets verb routes on PUT/DELETE
 BAD_SUFFIX = ".bad"
 BAD_BANNER = ('Your presets couldn\'t be read; they were moved to presets.json.bad '
               'and your current setup is kept as "my setup".')
@@ -78,6 +79,8 @@ def check_name(name: str) -> str:
     name = name.strip() if isinstance(name, str) else ""
     if not 1 <= len(name) <= NAME_MAX:
         raise ValueError(f"a preset name must be 1–{NAME_MAX} characters")
+    if name.lower() in RESERVED:
+        raise ValueError(f"'{name}' is a reserved preset name")
     return name
 
 
