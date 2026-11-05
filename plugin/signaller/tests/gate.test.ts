@@ -140,22 +140,37 @@ test('a settings value stops before trailing punctuation, and reset is a whole w
   expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')
 })
 
-test('an image fallback shows once, as a transcript line and a toast', async ($, on) => {
+test('an image fallback shows once, as a transcript line and a band above the prompt', async ($, on) => {
   const logs: string[] = [], toasts: string[] = []
   let notice: any = null
   on('ui.log', (_, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.toast', (_, e) => { toasts.push(e.text); return { value: undefined } })
+  on('ui.render', () => h(Fragment, {}))  // what the engine draws beneath: the band's pass-through
   on('turn.complete', () => ({ text: 'answer' }))
   await stub($, on, () => ({ value: { ok: true, status: 200, text: JSON.stringify({ ...JSON.parse(LEVER), notice }) } }))
   const settle = () => new Promise(r => setTimeout(r, 20))  // polls run in the background
+  const BAND = {
+    plugin: 'signaller', surface: 'terminal' as const, component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  }
+  const ui = await $.ui.mount(BAND)
   await settle()  // the first poll only takes note
+  const quiet = JSON.stringify(await ui.drawn())  // nothing pending: the band draws nothing of signaller's
   notice = { turn: 't1', text: 'This turn went to Anthropic, not valar.' }
   await $.turn.complete({ reason: 'answer' })
   await settle()
+  expect(logs).toEqual(['⚠ signaller: This turn went to Anthropic, not valar.'])
+  expect(toasts).toEqual([])  // no toast anymore
+  expect(JSON.stringify(await ui.drawn())).toContain('⚠ signaller: This turn went to Anthropic, not valar.')
+  await ui.redraw({ ...BAND.props, hasSurvey: true })  // a survey holds the band: yield to it
+  expect(JSON.stringify(await ui.drawn())).toBe(quiet)
+  await ui.redraw(BAND.props)  // the survey is gone
   await $.turn.complete({ reason: 'answer' })  // the same turn's notice again: not repeated
   await settle()
-  expect(logs).toEqual(['⚠ signaller: This turn went to Anthropic, not valar.'])
-  expect(toasts).toEqual(['This turn went to Anthropic, not valar.'])
+  expect(JSON.stringify(await ui.drawn())).toContain('⚠ signaller: ')
+  await $.prompt.submit({ text: 'next' })
+  expect(JSON.stringify(await ui.drawn())).toBe(quiet)  // the next prompt clears it
+  await ui.unmount()
 })
 
 test('a typed plan runs in order, survives messages sent meanwhile, and only the main agent spends it', async ($, on) => {

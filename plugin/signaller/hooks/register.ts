@@ -111,14 +111,17 @@ const switchTo = async ($: EngineInterface, want: string): Promise<{ ok: boolean
 }
 
 const label = (l: Lever) => `${l.lever} (${l.session ? 'this session' : 'global'})${l.name ? `, session name: ${l.name}` : ''}`
-// an image fallback the router reports for this session: a line in the transcript (shown, never sent to the model)
-// and a toast, once per turn; the first poll after a (re)load only takes note, so an old one isn't shown again
+// an image fallback the router reports for this session: a line in the transcript (shown, never sent to the
+// model) and a band above the prompt, once per turn; the first poll after a (re)load only takes note, so an
+// old one isn't shown again. The band holds until the person's next prompt clears it.
 let seen: string | null | undefined
+let band: string | null = null
 const warn = ($: EngineInterface, l: Lever) => {
   const n = l.notice
   if (seen !== undefined && n && n.turn !== seen) {
     $.ui.log(`⚠ signaller: ${n.text}`)
-    $.ui.toast(n.text, { timeoutMs: 12_000 })
+    band = n.text
+    $.ui.invalidate('ui.render')
   }
   seen = n ? n.turn : null
 }
@@ -188,7 +191,18 @@ export const register: Register = on => {
 
   on('prompt.submit', ($, e, next) => {
     if (!e.isMeta && !e.command) grant(e.text)
+    if (band !== null) {
+      band = null
+      $.ui.invalidate('ui.render')
+    }
     return next(e)
+  })
+
+  // the pending image fallback above the prompt; a survey owns the band, so yield to one
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    if (band === null || e.props.hasSurvey) return next(e)
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { color: 'warning' }, `⚠ signaller: ${band}`)
   })
 
   on('command.run', { command: 'signaller' }, async ($, e) => {
