@@ -173,9 +173,12 @@ no longer know at all — is dropped from them.
 Claude can switch the lever too, through the plugin's `signaller_lever` tool, but
 only when you typed `/signaller <mode>` in a message. That can be "do /signaller
 anthropic", or a plan with "/signaller rules" at a later step. Each one you type
-allows one switch to that mode; any other switch is refused. Setting this
-session's window or model through the tool needs a typed
-`/signaller <downstream> [<tier>] window|model <value>` the same way.
+allows one switch to that mode, in the order you typed them; any other switch is
+refused. Setting this session's window or model through the tool needs a typed
+`/signaller <downstream> [<tier>] window|model <value>` the same way, in the same
+queue. Messages you send while Claude works keep the queue; a new message with
+any `/signaller` in it replaces it. Only the main agent can switch: a subagent's
+call is refused (subagents follow their session anyway).
 
 The plugin talks to `127.0.0.1:8787` only. Install:
 

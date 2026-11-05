@@ -157,3 +157,33 @@ test('an image fallback shows once, as a transcript line and a toast', async ($,
   expect(logs).toEqual(['⚠ signaller: This turn went to Anthropic, not valar.'])
   expect(toasts).toEqual(['This turn went to Anthropic, not valar.'])
 })
+
+test('a typed plan runs in order, survives messages sent meanwhile, and only the main agent spends it', async ($, on) => {
+  const puts: string[] = []
+  await stub($, on, (e) => {
+    if (e.init?.method === 'PUT') puts.push(JSON.parse(String(e.init.body)).lever)
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+  const sw = async (lever: string, agentId?: string) => (await $.tool.call({ tool: TOOL, lever, ...(agentId ? { agentId } : {}) })).deny
+
+  await $.prompt.submit({ text: 'do /signaller valar' })  // a leftover the plan below replaces
+  await $.prompt.submit({ text: 'once done, run:\n  1. /signaller anthropic\n  2. /simplify\n  3. /signaller rules\n  5. /signaller anthropic\n  7. /signaller rules' })
+  expect(await sw('valar')).toContain('Not switching')            // the leftover is gone
+  expect(await sw('rules')).toContain('"/signaller anthropic"')   // out of order: names the next step
+  expect(await sw('anthropic')).toBeUndefined()
+  await $.prompt.submit({ text: 'also check the README while you are at it' })  // a message mid-plan keeps the queue
+  expect(await sw('rules', 'sub-1')).toContain('only the main agent')  // a subagent can't spend it
+  expect(await sw('rules')).toBeUndefined()
+  expect(await sw('anthropic')).toBeUndefined()
+  expect(await sw('rules')).toBeUndefined()
+  expect(await sw('rules')).toContain('Not switching')  // used up
+  expect(puts).toEqual(['anthropic', 'rules', 'anthropic', 'rules'])
+})
+
+test('pasting a refusal back grants nothing', async ($, on) => {
+  await stub($, on, () => ({ value: { ok: true, status: 200, text: LEVER } }))
+  const deny = (await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny!
+  expect(deny).toContain('Not switching')
+  await $.prompt.submit({ text: `how come? ${deny}` })
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toContain('Not switching')
+})

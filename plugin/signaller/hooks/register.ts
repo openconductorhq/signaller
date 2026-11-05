@@ -48,32 +48,26 @@ const parseForm = (s: string): Form | null => {
 const canon = (f: Form): string => ('reset' in f ? `${f.ds} reset` : `${f.ds} ${f.tier ?? '*'} ${f.key} ${f.value}`)
 const downstreams = () => MODES.filter(m => m !== 'rules' && m !== 'anthropic')
 
-// Claude may switch the lever or change settings only on the person's say-so: each "/signaller <mode>" they
-// type, in any prompt (e.g. a multi-step plan), allows Claude one switch to that mode. A typed settings
-// form instead allows exactly one write of exactly those values — and never also a lever switch to that
-// downstream. Later prompts don't erase either. Kept in memory; a reload forgets them, which only denies.
-const granted: string[] = []
-const grantedSettings: string[] = []
+// Claude may switch the lever or change settings only on the person's say-so. The "/signaller <mode>" and
+// settings forms a prompt carries become the queue of allowed steps, in the order typed: each call must match
+// the next one and uses it up (a plan's "anthropic, rules, anthropic, rules" runs only in that order). A later
+// prompt with no "/signaller" keeps the queue (messages sent while Claude works); one with any replaces it, so
+// leftovers don't linger. Only the main agent spends the queue: subagents follow the session's lever anyway.
+// Kept in memory; a reload forgets it, which only denies.
+let pending: string[] = [] // "lever <mode>" or "set <canon>"
 const GRANT = /(?:^|\s)\/signaller\s+([a-z0-9_-]+)/gi
 const GRANT_SETTINGS = new RegExp(`(?:^|\\s)\\/signaller\\s+${TAIL}`, 'gi') // the same form, as typed in a prompt
 // "/signaller <downstream> reset…" with more than the word "reset" there is a settings attempt that grants nothing
 const RESETISH = /(?:^|\s)\/signaller\s+[a-z0-9_-]+(?:\s+(?:fable|opus|sonnet|haiku))?\s+reset[a-z0-9_-]*/gi
 const grant = (text: string) => {
-  const settingsForms = new Set<number>()
-  for (const m of text.matchAll(GRANT_SETTINGS)) {
-    settingsForms.add(m.index!) // both regexes start at the same place: the "/signaller" they share
-    grantedSettings.push(canon(form(m)))
-  }
-  for (const m of text.matchAll(RESETISH)) settingsForms.add(m.index!) // "resetting" and friends: an attempt, no grant
-  for (const m of text.matchAll(GRANT)) {
-    if (settingsForms.has(m.index!)) continue // that "/signaller <word>" was the start of a settings form
-    granted.push(m[1]!.toLowerCase()) // checked against the router's modes when used: they may not be known yet
-  }
+  const steps = new Map<number, string | null>() // keyed by where the "/signaller" starts; all three regexes share it
+  for (const m of text.matchAll(GRANT_SETTINGS)) steps.set(m.index!, `set ${canon(form(m))}`)
+  for (const m of text.matchAll(RESETISH)) if (!steps.has(m.index!)) steps.set(m.index!, null) // "resetting": an attempt, no grant
+  for (const m of text.matchAll(GRANT)) if (!steps.has(m.index!)) steps.set(m.index!, `lever ${m[1]!.toLowerCase()}`) // modes are checked when used
+  if (steps.size) pending = [...steps].sort((a, b) => a[0] - b[0]).flatMap(([, s]) => (s ? [s] : []))
 }
-const take = (list: string[], want: string) => {
-  const i = list.indexOf(want)
-  return i >= 0 && list.splice(i, 1).length > 0
-}
+const take = (want: string) => pending[0] === want && pending.shift() !== undefined
+const upNext = () => (pending[0] ? ` The next one allowed is "/signaller ${pending[0].replace(/^\S+ /, '').replace(' * ', ' ')}".` : '')
 
 // set (or reset) this session's settings line; the reply lists the session's resulting lines and any collisions.
 // `typed`: the settings form as typed, when the call must be gated on the person's "/signaller …" (the tool path);
@@ -82,8 +76,8 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
   if (!downstreams().includes(f.ds))
     return { ok: false, text: `Unknown downstream "${f.ds}". The router's downstreams: ${downstreams().join(', ') || 'none yet'}.` }
   const c = canon(f)
-  if (typed !== undefined && !take(grantedSettings, c))
-    return { ok: false, text: `Not setting: the person hasn't typed "/signaller ${typed}" for this change (each one they type allows one). Only set a line when they tell you to that way; they can also type /signaller ${typed} themselves.` }
+  if (typed !== undefined && !take(`set ${c}`))
+    return { ok: false, text: `Not setting: "/signaller ${typed}" isn't the next step the person typed (each one they type allows one, in order).${upNext()} Only set a line when they tell you to that way; they can also type "/signaller ${typed}" themselves.` }
   const session = await $.session.id()
   const body = 'reset' in f
     ? { session, downstream: f.ds, reset: true }
@@ -91,7 +85,7 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
   try {
     const r = await $.http.fetch(SETTINGS, { method: 'PUT', headers: HEADERS, body: JSON.stringify(body) })
     if (!r.ok) {
-      if (typed !== undefined) grantedSettings.push(c)
+      if (typed !== undefined) pending.unshift(`set ${c}`)
       return { ok: false, text: `signaller answered ${r.status}: ${r.text.slice(0, 200)}` }
     }
     const back = JSON.parse(r.text) as { lines: Line[]; collisions: { text: string }[] }
@@ -99,7 +93,7 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
     const lines = back.lines.map(l => `${l.downstream} ${l.set} ${l.value} for this session${l.tier ? ` (${l.tier})` : ''}`)
     return { ok: true, text: [...lines, ...back.collisions.map(x => x.text)].join('\n') }
   } catch (err) {
-    if (typed !== undefined) grantedSettings.push(c)
+    if (typed !== undefined) pending.unshift(`set ${c}`)
     return { ok: false, text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
   }
 }
@@ -149,7 +143,7 @@ export const register: Register = on => {
         'lever: rules (follow the rulebook), anthropic, or a downstream id (send everything there), reset (back to the global lever); omit it to only read the current one. ' +
         'settings: "<downstream> [<tier>] window|model <value>" sets this session’s window or model on a downstream (tier: fable, opus, sonnet or haiku); "<downstream> reset" clears this session’s lines for it. ' +
         'Never switch on your own initiative: only when the person tells you to with "/signaller <mode>" or "/signaller <downstream> [<tier>] window|model <value>" in a message (e.g. "do /signaller anthropic", or a plan with "/signaller rules" at a later step). ' +
-        'Each form they typed allows one use of exactly that form; others are refused.',
+        'Each form they typed allows one use of exactly that form, in the order they typed them; others are refused, and so is any call from a subagent.',
       inputSchema: {
         type: 'object',
         properties: { lever: { type: 'string' }, settings: { type: 'string' } },
@@ -173,19 +167,22 @@ export const register: Register = on => {
   })
 
   on('tool.call', { tool: 'mcp__signaller__signaller_lever' }, async ($, e) => {
+    const sub = e.agentId !== undefined
     const settings = (e as { settings?: string }).settings
     if (settings !== undefined) {
       const f = parseForm(settings)
       if (!f) return { deny: `Unknown settings "${settings}". Use "<downstream> [<tier>] window|model <value>", or "<downstream> reset".` }
+      if (sub) return { deny: 'Not setting: only the main agent changes signaller; a subagent follows its session.' }
       const r = await setSettings($, f, settings)
       return r.ok ? { result: r.text } : { deny: r.text }
     }
     const want = (e as { lever?: string }).lever
     if (want && want !== 'reset' && !MODES.includes(want)) return { deny: `Unknown lever "${want}". Use one of: ${MODES.join(', ')}, or reset.` }
-    if (want && !take(granted, want))
-      return { deny: `Not switching: the person hasn't typed "/signaller ${want}" for this switch (each one they type allows one). Only switch when they tell you to that way; they can also type /signaller ${want} themselves.` }
+    if (want && sub) return { deny: 'Not switching: only the main agent switches signaller; a subagent follows its session.' }
+    if (want && !take(`lever ${want}`))
+      return { deny: `Not switching: "/signaller ${want}" isn't the next step the person typed (each one they type allows one, in order).${upNext()} Only switch when they tell you to that way; they can also type "/signaller ${want}" themselves.` }
     const r = await switchTo($, want ?? '')
-    if (!r.ok && want) granted.push(want) // the switch didn't happen: the person's say-so still stands
+    if (!r.ok && want) pending.unshift(`lever ${want}`) // the switch didn't happen: the person's say-so still stands
     return r.ok ? { result: r.text } : { deny: r.text }
   })
 

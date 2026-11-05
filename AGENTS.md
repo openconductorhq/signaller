@@ -145,7 +145,10 @@ node --check ui/app.js                 # the console has no unit tests; at least
   version in `.claude-plugin/plugin.json` when it changes; users update with
   `/plugin`.
 - **The `signaller_lever` tool:** it only switches when the user typed
-  `/signaller <mode>`, and each one typed grants one switch. Keep that gate.
+  `/signaller <mode>`, and each one typed grants one switch, used in the order
+  typed (a prompt with any `/signaller` replaces the queue; one without keeps
+  it). Subagents can't switch. The plugin's own refusal text quotes the command,
+  so pasting it back grants nothing. Keep that gate.
   Claude must never switch the router on its own judgment.
 
 ## Git
