@@ -31,6 +31,7 @@ downstreams.
 | 🎚️ **One lever, steerable from the prompt** | Anthropic, Rules, or one downstream — globally from the console, or per session with `/signaller` without leaving Claude Code. |
 | 📜 **A readable rulebook** | `when tier is opus go anthropic`. Tags, model tier, prompt size, or a classifier's guess at what the prompt is about. |
 | 🕐 **Settings by session and time** | "Background sessions and 00:00–07:00 use Valar's cheaper Priority window." |
+| 🗂️ **Named presets** | Save the whole setup — tracks, rules, schedule, prompts — under a name and switch between them. Export one to share; it carries no keys. |
 | 💸 **Cost you can see** | What each track cost, what the same traffic would cost on the Anthropic API, and the difference. |
 | 🪞 **Side by side** | Double a share of turns to a second track and judge the answers. |
 | 🛟 **Never fails closed** | A bad config, broken stats or a slow classifier falls back with a banner; routing carries on. |
@@ -167,10 +168,10 @@ idle, so a change made in the console shows within a minute.
 | `/signaller <downstream> [<tier>] window\|model <value>` | Set this session's own settings line on a downstream: its completion window (`/signaller valar window priority`) or the model it serves for a tier (`/signaller valar sonnet model glm-4.8`; without a tier, every tier). It goes in at the top of the settings list, so it beats schedules. |
 | `/signaller <downstream> reset` | Clear this session's settings lines for that downstream. |
 
-A session's own lever lives in the router's memory, so a router restart drops
-it. Settings lines set with `/signaller` are saved in `console.json`, so they
-survive a restart; a session id unseen for a week — including one the stats
-no longer know at all — is dropped from them.
+A session's own lever is saved in `session_levers.json` in the config dir, so
+it survives a restart. Settings lines set with `/signaller` are saved in
+`console.json`, so they survive too; a session id unseen for a week — including
+one the stats no longer know at all — is dropped from both.
 
 Claude can switch the lever too, through the plugin's `signaller_lever` tool, but
 only when you typed `/signaller <mode>` in a message. That can be "do /signaller
@@ -238,7 +239,8 @@ about it (a text-only model, like Valar's `zai-org/GLM-5.3`: "this model does
 not support image input"), the router sends that same request to Anthropic
 instead. Claude Code gets Anthropic's answer, not the error.
 - **The warning:** the plugin writes a ⚠ line into the conversation and shows
-  a toast. The line is for you; the model never sees it.
+  a band above the prompt. The line and the band are for you; the model never
+  sees them. The band holds until your next prompt clears it.
 - **The record:** the explanation gains a "Fallback" step, and the log line
   ends in `fallback=<downstream>`.
 - **Nothing is remembered:** every request tries its downstream first, so a
@@ -314,7 +316,7 @@ own prices, or its host is `api.valarhq.ai`. It keeps Valar's extras:
 
 Every other downstream is generic.
 
-**Keys** live in `downstreams.keys.json` (mode 0600). They never reach
+**Keys** live in `downstreams.keys.json` (mode 0600), one per id and host. They never reach
 `console.json`, the page, the API or the logs. To replace a key, use the
 downstream's row; leaving the field empty keeps the current key.
 
@@ -325,7 +327,9 @@ says which:
 - a classifier label or the classifier's upstream
 - a doubling direction
 
-Deleting a downstream also removes its key and its saved model list.
+Deleting a downstream also removes its key and its saved model list — unless
+another preset still has the same id at the same host, in which case the key
+stays for it.
 
 **Env seed:** on the first start after the upgrade to downstreams, `VALAR_URL`
 and `VALAR_API_KEY` fill in the Valar downstream. After that the env is ignored,
@@ -338,6 +342,8 @@ Adding one back under the same id picks that history up again.
 
 Open `http://127.0.0.1:8787/ui` (loopback only).
 
+- **Presets:** the whole setup under a name, one card each, with Switch,
+  Export and Delete (see [Presets](#presets)).
 - **Lever:** Anthropic, Rules, or one of your downstreams. With one session
   picked, the lever shows and sets that session's own lever (the same one
   `/signaller` sets, updated live). "back to global" drops it.
@@ -402,6 +408,37 @@ Priority all day; line 3 overlaps both and is flagged, but still saves.
 ![Departures for the nightly session: each tool-loop step on Valar is marked window: priority](docs/images/departures.png)
 
 <p align="center"><img src="docs/images/day.svg" alt="Over a day, every session runs Valar on Priority from 00:00 to 07:00 and Now after; the picked nightly session stays on Priority all day" width="100%"></p>
+
+### Presets
+
+A preset is the whole setup — tracks, rules, schedule lines and prompts — saved
+under a name. One card each in the console's Presets panel; the running one is
+marked "running", and the header shows what's running.
+
+<p align="center"><img src="docs/images/presets.png" alt="The import preview: the preset's name and tagline, its tracks with Valar's key already working and GLM needing one, how a request is routed, the schedule and the prompts" width="520"></p>
+
+- **Save:** "+ Save current as…" copies your current setup under a name (up to
+  60 characters) and a tagline — what it's good for. Your setup keeps running
+  as before.
+- **Switch:** "Switch" on a card makes that preset live. The one you leave
+  keeps its config as it stands; the one you switch to comes in as it was
+  saved. A session whose own lever names a track the new preset lacks goes
+  back to the global lever until you point it somewhere the new preset has.
+- **Keys stay with the id and the host:** a key is kept against the
+  downstream's id and its host, so the same id at two different hosts holds two
+  keys, and a preset file never carries one. After a switch the cards show
+  which downstreams lack a key; enter it on the Tracks row.
+- **Export:** "Export" downloads `<name>.signaller.json`. The form sets the
+  name and tagline it travels with — they needn't match the local preset's.
+  The file drops the keys, machine state (a seeded Valar) and settings lines
+  bound to a session id.
+- **Import:** paste the file's contents or drop the file. Before anything is
+  added, a preview shows the tracks — marking which already have your key at
+  that host and which need one — how a request is routed, the schedule and the
+  prompts. A file that isn't a Signaller preset, one made by a newer
+  Signaller, or one whose rules name a track it doesn't carry is refused with
+  the reason, and nothing is added. "Add to my presets" saves it as an
+  inactive preset; if the name is already in use, rename it first.
 
 ### Sessions, span and cost
 
@@ -470,7 +507,13 @@ the span are remembered in the browser.
 
 - `console.json`: the routing config. If it's unreadable at startup, the router
   uses defaults, keeps the bad file as `console.json.bad`, and shows a banner.
-- `downstreams.keys.json`: the downstreams' keys, by id.
+- `presets.json`: the saved presets and which one is active; the active one's
+  config is `console.json`. An unreadable file moves to `presets.json.bad`, and
+  your current setup is kept as "my setup" (a banner says so).
+- `session_levers.json`: each session's own `/signaller` lever, so a restart
+  keeps it. A session id unseen for a week is dropped.
+- `downstreams.keys.json`: the downstreams' keys, by id and host — the same id
+  at two hosts holds two keys.
 - `models.json`: each downstream's model list. Valar's also carries each model's
   prices (refreshed at startup and hourly).
 - `prices.json`: Anthropic API prices per tier, used for the "at API prices"
