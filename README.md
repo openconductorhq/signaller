@@ -180,7 +180,9 @@ allows one switch to that mode, in the order you typed them; any other switch is
 refused. Setting this session's window or model through the tool needs a typed
 `/signaller <downstream> [<tier>] window|model <value>` the same way, in the same
 queue. Messages you send while Claude works keep the queue; a new message with
-any `/signaller` in it replaces it. Only the main agent can switch: a subagent's
+a `/signaller` step in it replaces it (quoting `/signaller run` or `/signaller
+name` doesn't count). The queue is kept per session, so a plugin reload or a
+restart doesn't lose it. Only the main agent can switch: a subagent's
 call is refused (subagents follow their session anyway).
 
 The plugin talks to `127.0.0.1:8787` only. Install:
@@ -328,7 +330,7 @@ says which:
 - a doubling direction
 
 Deleting a downstream also removes its key and its saved model list — unless
-another preset still has the same id at the same host, in which case the key
+another preset still has the same id at the same origin, in which case the key
 stays for it.
 
 **Env seed:** on the first start after the upgrade to downstreams, `VALAR_URL`
@@ -424,9 +426,10 @@ marked "running", and the header shows what's running.
   keeps its config as it stands; the one you switch to comes in as it was
   saved. A session whose own lever names a track the new preset lacks goes
   back to the global lever until you point it somewhere the new preset has.
-- **Keys stay with the id and the host:** a key is kept against the
-  downstream's id and its host, so the same id at two different hosts holds two
-  keys, and a preset file never carries one. After a switch the cards show
+- **Keys stay with the id and the origin:** a key is kept against the
+  downstream's id and its scheme and host, so the same id at two hosts (or at
+  `http://` and `https://`) holds two keys, a key never goes out over a scheme
+  it wasn't entered for, and a preset file never carries one. After a switch the cards show
   which downstreams lack a key; enter it on the Tracks row.
 - **Export:** "Export" downloads `<name>.signaller.json`. The form sets the
   name and tagline it travels with — they needn't match the local preset's.
