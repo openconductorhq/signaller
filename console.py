@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from keys import write_json
 from prices import parse_valar
 import overrides
+import presets
 from routing import (MAX_DOWNSTREAMS, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, untagged, config_from_json, config_to_json,
                      downstream, route, tracks, valid_id)
 from rulelang import RuleError, parse
@@ -218,18 +219,38 @@ def filt(query):
     return ids, t0, t1
 
 
+def preset_row(app, p, cfg=None):
+    """One preset's state row: a summary of its config and the downstreams it lacks a key for.
+    `cfg` is the caller's serialised live config, for the active row."""
+    if cfg is None:
+        cfg = app.preset_config(p["name"])
+    dss = [d for d in cfg.get("downstreams", []) if isinstance(d, dict)]
+    return {"name": p["name"], "tagline": p["tagline"], "active": p["name"] == app.presets["active"],
+            "summary": {"rules": sum(1 for r in cfg.get("rules", []) if isinstance(r, dict) and r.get("enabled")),
+                        "downstreams": [d.get("id") for d in dss],
+                        "settings": len(cfg.get("settings") or []), "prompts": len(cfg.get("prompts") or [])},
+            "missing_keys": [d["id"] for d in dss if isinstance(d.get("id"), str)
+                             and not app.keys.has(d["id"], d.get("url") or "")]}
+
+
 def state(app, query=None):
     ids, t0, t1 = filt(query or {})
     if t0 is None:  # whole session
         t0 = app.store.first_ts(ids)
     c, ts = app.cfg, tracks(app.routing)
-    return {"config": config_to_json(app.routing), "config_rev": app.rev, "stats": app.store.stats(time.time(), ts),
+    live = config_to_json(app.routing)  # built once: the active preset row reads it too
+    rows = [preset_row(app, p, live if p["name"] == app.presets["active"] else None)
+            for p in app.presets["presets"]]
+    return {"config": live, "config_rev": app.rev, "stats": app.store.stats(time.time(), ts),
             "summary": app.store.summary(ids, t0, t1, time.time(), tracks(app.routing)), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
-            "downstreams": {d.id: {"key_set": app.keys.has(d.id), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
-            "recent_count": len(app.recent), "session_levers": dict(app.session_levers),
+            "downstreams": {d.id: {"key_set": app.keys.has(d.id, d.url), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
+            "recent_count": len(app.recent),
+            # effective levers only (lever_for): a raw entry the active setup can't follow would show a lever the router ignores
+            "session_levers": {s: l for s, l in ((s, app.lever_for(s)) for s in app.session_levers) if l},
             "collisions": app.collisions(),
+            "preset": app.presets["active"], "presets": rows,
             "active_windows": overrides.active_windows(app.routing.settings, time.localtime().tm_hour),
             "clock": {"tz": time.strftime("%Z"), "hm": time.strftime("%H:%M")}}
 
@@ -308,7 +329,7 @@ def api(h, app, method, path, query, body):
             app.set_session_lever(sid, lever)
         elif method != "GET":
             raise Err(405, "GET or PUT")
-        own = app.session_levers.get(sid)
+        own = app.lever_for(sid)
         return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes,
                 "name": st.session_name(sid), "notice": app.notices.get(sid), "prompts": dict(app.routing.prompts)}
     m = re.fullmatch(r"/ui/api/sessions/([^/]+)", path)
@@ -375,14 +396,78 @@ def api(h, app, method, path, query, body):
         return probe(clean_url(body.get("url")), key)
     if path == "/ui/api/downstreams" and method == "POST":
         return 201, add_downstream(app, body)
+    if path == "/ui/api/presets" and method == "POST":  # save current, or add an imported preset when a config comes
+        body = body if isinstance(body, dict) else {}
+        try:
+            app.add_preset(body.get("name"), body.get("tagline"),
+                           body["config"] if body.get("config") is not None else config_to_json(app.routing))
+        except ValueError as e:
+            raise Err(400, str(e))
+        return 201, {"ok": True}
+    if path == "/ui/api/presets/preview" and method == "POST":  # the page's look-before-you-import
+        if not isinstance(body, dict) or not isinstance(body.get("signaller_preset"), int) \
+                or isinstance(body.get("signaller_preset"), bool) or not isinstance(body.get("config"), dict):
+            raise Err(400, "this isn't a Signaller preset")
+        if body["signaller_preset"] > presets.PRESET_FORMAT:
+            raise Err(400, "made by a newer Signaller")
+        try:
+            new = presets.validated(body["config"])  # name/tagline: checked on Add, editable in the panel first
+        except ValueError as e:
+            raise Err(400, str(e))
+        return {"name": body.get("name"), "tagline": body.get("tagline"), "exported": body.get("exported"),
+                "config": config_to_json(new),
+                "keys": {d.id: app.keys.has(d.id, d.url) for d in new.downstreams},
+                "taken": body.get("name") in app.preset_names()}
+    m = re.fullmatch(r"/ui/api/presets/([^/]+)/activate", path)
+    if m and method == "POST":
+        name = unquote(m[1])
+        try:
+            app.activate_preset(name)
+        except KeyError:
+            raise Err(404, "no preset named %s" % name)
+        return {"ok": True, "rev": app.rev}
+    m = re.fullmatch(r"/ui/api/presets/([^/]+)/export", path)
+    if m and method == "GET":
+        name = unquote(m[1])
+        try:
+            pname, ptag = app.preset_meta(name)
+        except KeyError:
+            raise Err(404, "no preset named %s" % name)
+        try:
+            out_name = presets.check_name((query.get("name") or [pname])[0])
+            tagline = presets.check_tagline((query.get("tagline") or [ptag])[0])
+        except ValueError as e:
+            raise Err(400, str(e))
+        config = presets.portable(app.preset_config(name))
+        try:
+            presets.validated(config)  # never export a file the importer would reject
+        except ValueError as e:
+            raise Err(400, "this preset's config is broken and can't be exported: %s" % e)
+        return {"signaller_preset": presets.PRESET_FORMAT, "name": out_name, "tagline": tagline,
+                "exported": time.strftime("%Y-%m-%d"), "config": config}
+    m = re.fullmatch(r"/ui/api/presets/([^/]+)", path)
+    if m and method in ("PUT", "DELETE"):
+        name = unquote(m[1])
+        try:
+            if method == "PUT":
+                body = body if isinstance(body, dict) else {}
+                app.rename_preset(name, body.get("name"), body.get("tagline"))
+            else:
+                app.delete_preset(name)
+        except KeyError:
+            raise Err(404, "no preset named %s" % name)
+        except ValueError as e:
+            raise Err(400, str(e))
+        return {"ok": True}
     m = re.fullmatch(r"/ui/api/downstreams/([^/]+)(/key)?", path)
-    if m and method in ("PUT", "DELETE") and not downstream(app.routing, m[1]):
+    ds = downstream(app.routing, m[1]) if m else None
+    if m and method in ("PUT", "DELETE") and not ds:
         raise Err(404, "no downstream named %s" % m[1])
     if m and m[2] and method == "PUT":
         key = body.get("key") if isinstance(body, dict) else None
         if not isinstance(key, str) or not key.strip():
             raise Err(400, "key must be non-empty text")
-        app.keys.set(m[1], key.strip())
+        app.keys.set(m[1], ds.url, key.strip())
         return {"key_set": True}
     if m and not m[2] and method == "DELETE":
         refs = app.delete_downstream(m[1])
@@ -455,5 +540,5 @@ def _handle(h, app):
         body = json.loads(raw) if raw else {}
     except ValueError:
         raise Err(400, "body is not valid JSON")
-    out = api(h, app, h.command, u.path, parse_qs(u.query), body)
+    out = api(h, app, h.command, u.path, parse_qs(u.query, keep_blank_values=True), body)  # blanks kept: an emptied export tagline is meant
     send_json(h, *(out if isinstance(out, tuple) else (200, out)))

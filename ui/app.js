@@ -12,6 +12,7 @@ const label = (t) => NAME(t) + (gone(t) ? ", removed" : "");
 const col = (t) => t === "anthropic" ? "var(--anth)" : dsOf(t) ? dsOf(t).color : "var(--off)";
 const cv = (t) => "--c:" + col(t);
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const scrollTo = (node, opts) => node.scrollIntoView({ ...opts, behavior: reduceMotion.matches ? "auto" : "smooth" });
 
 const SVG = new Set(["circle", "path", "text", "tspan"]);
 function el(tag, attrs, ...kids) {
@@ -220,6 +221,10 @@ function applyState(st) {
   const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f) || $("prm").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }  // again after a save: fresh collisions, fresh settings
   renderCollisions();  // every poll: /signaller or the picker can change them without this tab's config JSON changing
+  $("presetGo").hidden = !st.preset;
+  $("presetName").textContent = st.preset || "";
+  renderKeyBanner((st.presets.find((p) => p.active) || {}).missing_keys);
+  renderPresets();
   if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /signaller at any time
 }
 // Downstream POST/DELETE/key PUT change the config on the server: reload it (even after an error or a timeout),
@@ -793,6 +798,271 @@ $("prAdd").addEventListener("click", () => {
   setPrompts([...ps, { name: "prompt-" + n, text: "Once done, run:\n  1. /signaller anthropic\n  2. /simplify\n  3. /signaller rules" }]);
 });
 
+/* presets: saved setups, one card each; the active one's config is the live one */
+// Which card shows an inline form: the save-as form, or a preset's edit / export / delete confirm.
+const PUI = { save: false, edit: null, exp: null, del: null };
+// one inline form at a time: clear the others, set one (k null clears all), redraw
+const setForm = (k, v) => { PUI.save = false; PUI.edit = PUI.exp = PUI.del = null; if (k) PUI[k] = v; renderPresets(true); };
+let presetKey = "", keyBannerKey = "";
+// A preset call changes the config on the server: dsCall reloads it (even after an error or a timeout),
+// so the next config PUT starts from the switched-in preset.
+$("presetGo").addEventListener("click", () => scrollTo($("presets"), {}));
+function renderKeyBanner(mk) {
+  const key = JSON.stringify(mk || []);
+  if (key === keyBannerKey) return;
+  keyBannerKey = key;
+  $("keyBanner").hidden = !mk || !mk.length;
+  if (!mk || !mk.length) return;
+  const ns = mk.map(NAME);
+  $("keyBanner").replaceChildren(ns.length === 1 ? `${ns[0]} needs a key: enter it in Tracks` : `${ns.join(", ")} need keys: enter them in Tracks`, " — ",
+    el("button", { type: "button", class: "linkish", onclick: () => scrollTo($("tracks"), {}) }, "Tracks"));
+}
+const summaryLine = (s) => s && [plural(s.rules || 0, "rule"),
+  (s.downstreams || []).length && (s.downstreams || []).map(NAME).join(", "),
+  plural(s.settings || 0, "schedule line"), plural(s.prompts || 0, "prompt")].filter(Boolean).join(" · ");
+const keyLine = (ids) => `${ids.map(NAME).join(", ")} ${ids.length === 1 ? "needs" : "need"} a key`;
+const perr = () => el("p", { class: "err", role: "alert", hidden: true });
+// the name+tagline input pair every preset form edits (cls: the import panel's own classes); the
+// maxlengths match the router's presets.NAME_MAX / TAGLINE_MAX
+const nameTag = (nl, tl, k, p, cls) => [
+  el("input", { class: cls && cls[0], value: (p && p.name) || "", placeholder: "Name", "aria-label": nl, autocomplete: "off", spellcheck: "false", maxlength: 60, "data-k": k + "name" }),
+  el("input", { class: cls && cls[1], value: (p && p.tagline) || "", placeholder: "Tagline: what this is good for", "aria-label": tl, autocomplete: "off", spellcheck: "false", maxlength: 200, "data-k": k + "tag" }),
+];
+const showPresetErr = (e, err) => showErr(err, e.status === 400 || e.status === 404 ? e.message : "Couldn't save: " + e.message);
+// The page re-renders on every poll; a form the user is typing in redraws after blur instead of eating the text.
+const typingPreset = () => { const f = document.activeElement; return !!f && $("presets").contains(f) && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea"); };
+function renderPresets(force) {
+  if (!S) return;
+  const key = JSON.stringify([S.preset, S.presets]);
+  if (!force && (key === presetKey || typingPreset())) return;
+  presetKey = key;
+  $("presetRows").replaceChildren(...S.presets.map(presetCard), saveCard());
+}
+function presetCard(p) {
+  const err = perr();
+  const card = el("div", { class: "pcard" + (p.active ? " active" : "") },
+    el("div", { class: "pname" }, p.name, p.active && el("span", { class: "prun" }, " · running")),
+    p.tagline && el("div", { class: "ptag" }, p.tagline),
+    el("div", { class: "psum" }, summaryLine(p.summary)),
+    p.missing_keys && p.missing_keys.length ? el("div", { class: "pkeys" }, keyLine(p.missing_keys)) : null,
+    err);
+  if (PUI.edit === p.name && p.active) return presetEdit(p, card, err);
+  if (PUI.exp === p.name) return presetExport(p, card, err);
+  const acts = el("div", { class: "pacts" });
+  if (PUI.del === p.name && !p.active) {
+    acts.append(el("span", { class: "pdel" }, `Delete ${p.name}? `),
+      // the confirm stays drawn until the delete answers, so its error lands in a node the person can see
+      el("button", { type: "button", class: "mini", onclick: async () => {
+        try { await dsCall("DELETE", "presets/" + encodeURIComponent(p.name)); setForm(); }
+        catch (e) { showPresetErr(e, err); }
+      } }, "Yes"),
+      el("button", { type: "button", class: "mini", onclick: () => setForm() }, "No"));
+  } else {
+    if (p.active) acts.append(el("button", { type: "button", class: "mini", onclick: () => setForm("edit", p.name) }, "Edit"));
+    else acts.append(el("button", { type: "button", class: "mini", onclick: async () => {
+      try { await dsCall("POST", "presets/" + encodeURIComponent(p.name) + "/activate"); }
+      catch (e) { showPresetErr(e, err); }
+    } }, "Switch"));
+    acts.append(el("button", { type: "button", class: "mini", onclick: () => setForm("exp", p.name) }, "Export"));
+    if (!p.active) acts.append(el("button", { type: "button", class: "mini del", onclick: () => setForm("del", p.name) }, "Delete"));
+  }
+  card.append(acts);
+  return card;
+}
+function presetEdit(p, card, err) {
+  const [n, t] = nameTag("Preset name", "Preset tagline", "p", p);
+  card.append(n, t,
+    el("button", { type: "button", class: "btn primary", onclick: async () => {
+      try {
+        await dsCall("PUT", "presets/" + encodeURIComponent(p.name), { name: n.value.trim(), tagline: t.value });
+        setForm();
+      } catch (e) { showPresetErr(e, err); }
+    } }, "Save"),
+    el("button", { type: "button", class: "btn", onclick: () => setForm() }, "Cancel"));
+  return card;
+}
+function presetExport(p, card, err) {
+  const [n, t] = nameTag("Name in the exported file", "Tagline in the exported file", "x", p);
+  const file = () => (slug(n.value.trim() || p.name) || "preset") + ".signaller.json";
+  card.append(n, t,
+    // through api(): a 400 (a broken config) shows here instead of being saved as the file
+    el("button", { type: "button", class: "btn primary", onclick: async () => {
+      try {
+        const out = await api("GET", "presets/" + encodeURIComponent(p.name) + "/export" +
+          qs("name=" + encodeURIComponent(n.value.trim() || p.name), "tagline=" + encodeURIComponent(t.value)));
+        const url = URL.createObjectURL(new Blob([JSON.stringify(out, null, 2)], { type: "application/json" }));
+        el("a", { href: url, download: file() }).click();  // a same-origin blob: allowed under the CSP
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+      } catch (e) { showPresetErr(e, err); }
+    } }, "Download"),
+    el("button", { type: "button", class: "btn", onclick: () => setForm() }, "Done"));
+  return card;
+}
+function saveCard() {
+  const card = el("div", { class: "pcard psave" });
+  if (!PUI.save) {
+    card.append(el("button", { type: "button", class: "btn", onclick: () => setForm("save", true) }, "+ Save current as…"));
+  } else {
+    const [n, t] = nameTag("Name for the saved setup", "Tagline for the saved setup", "s", null);
+    const err = perr();
+    card.append(n, t, el("button", { type: "button", class: "btn primary", onclick: async () => {
+      try {
+        await dsCall("POST", "presets", { name: n.value.trim(), tagline: t.value });
+        setForm();
+      } catch (e) { showPresetErr(e, err); }
+    } }, "Save"),
+      el("button", { type: "button", class: "btn", onclick: () => setForm() }, "Cancel"), err);
+  }
+  // the import panel (below the cards) is opened from here
+  card.append(el("button", { type: "button", class: "btn", id: "importBtn" }, "Import…"));
+  return card;
+}
+
+/* import: a file picked, dropped or pasted is previewed before anything is added */
+// Everything the file carries — names, taglines, rule text, hosts, prompt names — is untrusted:
+// it reaches the page as text nodes and input values only, never as markup.
+let imPv = null, imName = null, imTag = null, imNote = null, imSeq = 0, imTimer = null;
+function impOpen(open) {
+  $("impanel").hidden = !open;
+  if (!open) return;
+  imSeq++;  // a preview still in flight must not land in the fresh panel
+  imPv = null;
+  imShow(null);
+  $("imFile").value = "";
+  $("imText").value = "";
+  showErr($("imErr"), "");
+  scrollTo($("impanel"), { block: "nearest" });
+  $("imFile").focus();
+}
+document.addEventListener("click", (e) => { if (e.target.closest("#importBtn")) impOpen(true); });  // importBtn is redrawn with the cards
+const imReadFile = (f) => {
+  if (!f) return;
+  f.text().then(imPreviewText, (e) => showErr($("imErr"), "Couldn't read the file: " + e.message));
+};
+$("imFile").addEventListener("change", () => imReadFile($("imFile").files[0]));
+$("impanel").addEventListener("dragover", (e) => { e.preventDefault(); $("impanel").classList.add("drag"); });
+$("impanel").addEventListener("dragleave", () => $("impanel").classList.remove("drag"));
+$("impanel").addEventListener("drop", (e) => {
+  e.preventDefault();
+  $("impanel").classList.remove("drag");
+  imReadFile(e.dataTransfer.files && e.dataTransfer.files[0]);
+});
+$("imText").addEventListener("input", () => {  // paste or type; a moment's pause means it's meant
+  clearTimeout(imTimer);
+  imTimer = setTimeout(() => { const v = $("imText").value; if (v.trim()) imPreviewText(v); }, 300);
+});
+$("imCancel").addEventListener("click", () => impOpen(false));
+$("impanel").addEventListener("keydown", (e) => { if (e.key === "Escape") impOpen(false); });
+async function imPreviewText(text) {
+  const seq = ++imSeq, err = $("imErr");
+  let j;
+  try { j = JSON.parse(text); }
+  catch (e) { imShow(null); showErr(err, "That isn't valid JSON: " + e.message); return; }
+  try {
+    const pv = await api("POST", "presets/preview", j);
+    if (seq !== imSeq) return;  // the text changed meanwhile
+    showErr(err, "");
+    imShow(pv);
+  } catch (e) {
+    if (seq !== imSeq) return;
+    imShow(null);
+    showErr(err, e.status === 400 ? e.message : "Couldn't preview: " + e.message);
+  }
+}
+function imShow(pv) {
+  imPv = pv;
+  $("imAdd").hidden = !pv;
+  $("imPick").hidden = !!pv;
+  $("imKeys").hidden = true;
+  if (!pv) { $("imView").replaceChildren(); return; }
+  $("imView").replaceChildren(...imPanel(pv));
+}
+// equal neighbouring tiers share a line: "Fable/Opus → x · Sonnet → y"
+const imGroups = (vals) => {
+  const gs = [];
+  for (const [m, tn] of Object.entries(TIER)) {
+    const g = gs[gs.length - 1];
+    if (g && g.v === vals[m]) g.t.push(tn); else gs.push({ v: vals[m], t: [tn] });
+  }
+  return gs;
+};
+const imList = (vals, fmt) => {
+  const gs = imGroups(vals);
+  return gs.length === 1 ? `every tier → ${fmt(gs[0].v)}` : gs.map((g) => g.t.join("/") + " → " + fmt(g.v)).join(" · ");
+};
+const imHost = (u) => { try { return new URL(u).host; } catch (_) { return u; } };
+// The name field's state: "already used, rename it" + a disabled Add while it holds the taken name.
+const imTakenState = () => !!imPv && imPv.taken && !!imName && imName.value.trim() === (imPv.name || "");
+const imSetAdd = () => {
+  const taken = imTakenState();
+  if (imNote) imNote.textContent = taken ? "already used, rename it" : "";
+  $("imAdd").disabled = taken || !imName || !imName.value.trim();
+};
+const andList = (a) => a.length <= 2 ? a.join(" and ") : a.slice(0, -1).join(", ") + " and " + a[a.length - 1];
+function imPanel(pv) {
+  const c = pv.config, pds = c.downstreams || [], keys = pv.keys || {};
+  const pName = (t) => t === "anthropic" ? "Anthropic" : ((pds.find((d) => d.id === t) || {}).name || t);
+  const pCol = (t) => t === "anthropic" ? "var(--anth)" : ((pds.find((d) => d.id === t) || {}).color || "var(--off)");
+  const ptrk = (t) => el("span", { class: "to", style: "--c:" + pCol(t) }, pName(t));
+  [imName, imTag] = nameTag("Name for the imported preset", "Tagline for the imported preset", "im", pv, ["imn", "imt"]);
+  imNote = el("span", { class: "imtaken" });
+  imName.addEventListener("input", imSetAdd);
+  imSetAdd();
+  const tracks = el("div", { class: "imbox" }, el("div", { class: "lbl" }, "Tracks"),
+    pds.length ? pds.map((d) => {
+      const valar = d.kind === "valar", bits = [imHost(d.url), imList(d.models, (m) => m || "–")];
+      if (valar) {
+        const wins = [...new Set(Object.values(d.windows || {}))];
+        bits.push(wins.length === 1 ? "window: " + (WIN[wins[0]] || wins[0]) : imList(d.windows || {}, (w) => WIN[w] || w));
+      }
+      return el("div", { class: "imtrk", style: "--c:" + pCol(d.id) },
+        el("span", { class: "imk" }, d.name), " ",
+        el("span", { class: keys[d.id] ? "imok" : "imnew" }, keys[d.id] ? "· your key works here" : "· new · needs a key"),
+        el("small", {}, bits.filter(Boolean).join(" · ")));
+    }) : el("div", { class: "imtrk" }, "Anthropic only"));
+  const route = [];
+  if (c.lever && c.lever !== "rules") route.push(el("div", {}, "the lever sends everything → ", ptrk(c.lever)));
+  for (const r of c.rules || []) if (r.enabled) {
+    if (r.kind === "classifier") for (const l of (c.classifier && c.classifier.labels) || []) route.push(el("div", {}, l.name, " → ", ptrk(l.track)));
+    else for (const l of lines(r.text)) {
+      const m = l.match(/^when\s+(.*?)\s+go\s+([\w-]+)$/i);
+      route.push(el("div", {}, m ? [m[1], " → ", ptrk(m[2].toLowerCase())] : l));
+    }
+  }
+  const routed = el("div", { class: "imbox" }, el("div", { class: "lbl" }, "How a request is routed"),
+    route.length ? el("ol", { class: "imroute" }, route.map((x) => el("li", {}, x))) : el("div", { class: "immeta" }, "no rules"),
+    el("div", { class: "immeta" }, [
+      "classifier " + (c.classifier && c.classifier.upstream !== "none" ? "on" : "off"),
+      "otherwise " + pName(c.otherwise),
+      c.doubling && c.doubling.rate > 0 ? "doubling " + Math.round(c.doubling.rate * 100) + "%" : "no doubling",
+    ].join(" · ")));
+  const sched = el("div", { class: "imbox" }, el("div", { class: "lbl" }, "Schedule"), el("div", { class: "immeta" },
+    (c.settings || []).length ? c.settings.map((s) => el("div", {},
+      `${s.when || "always"}: ${pName(s.downstream)} ${s.tier ? s.tier + " " : ""}${s.set} ${s.set === "window" ? WIN[s.value] || s.value : s.value}`)) : "none"));
+  const pnames = (c.prompts || []).flatMap((p, i) => i ? [" · ", el("code", {}, p.name)] : [el("code", {}, p.name)]);
+  const prompts = el("div", { class: "imbox" }, el("div", { class: "lbl" }, "Prompts"), el("div", { class: "immeta" },
+    pnames.length ? pnames : "none"));
+  const miss = pds.filter((d) => !keys[d.id]).map((d) => d.name);
+  const imKeys = $("imKeys");
+  imKeys.hidden = !miss.length;
+  imKeys.textContent = miss.length ? `After adding: enter ${andList(miss)}'s key${miss.length === 1 ? "" : "s"} in Tracks before switching` : "";
+  return [el("div", { class: "imname" }, imName, imTag, pv.exported && el("span", { class: "imexp" }, "exported " + pv.exported), imNote),
+    el("div", { class: "imgrid" }, tracks, routed, sched, prompts)];
+}
+$("imAdd").addEventListener("click", async () => {
+  if (!imPv) return;
+  const err = $("imErr");
+  $("imAdd").disabled = true;
+  try {
+    await dsCall("POST", "presets", { name: imName.value.trim(), tagline: imTag.value, config: imPv.config });
+    impOpen(false);
+  } catch (e) {
+    showPresetErr(e, err);
+  } finally {
+    imSetAdd();  // recompute, don't blindly re-enable: the name may have gone back to the taken one
+  }
+});
+
 /* doubling strip */
 function renderStrip() {
   const d = cfg.doubling, pct = Math.round(d.rate * 100);
@@ -843,7 +1113,7 @@ function openEditor(i) {
   highlight();
   preview();
   (r ? $("edText") : $("edName")).focus();
-  $("editor").scrollIntoView({ block: "nearest", behavior: reduceMotion.matches ? "auto" : "smooth" });
+  scrollTo($("editor"), { block: "nearest" });
 }
 function closeEditor() {
   const back = ed && ed.orig;
@@ -1114,7 +1384,7 @@ async function showTurn(id) {
   const g = viewGen;
   await loadTurns();
   if (g !== viewGen) return;
-  $("pair").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" });
+  scrollTo($("pair"), {});
 }
 // Picked sessions: count the verdicts on their turns (side by side ignores the time span).
 // ponytail: the turns list holds the newest 100, so older verdicts drop out of a picked tally.

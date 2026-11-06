@@ -65,9 +65,9 @@ breaks.
   request that carries one (`has_images`), is retried on Anthropic from the
   original body (`orig_body`) and the person's own headers. The session gets a
   notice (`App.notices`, served on `/ui/api/lever`), which the plugin turns
-  into a transcript line and a toast. Nothing is remembered between requests,
-  because a rewound or forked conversation may have no image. Every other
-  error passes through as it came.
+  into a transcript line and a band above the prompt. Nothing is remembered
+  between requests, because a rewound or forked conversation may have no
+  image. Every other error passes through as it came.
 - **One request prep for every track:** `prepare()` in `signaller.py`
   renames the model, applies Valar's tool fix, swaps credentials and sets the
   window, for the served request and its shadow alike. Change it there, once.
@@ -82,6 +82,24 @@ breaks.
   `set_settings_for_session` (inserted at the top, under the lock), and
   `prune_settings` drops session ids unseen for a week — an id with no
   sessions row counts as unseen (forgotten sessions go too).
+- **Session levers** persist in `session_levers.json`, written through
+  `write_json` under the lock by `set_session_lever`. `lever_for` serves only a
+  lever the active setup can still follow (a restart or a preset switch may
+  have dropped the track it named); the raw entry is kept. `prune_levers`
+  drops session ids unseen for a week, the same rule as `prune_settings`.
+- **Presets:** `console.json` is the active preset's config; `presets.json`
+  holds the rest. `activate_preset` runs under `_rlock` and goes through
+  `_put`, so the rev bumps and a page holding an older config gets 409 rather
+  than overwriting the switched-in preset. A switch is written crash-safe:
+  presets.json first (the previous preset's snapshot, active moved, the target
+  still carrying its config), then console.json, then the target's config
+  cleared — and the active preset still carrying a config at a start means the
+  switch was interrupted, so the loader finishes it. A saved or imported preset
+  carries `presets.portable(config)`: no machine state (`seeded`,
+  `migrated_off`) and no settings lines bound to a session; anything
+  unparseable is kept for `config_from_json` to reject with a reason. An
+  unreadable `presets.json` falls back to a fresh "my setup" with a banner,
+  never a dead router.
 - **The body is rewritten only when something changes** (leading tags, a
   downstream's model name, Valar's tool fixes): `req` is parsed once, edited,
   and re-serialised once. An untouched Anthropic request goes out byte for
@@ -94,8 +112,15 @@ breaks.
 ## Secrets
 
 - **Where they live:** downstream keys are only in `downstreams.keys.json`
-  (0600). Never put them in `console.json`, an API response, a log line, a
-  test fixture or a commit.
+  (0600), keyed by id and then origin (`host_of`: https under the bare host,
+  http under `scheme://host`, so a key never crosses schemes) — the same id at
+  two hosts or schemes keeps two keys, and `delete_downstream` leaves a key
+  that an inactive preset still needs at the same id and origin. Migration
+  never loses one: an id with no downstream in the current setup waits under
+  the unknown slot for a later `migrate`, and a start where `console.json`
+  couldn't be read never migrates against the default config. Never put keys
+  in `console.json`, `presets.json`, an API response, a log line, a test
+  fixture or a commit.
 - **Env files:** `.env.*` files are git-ignored and can hold real keys. Don't
   print them. To check which variables one sets, print names only:
   `grep -oE '^[A-Z_]+=' file`.
@@ -151,9 +176,11 @@ node --check ui/app.js                 # the console has no unit tests; at least
   `/plugin`.
 - **The `signaller_lever` tool:** it only switches when the user typed
   `/signaller <mode>`, and each one typed grants one switch, used in the order
-  typed (a prompt with any `/signaller` replaces the queue; one without keeps
-  it). Subagents can't switch. The plugin's own refusal text quotes the command,
-  so pasting it back grants nothing. Keep that gate.
+  typed (a prompt with any `/signaller` step replaces the queue; one without, or
+  one that only quotes `/signaller run` or `name`, keeps it). The queue lives in
+  the plugin's store under the session id, so a reload or restart keeps it.
+  Subagents can't switch. The plugin's own refusal text quotes the command, so
+  pasting it back grants nothing. Keep that gate.
   Claude must never switch the router on its own judgment.
 - **Saved prompts** (`config.prompts`, the console's Prompts section) reach the
   plugin on the lever answer. `/signaller run <name>` only fills the prompt

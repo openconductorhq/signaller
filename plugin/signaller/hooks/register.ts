@@ -53,21 +53,49 @@ const downstreams = () => MODES.filter(m => m !== 'rules' && m !== 'anthropic')
 // the next one and uses it up (a plan's "anthropic, rules, anthropic, rules" runs only in that order). A later
 // prompt with no "/signaller" keeps the queue (messages sent while Claude works); one with any replaces it, so
 // leftovers don't linger. Only the main agent spends the queue: subagents follow the session's lever anyway.
-// Kept in memory; a reload forgets it, which only denies.
-let pending: string[] = [] // "lever <mode>" or "set <canon>"
-const GRANT = /(?:^|\s)\/signaller\s+([a-z0-9_-]+)/gi
+// Kept in the plugin's store under the session id, so a reload or a restart of the same session keeps it.
+// ponytail: an ended session's leftover steps stay in the store (tiny, keyed by an id nobody reuses).
+const qkey = async ($: EngineInterface) => `pending:${await $.session.id()}`
+// take/giveBack/grant are async read-modify-writes on the store: every queue op is chained through one
+// promise, so two calls in flight can't spend one grant twice or overwrite a newer prompt's queue.
+let qtail: Promise<unknown> = Promise.resolve()
+const serial = <T>(op: () => Promise<T>): Promise<T> => {
+  const run = qtail.then(op)
+  qtail = run.then(() => undefined, () => undefined)
+  return run
+}
+const queue = async ($: EngineInterface) => (((await $.store.get(await qkey($))) as string[] | undefined) ?? [])
+const save = async ($: EngineInterface, q: string[]) => {
+  const k = await qkey($)
+  await (q.length ? $.store.set(k, q) : $.store.delete(k))
+}
+// "/signaller run …" and "/signaller name …" are commands, not steps: quoting one in a prompt keeps the queue
+// (run/name are exempt unless a word continues: "runner" or "namext" are levers, "run," or "name (above)" aren't)
+const GRANT = /(?:^|\s)\/signaller\s+(?!(?:run|name)(?![a-z0-9_-]))([a-z0-9_-]+)/gi
 const GRANT_SETTINGS = new RegExp(`(?:^|\\s)\\/signaller\\s+${TAIL}`, 'gi') // the same form, as typed in a prompt
 // "/signaller <downstream> reset…" with more than the word "reset" there is a settings attempt that grants nothing
 const RESETISH = /(?:^|\s)\/signaller\s+[a-z0-9_-]+(?:\s+(?:fable|opus|sonnet|haiku))?\s+reset[a-z0-9_-]*/gi
-const grant = (text: string) => {
+const grant = ($: EngineInterface, text: string) => serial(async () => {
   const steps = new Map<number, string | null>() // keyed by where the "/signaller" starts; all three regexes share it
   for (const m of text.matchAll(GRANT_SETTINGS)) steps.set(m.index!, `set ${canon(form(m))}`)
   for (const m of text.matchAll(RESETISH)) if (!steps.has(m.index!)) steps.set(m.index!, null) // "resetting": an attempt, no grant
   for (const m of text.matchAll(GRANT)) if (!steps.has(m.index!)) steps.set(m.index!, `lever ${m[1]!.toLowerCase()}`) // modes are checked when used
-  if (steps.size) pending = [...steps].sort((a, b) => a[0] - b[0]).flatMap(([, s]) => (s ? [s] : []))
-}
-const take = (want: string) => pending[0] === want && pending.shift() !== undefined
-const upNext = () => (pending[0] ? ` The next one allowed is "/signaller ${pending[0].replace(/^\S+ /, '').replace(' * ', ' ')}".` : '')
+  if (!steps.size) return
+  await save($, [...steps].sort((a, b) => a[0] - b[0]).flatMap(([, s]) => (s ? [s] : [])))
+})
+const take = ($: EngineInterface, want: string) => serial(async () => {
+  const q = await queue($)
+  if (q[0] !== want) return false
+  q.shift()
+  await save($, q)
+  return true
+})
+const giveBack = ($: EngineInterface, step: string) => serial(async () => {
+  const q = await queue($)
+  q.unshift(step)
+  await save($, q)
+})
+const upNext = (q: string[]) => (q[0] ? ` The next one allowed is "/signaller ${q[0].replace(/^\S+ /, '').replace(' * ', ' ')}".` : '')
 
 // set (or reset) this session's settings line; the reply lists the session's resulting lines and any collisions.
 // `typed`: the settings form as typed, when the call must be gated on the person's "/signaller …" (the tool path);
@@ -76,8 +104,8 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
   if (!downstreams().includes(f.ds))
     return { ok: false, text: `Unknown downstream "${f.ds}". The router's downstreams: ${downstreams().join(', ') || 'none yet'}.` }
   const c = canon(f)
-  if (typed !== undefined && !take(`set ${c}`))
-    return { ok: false, text: `Not setting: "/signaller ${typed}" isn't the next step the person typed (each one they type allows one, in order).${upNext()} Only set a line when they tell you to that way; they can also type "/signaller ${typed}" themselves.` }
+  if (typed !== undefined && !(await take($, `set ${c}`)))
+    return { ok: false, text: `Not setting: "/signaller ${typed}" isn't the next step the person typed (each one they type allows one, in order).${upNext(await queue($))} Only set a line when they tell you to that way; they can also type "/signaller ${typed}" themselves.` }
   const session = await $.session.id()
   const body = 'reset' in f
     ? { session, downstream: f.ds, reset: true }
@@ -85,7 +113,7 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
   try {
     const r = await $.http.fetch(SETTINGS, { method: 'PUT', headers: HEADERS, body: JSON.stringify(body) })
     if (!r.ok) {
-      if (typed !== undefined) pending.unshift(`set ${c}`)
+      if (typed !== undefined) await giveBack($, `set ${c}`)
       return { ok: false, text: `signaller answered ${r.status}: ${r.text.slice(0, 200)}` }
     }
     const back = JSON.parse(r.text) as { lines: Line[]; collisions: { text: string }[] }
@@ -93,7 +121,7 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
     const lines = back.lines.map(l => `${l.downstream} ${l.set} ${l.value} for this session${l.tier ? ` (${l.tier})` : ''}`)
     return { ok: true, text: [...lines, ...back.collisions.map(x => x.text)].join('\n') }
   } catch (err) {
-    if (typed !== undefined) pending.unshift(`set ${c}`)
+    if (typed !== undefined) await giveBack($, `set ${c}`)
     return { ok: false, text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
   }
 }
@@ -111,14 +139,17 @@ const switchTo = async ($: EngineInterface, want: string): Promise<{ ok: boolean
 }
 
 const label = (l: Lever) => `${l.lever} (${l.session ? 'this session' : 'global'})${l.name ? `, session name: ${l.name}` : ''}`
-// an image fallback the router reports for this session: a line in the transcript (shown, never sent to the model)
-// and a toast, once per turn; the first poll after a (re)load only takes note, so an old one isn't shown again
+// an image fallback the router reports for this session: a line in the transcript (shown, never sent to the
+// model) and a band above the prompt, once per turn; the first poll after a (re)load only takes note, so an
+// old one isn't shown again. The band holds until the person's next prompt clears it.
 let seen: string | null | undefined
+let band: string | null = null
 const warn = ($: EngineInterface, l: Lever) => {
   const n = l.notice
   if (seen !== undefined && n && n.turn !== seen) {
     $.ui.log(`⚠ signaller: ${n.text}`)
-    $.ui.toast(n.text, { timeoutMs: 12_000 })
+    band = n.text
+    $.ui.invalidate('ui.render')
   }
   seen = n ? n.turn : null
 }
@@ -179,16 +210,27 @@ export const register: Register = on => {
     const want = (e as { lever?: string }).lever
     if (want && want !== 'reset' && !MODES.includes(want)) return { deny: `Unknown lever "${want}". Use one of: ${MODES.join(', ')}, or reset.` }
     if (want && sub) return { deny: 'Not switching: only the main agent switches signaller; a subagent follows its session.' }
-    if (want && !take(`lever ${want}`))
-      return { deny: `Not switching: "/signaller ${want}" isn't the next step the person typed (each one they type allows one, in order).${upNext()} Only switch when they tell you to that way; they can also type "/signaller ${want}" themselves.` }
+    if (want && !(await take($, `lever ${want}`)))
+      return { deny: `Not switching: "/signaller ${want}" isn't the next step the person typed (each one they type allows one, in order).${upNext(await queue($))} Only switch when they tell you to that way; they can also type "/signaller ${want}" themselves.` }
     const r = await switchTo($, want ?? '')
-    if (!r.ok && want) pending.unshift(`lever ${want}`) // the switch didn't happen: the person's say-so still stands
+    if (!r.ok && want) await giveBack($, `lever ${want}`) // the switch didn't happen: the person's say-so still stands
     return r.ok ? { result: r.text } : { deny: r.text }
   })
 
-  on('prompt.submit', ($, e, next) => {
-    if (!e.isMeta && !e.command) grant(e.text)
+  on('prompt.submit', async ($, e, next) => {
+    if (!e.isMeta && !e.command) await grant($, e.text)
+    if (band !== null) {
+      band = null
+      $.ui.invalidate('ui.render')
+    }
     return next(e)
+  })
+
+  // the pending image fallback above the prompt; a survey owns the band, so yield to one
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
+    if (band === null || e.props.hasSurvey) return next(e)
+    const { Text } = $.ui.resolve(e)
+    return h(Text, { color: 'warning' }, `⚠ signaller: ${band}`)
   })
 
   on('command.run', { command: 'signaller' }, async ($, e) => {

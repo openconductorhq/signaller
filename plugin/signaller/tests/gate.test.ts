@@ -4,7 +4,10 @@ const TOOL = 'mcp__signaller__signaller_lever'
 const LEVER = JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] })
 
 // one stub router per test: everything the hooks need, with the test's own http.fetch
-const stub = ($: any, on: any, http: (e: any) => any) => {
+const stub = ($: any, on: any, http: (e: any) => any, store = new Map<string, unknown>()) => {
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => (store.set(e.key, e.value), { value: undefined }))
+  on('store.delete', (_, e) => (store.delete(e.key), { value: undefined }))
   on('command.register', () => ({ value: { command: 'signaller' } }))
   on('tool.register', () => ({ value: { tool: TOOL } }))
   on('session.id', () => ({ value: 's1' }))
@@ -140,22 +143,38 @@ test('a settings value stops before trailing punctuation, and reset is a whole w
   expect((await $.tool.call({ tool: TOOL, lever: 'valar' })).deny).toContain('Not switching')
 })
 
-test('an image fallback shows once, as a transcript line and a toast', async ($, on) => {
+test('an image fallback shows once, as a transcript line and a band above the prompt', async ($, on) => {
   const logs: string[] = [], toasts: string[] = []
   let notice: any = null
   on('ui.log', (_, e) => { logs.push(e.text); return { value: undefined } })
   on('ui.toast', (_, e) => { toasts.push(e.text); return { value: undefined } })
+  on('ui.render', () => h(Fragment, {}))  // what the engine draws beneath: the band's pass-through
   on('turn.complete', () => ({ text: 'answer' }))
   await stub($, on, () => ({ value: { ok: true, status: 200, text: JSON.stringify({ ...JSON.parse(LEVER), notice }) } }))
   const settle = () => new Promise(r => setTimeout(r, 20))  // polls run in the background
+  const BAND = {
+    plugin: 'signaller', surface: 'terminal' as const, component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  }
+  const ui = await $.ui.mount(BAND)
   await settle()  // the first poll only takes note
+  const quiet = JSON.stringify(await ui.drawn())  // nothing pending: the band draws nothing of signaller's
   notice = { turn: 't1', text: 'This turn went to Anthropic, not valar.' }
   await $.turn.complete({ reason: 'answer' })
   await settle()
+  expect(logs).toEqual(['⚠ signaller: This turn went to Anthropic, not valar.'])
+  expect(toasts).toEqual([])  // no toast anymore
+  expect(JSON.stringify(await ui.drawn())).toContain('⚠ signaller: This turn went to Anthropic, not valar.')
+  await ui.redraw({ ...BAND.props, hasSurvey: true })  // a survey holds the band: yield to it
+  expect(JSON.stringify(await ui.drawn())).toBe(quiet)
+  await ui.redraw(BAND.props)  // the survey is gone
   await $.turn.complete({ reason: 'answer' })  // the same turn's notice again: not repeated
   await settle()
-  expect(logs).toEqual(['⚠ signaller: This turn went to Anthropic, not valar.'])
-  expect(toasts).toEqual(['This turn went to Anthropic, not valar.'])
+  expect(logs).toEqual(['⚠ signaller: This turn went to Anthropic, not valar.'])  // the line, once
+  expect(JSON.stringify(await ui.drawn())).toContain('⚠ signaller: ')
+  await $.prompt.submit({ text: 'next' })
+  expect(JSON.stringify(await ui.drawn())).toBe(quiet)  // the next prompt clears it
+  await ui.unmount()
 })
 
 test('a typed plan runs in order, survives messages sent meanwhile, and only the main agent spends it', async ($, on) => {
@@ -203,4 +222,51 @@ test('/signaller run fills the prompt box with a saved prompt; sent, its /signal
   await $.prompt.submit({ text: filled[0]! })  // the person presses Enter
   expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toBeUndefined()
   expect((await $.tool.call({ tool: TOOL, lever: 'rules' })).deny).toBeUndefined()
+})
+
+test('typed steps outlive a restart, and quoting /signaller run or name keeps them', async ($, on) => {
+  const store = new Map<string, unknown>([['pending:s1', ['lever anthropic', 'lever rules']]])  // saved before a restart
+  await stub($, on, () => ({ value: { ok: true, status: 200, text: LEVER } }), store)
+
+  await $.prompt.submit({ text: 'status? I sent /signaller run execute and /signaller name presets earlier' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toBeUndefined()
+  expect(store.get('pending:s1')).toEqual(['lever rules'])
+  expect((await $.tool.call({ tool: TOOL, lever: 'rules' })).deny).toBeUndefined()
+  expect(store.has('pending:s1')).toBe(false)  // used up: nothing left behind
+})
+
+test('quoting /signaller run or name keeps them, whatever follows the word', async ($, on) => {
+  const puts: string[] = []
+  await stub($, on, (e) => {
+    if (e.init?.method === 'PUT') puts.push(JSON.parse(String(e.init.body)).lever)
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+
+  await $.prompt.submit({ text: 'do /signaller anthropic' })
+  // punctuation after run/name — not a word continuing it: no step granted, the queue stands
+  await $.prompt.submit({ text: 'see /signaller run, and also /signaller name (as typed above)' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toContain('Not switching')  // used up
+  expect(puts).toEqual(['anthropic'])  // run/name granted nothing, no other switch went out
+
+  // a word that continues ("runner") is a lever like any other, not the run command
+  await $.prompt.submit({ text: 'do /signaller runner' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'runner' })).deny).toContain('Unknown lever')
+})
+
+test('two calls at once spend one typed grant once', async ($, on) => {
+  const puts: string[] = []
+  await stub($, on, (e) => {
+    if (e.init?.method === 'PUT') puts.push(JSON.parse(String(e.init.body)).lever)
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+
+  await $.prompt.submit({ text: 'do /signaller valar' })
+  const [a, b] = await Promise.all([  // parallel tool calls: one read-modify-write each, unserialized would race
+    $.tool.call({ tool: TOOL, lever: 'valar' }),
+    $.tool.call({ tool: TOOL, lever: 'valar' }),
+  ])
+  expect([a, b].some(x => x.deny === undefined)).toBe(true)  // exactly one switched
+  expect([a, b].some(x => (x.deny ?? '').includes('Not switching'))).toBe(true)  // the other was refused
+  expect(puts).toEqual(['valar'])  // one grant, one switch on the wire
 })

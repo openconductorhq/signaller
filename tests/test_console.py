@@ -193,6 +193,18 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["session"], None)
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["session_levers"], {})
 
+    def test_dangling_session_lever_shows_the_global(self):
+        self.app.session_levers["s1"] = "lemmi"  # a track this setup lacks, saved before a restart
+        j = self.js("GET", "/ui/api/lever?session=s1")[1]
+        self.assertEqual(j["lever"], "rules")
+        self.assertEqual(j["session"], None)
+
+    def test_state_serves_only_levers_the_setup_can_follow(self):
+        self.app.session_levers["s1"] = "valar"
+        self.app.session_levers["s2"] = "lemmi"  # a preset switch or restart dropped that track
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["session_levers"], {"s1": "valar"})
+        self.assertEqual(self.app.session_levers, {"s1": "valar", "s2": "lemmi"})  # the raw entry is kept
+
     def test_prompts_saved_and_served_to_the_plugin(self):
         s, j = self.put_cfg(prompts=[{"name": "execute", "text": "1. /signaller anthropic\n2. /simplify"}])
         self.assertEqual(s, 200)
@@ -327,6 +339,7 @@ class ConsoleTest(Fixture):
         self.v.models = b'{"data":[{"id":"a"}]}'
         self.js("GET", "/ui/api/models?track=valar")
         self.set_valar_url("http://127.0.0.1:1")
+        self.app.keys.set("valar", "http://127.0.0.1:1", "VK")  # a new host means entering the key again
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual((s, j["models"]), (200, ["a"]))
         self.assertIn("Valar unreachable", j["stale"])
@@ -347,11 +360,11 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.req("GET", "/ui/api/models?track=valar", host="evil.example")[0].status, 403)
         self.assertEqual(self.req("GET", "/ui/api/models?track=valar", origin="http://evil.com")[0].status, 403)
         self.assertEqual(self.v.seen, [])
-        self.app.keys.delete("valar")
+        self.app.keys.delete("valar", self.v.url)
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual((s, j["error"]), (502, "Valar not configured"))
         self.assertEqual(self.v.seen, [])
-        self.app.keys.set("valar", "VK")
+        self.app.keys.set("valar", self.v.url, "VK")
         self.set_valar_url("http://127.0.0.1:1")
         s, j = self.js("GET", "/ui/api/models?track=valar")
         self.assertEqual(s, 502)
@@ -363,7 +376,7 @@ class ConsoleTest(Fixture):
         self.assertEqual(j["downstreams"]["valar"]["url"], self.v.url[7:])
         self.assertNotIn("VK", json.dumps(j))
         self.assertNotIn("LK", json.dumps(j))
-        self.app.keys.delete("valar")
+        self.app.keys.delete("valar", self.v.url)
         self.assertFalse(self.js("GET", "/ui/api/state")[1]["downstreams"]["valar"]["key_set"])
 
     def test_verdict_api_valar(self):
@@ -392,6 +405,111 @@ class ConsoleTest(Fixture):
         for p in ("/ui/api/state?from=abc", "/ui/api/state?to=x", "/ui/api/sessions?from=abc"):
             s, j = self.js("GET", p)
             self.assertEqual((s, j["error"]), (400, "from/to must be numbers or 'session'"))
+
+    def save_night(self):
+        self.assertEqual(self.js("POST", "/ui/api/presets", {"name": "night", "tagline": "late shifts"}),
+                         (201, {"ok": True}))
+
+    def export(self, qs=""):
+        r, d = self.req("GET", "/ui/api/presets/my%20setup/export" + qs)
+        return r, json.loads(d.decode())
+
+    def test_presets_save_switch_delete(self):
+        self.assertEqual(self.js("POST", "/ui/api/presets", {"name": "", "tagline": ""})[0], 400)
+        self.save_night()
+        st = self.js("GET", "/ui/api/state")[1]
+        self.assertEqual([p["name"] for p in st["presets"]], ["my setup", "night"])
+        self.assertEqual([p["active"] for p in st["presets"]], [True, False])
+        self.assertEqual(st["presets"][0]["summary"]["downstreams"], ["valar"])
+        self.assertEqual(st["presets"][0]["missing_keys"], [])  # the key banner reads the active row's
+        self.assertEqual(self.js("POST", "/ui/api/presets/my%20setup/activate")[0], 200)  # already active: a no-op
+        self.assertEqual(self.js("POST", "/ui/api/presets/night/activate")[0], 200)
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["preset"], "night")
+        s, j = self.js("DELETE", "/ui/api/presets/night")
+        self.assertEqual((s, j["error"]), (400, "night is active; switch to another preset first"))
+        self.js("POST", "/ui/api/presets/my%20setup/activate")
+        self.assertEqual(self.js("PUT", "/ui/api/presets/my%20setup", {"name": "day", "tagline": "t"})[0], 200)
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["preset"], "day")  # the active one followed the rename
+        self.assertEqual(self.js("PUT", "/ui/api/presets/nope", {"name": "x", "tagline": ""})[0], 404)
+        self.assertEqual(self.js("DELETE", "/ui/api/presets/nope")[0], 404)
+        self.assertEqual(self.js("DELETE", "/ui/api/presets/night"), (200, {"ok": True}))
+        self.assertEqual([p["name"] for p in self.js("GET", "/ui/api/state")[1]["presets"]], ["day"])
+
+    def test_switch_bumps_rev(self):
+        self.save_night()
+        st = self.js("GET", "/ui/api/state")[1]
+        self.js("POST", "/ui/api/presets/night/activate")
+        s, j = self.js("PUT", "/ui/api/config", {**st["config"], "rev": st["config_rev"]})
+        self.assertEqual((s, j["error"]), (409, "the config changed elsewhere; reloaded"))
+
+    def test_export_has_no_keys_or_session_lines(self):
+        self.app.keys.set("valar", self.v.url, "VK")
+        self.set_settings({"when": "session is s1", "downstream": "valar", "tier": None, "set": "window", "value": "priority"})
+        r, j = self.export()
+        self.assertEqual(r.status, 200)
+        text = json.dumps(j)
+        self.assertNotIn("VK", text)
+        self.assertNotIn("session is", text)
+        self.assertEqual(j["signaller_preset"], 1)
+        self.assertEqual(j["name"], "my setup")
+        r, j = self.export("?name=Shared&tagline=for%20a%20friend")
+        self.assertEqual((j["name"], j["tagline"]), ("Shared", "for a friend"))
+        s, j = self.js("GET", "/ui/api/presets/my%20setup/export?name=" + "x" * 61)  # a bad override answers with the reason
+        self.assertEqual((s, j["error"]), (400, "a preset name must be 1–60 characters"))
+        r, j = self.export("?name=Shared&tagline=")  # a blank value means blank, not "the stored one again"
+        self.assertEqual((j["name"], j["tagline"]), ("Shared", ""))
+        s, j = self.js("GET", "/ui/api/presets/my%20setup/export?name=")
+        self.assertEqual((s, j["error"]), (400, "a preset name must be 1–60 characters"))
+
+    def test_preview_and_import(self):
+        self.save_night()
+        self.js("POST", "/ui/api/presets/night/activate")
+        r, file = self.export()  # a stored preset's config, not the live one
+        s, j = self.js("POST", "/ui/api/presets/preview", {**file, "name": "fresh"})
+        self.assertFalse(j["taken"])
+        s, j = self.js("POST", "/ui/api/presets/preview", file)  # its own name is already used
+        self.assertTrue(j["taken"])
+        s, j = self.js("POST", "/ui/api/presets", {"name": "imported", "tagline": "", "config": file["config"]})
+        self.assertEqual((s, j), (201, {"ok": True}))
+        st = self.js("GET", "/ui/api/state")[1]
+        self.assertEqual(st["preset"], "night")  # an import never activates
+        self.assertEqual([(p["name"], p["active"]) for p in st["presets"]],
+                         [("my setup", False), ("night", True), ("imported", False)])
+
+    def test_preview_refuses_bad_files(self):
+        s, j = self.js("POST", "/ui/api/presets/preview", {})
+        self.assertEqual((s, j["error"]), (400, "this isn't a Signaller preset"))
+        r, file = self.export()
+        s, j = self.js("POST", "/ui/api/presets/preview", {**file, "signaller_preset": 2})
+        self.assertEqual((s, j["error"]), (400, "made by a newer Signaller"))
+        cfg = self.js("GET", "/ui/api/state")[1]["config"]
+        bad = {**cfg, "rules": cfg["rules"] + [{"name": "bad", "kind": "dsl", "enabled": True,
+                                               "text": 'when text contains "x" go nowhere', "builtin": None}]}
+        s, j = self.js("POST", "/ui/api/presets/preview",
+                       {"signaller_preset": 1, "name": "x", "tagline": "", "exported": "2026-01-01", "config": bad})
+        self.assertEqual(s, 400)
+        self.assertIn("nowhere", j["error"])
+
+    def test_preview_lets_a_bad_name_be_fixed_before_add(self):
+        r, file = self.export()
+        s, j = self.js("POST", "/ui/api/presets/preview", {**file, "name": "preview"})
+        self.assertEqual((s, j["name"]), (200, "preview"))  # shown, so the panel can rename it
+        s, j = self.js("POST", "/ui/api/presets", {"name": "preview", "tagline": "", "config": j["config"]})
+        self.assertEqual((s, j["error"]), (400, "'preview' is a reserved preset name"))
+
+    def test_presets_non_object_config_is_400_with_a_reason(self):
+        for bad in ("a string", ["a", "list"], 5):
+            s, j = self.js("POST", "/ui/api/presets", {"name": "x", "tagline": "", "config": bad})
+            self.assertEqual((s, j["error"]), (400, "a preset's config must be an object"), bad)
+        s, j = self.js("POST", "/ui/api/presets", {"name": "x", "tagline": ""})  # no config: the current setup
+        self.assertEqual(s, 201)
+
+    def test_export_refuses_a_broken_config(self):
+        self.save_night()
+        self.app.presets["presets"][1]["config"] = {"version": 99, "downstreams": "oops"}
+        s, j = self.js("GET", "/ui/api/presets/night/export")
+        self.assertEqual(s, 400)
+        self.assertIn("broken", j["error"])
 
 
 def serve(do_GET):
@@ -470,7 +588,7 @@ class DownstreamApiTest(Fixture):
         self.assertEqual(self.l.seen[-1][2]["Authorization"], "Bearer sk-TYPED")
         self.assertEqual(self.add(id="bad", url="lemmi.example")[0], 400)  # no scheme
         self.assertEqual(self.js("PUT", "/ui/api/downstreams/lemmi/key", {"key": "sk-NEW"}), (200, {"key_set": True}))
-        self.assertEqual(self.app.keys.get("lemmi"), "sk-NEW")
+        self.assertEqual(self.app.keys.get("lemmi", self.l.url + "/v1/"), "sk-NEW")
         self.assertEqual(self.js("PUT", "/ui/api/downstreams/lemmi/key", {"key": ""})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/downstreams/nope/key", {"key": "k"})[0], 404)
         self.assertEqual(self.req("PUT", "/ui/api/downstreams/lemmi/key", {"key": "k"}, origin=None)[0].status, 403)

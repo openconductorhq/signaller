@@ -11,10 +11,12 @@
 <body>
 <div id="offline" class="offline" role="alert" hidden>Can't reach the router. Retrying…</div>
 <div id="banner" class="banner" role="status" hidden></div>
+<div id="keyBanner" class="banner" role="status" hidden></div>
 
 <main class="sb">
   <header class="top">
     <h1>signaller</h1>
+    <button type="button" class="presetgo" id="presetGo" hidden>running <b id="presetName"></b></button>
     <span class="who"><span id="who">connecting…</span> <span id="errs" class="errs" hidden></span></span>
     <div class="frame" id="lever" role="radiogroup" aria-label="Lever: where requests go">
       <button type="button" class="lever" role="radio" data-v="anthropic" data-t="anthropic" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
@@ -53,6 +55,24 @@
     <div class="mcell" data-t="anthropic"><div class="k">Anthropic · API prices<span class="sfx"></span></div><div class="n" id="nA">$0</div><div class="t" id="mA"></div><div class="t" id="lA"></div></div>
     <div class="mcell s" id="mcS"><div class="k">Saved vs all on Anthropic<span class="sfx"></span></div><div class="n" id="nS">–</div><div class="t" id="mS"></div></div>
   </div>
+
+  <section id="presets" aria-labelledby="prH">
+    <h2 id="prH">Presets</h2>
+    <p class="hint">A preset is a whole setup — tracks, rules, settings and prompts — saved under a name. Switching swaps it in; each preset keeps its own keys. The running preset's config is the live one.</p>
+    <div class="pcards" id="presetRows"></div>
+    <div id="impanel" class="editor impanel" hidden>
+      <h3>Import a preset</h3>
+      <p class="hint">Nothing changes until you add it: you see the tracks, the rules and what needs a key first.</p>
+      <div id="imPick">
+        <label class="fld">Choose a .json file <input type="file" id="imFile" accept=".json,application/json"></label>
+        <label class="fld" for="imText">…or paste the file's contents</label>
+        <textarea id="imText" class="imtext" rows="5" spellcheck="false" autocomplete="off" placeholder="paste an exported preset here"></textarea>
+      </div>
+      <p id="imErr" class="err" role="alert" hidden></p>
+      <div id="imView"></div>
+      <div class="edbtns imfoot"><button type="button" class="btn primary" id="imAdd" hidden>Add to my presets</button><button type="button" class="btn" id="imCancel">Cancel</button><span id="imKeys" class="imkeys" hidden></span></div>
+    </div>
+  </section>
 
   <section id="tracks" aria-labelledby="trH">
     <h2 id="trH">Tracks</h2>

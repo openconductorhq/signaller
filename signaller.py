@@ -18,14 +18,16 @@ from urllib.parse import urlsplit
 
 import console
 import overrides  # after routing: overrides imports routing
+import presets
 from sessions import SessionDirectory, claude_dir
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
+from keys import host_of
 from prices import Prices, parse_valar
-from routing import (has_images, session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
-                     references, route as decide_route, track_model, track_window)
-from keys import Keys
+from routing import (DEFAULT_CONFIG, has_images, session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
+                     references, route as decide_route, track_model, track_window, tracks)
+from keys import Keys, write_json
 from store import NullStore, Store, load_console_config, save_console_config
 
 @dataclass
@@ -74,7 +76,7 @@ def upstream(app: "App", track: str, routing=None) -> tuple[str, str, str, Downs
     if track == "anthropic":
         return "Anthropic", app.cfg.anthropic_url, "", None
     ds = downstream(routing or app.routing, track)
-    return (ds.name, ds.url, app.keys.get(track), ds) if ds else (track, "", "", None)
+    return (ds.name, ds.url, app.keys.get(track, ds.url), ds) if ds else (track, "", "", None)
 
 
 def upstream_headers(headers: Iterable[tuple[str, str]], key: str) -> list[tuple[str, str]]:
@@ -200,13 +202,19 @@ class App:
             self.banner = " ".join(filter(None, [self.banner, "Switched off because they sent traffic to Local, which is gone: %s."
                                                  % ", ".join(self.routing.migrated_off)]))
         self._rlock = threading.Lock()
-        self.session_levers = {}  # session id -> lever /signaller chose for that session only
+        self.lever_path = os.path.join(config_dir, "session_levers.json")
+        self.session_levers = self._load_levers()  # session id -> lever /signaller chose for that session only
         self.notices = {}  # session id -> {"turn", "text"}: the plugin shows it once (an image fallback)
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
         self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
         self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
         self.keys = Keys(config_dir)
+        self.migrate_keys()
         self.seed()
+        self.presets, pbanner = presets.load(config_dir)
+        if pbanner:
+            self.banner = " ".join(filter(None, [self.banner, pbanner]))
+        self._finish_switch()
         self.classifier = Classifier(self._classifier_upstream)
         try:
             # SIGNALLER_STATS_DIR: SQLite needs a real local disk, not a folder shared from the host (see compose.yaml)
@@ -221,6 +229,35 @@ class App:
         self.prices = Prices(config_dir)
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
 
+    def migrate_keys(self) -> None:
+        """Tie the keys still without a host (an old flat file's, or ones a start with an unreadable console.json
+        left hanging) to the current setup. Never raises: a failed write is bannered and retried at the next start.
+        A default-fallback config is never migrated against — its hosts aren't the person's."""
+        try:
+            if self.routing is not DEFAULT_CONFIG:
+                self.keys.migrate({d.id: d.url for d in self.routing.downstreams})
+        except OSError as e:
+            print("key migration not written: %s" % type(e).__name__, file=sys.stderr, flush=True)
+            self.banner = " ".join(filter(None, [self.banner,
+                                                "Your downstream keys couldn't be written; they're retried at the next start."]))
+
+    def _finish_switch(self) -> None:
+        """The active preset still carrying its config means activate_preset was interrupted between its two
+        writes: finish it — put that config into console.json, then clear it. Never raises: a failure is
+        bannered and the store stays as found, so the next start tries again."""
+        entry = next((p for p in self.presets["presets"] if p["name"] == self.presets["active"]), None)
+        if not entry or entry["config"] is None:
+            return
+        try:
+            with self._rlock:  # no server threads yet; the lock for the same invariant as every other write
+                self._put(replace(config_from_json(entry["config"]), seeded=True, migrated_off=()))
+                entry["config"] = None
+                self._save_presets()
+        except Exception as e:
+            print("preset switch not finished: %s" % type(e).__name__, file=sys.stderr, flush=True)
+            self.banner = " ".join(filter(None, [self.banner,
+                                                 "A preset switch was interrupted and couldn't be finished here; switch presets once more from the console."]))
+
     def _classifier_upstream(self, id: str) -> tuple[str, str, str] | None:
         _, url, key, ds = upstream(self, id)
         return (url, key, ds.kind) if ds else None
@@ -233,8 +270,9 @@ class App:
             return
         url, key = self.cfg.env_valar
         dss = tuple(replace(d, url=url) if d.id == "valar" and url else d for d in self.routing.downstreams)
-        if key and downstream(self.routing, "valar"):
-            self.keys.set("valar", key)
+        vd = next((d for d in dss if d.id == "valar"), None)
+        if key and vd:
+            self.keys.set("valar", vd.url, key)
         self.set_routing(replace(self.routing, downstreams=dss, seeded=True))
 
     def refresh_prices(self) -> None:
@@ -261,6 +299,7 @@ class App:
             while True:
                 self.refresh_prices()
                 self.prune_settings()
+                self.prune_levers()
                 time.sleep(every)
         threading.Thread(target=loop, daemon=True).start()
 
@@ -310,11 +349,54 @@ class App:
         return self._turn_hours[turn_key]
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
-        # ponytail: memory only, a restart drops them (the status line shows it); one small entry per session that used /signaller
-        if lever:
-            self.session_levers[sid] = lever
-        else:
-            self.session_levers.pop(sid, None)
+        """One small entry per session that used /signaller; saved so a restart keeps it."""
+        if self.session_levers.get(sid) == lever:  # unchanged: skip the fsync (a re-assert, or a reset of a session with none)
+            return
+        with self._rlock:
+            if lever:
+                self.session_levers[sid] = lever
+            else:
+                self.session_levers.pop(sid, None)
+            write_json(self.lever_path, self.session_levers)
+
+    def _load_levers(self) -> dict[str, str]:
+        try:
+            with open(self.lever_path) as f:
+                levers = json.load(f)
+            if not (isinstance(levers, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in levers.items())):
+                raise ValueError("not a {sid: lever} object")
+            return levers
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:  # reason only, never the file's text; no banner: the levers are a convenience
+            print("session levers unreadable: %s" % type(e).__name__, file=sys.stderr, flush=True)
+            return {}
+
+    def lever_for(self, sid: str | None) -> str | None:
+        """The session's own /signaller lever, but only one the active setup can still follow (a restart, or a preset
+        switch, may have dropped the track it named); otherwise the global lever applies. The raw entry is kept."""
+        lever = self.session_levers.get(sid or "")
+        if not lever:  # the common case: no entry, no tracks() scan
+            return None
+        return lever if lever == "rules" or lever in tracks(self.routing) else None
+
+    def prune_levers(self) -> None:
+        """Drop session ids not seen for a week (no sessions row counts as gone too; same rule as overrides.prune).
+        Never raises; saves only when something went."""
+        try:
+            if isinstance(self.store, NullStore) or not self.session_levers:
+                return
+            last = self.store.session_last_seen(list(self.session_levers))  # the DB query stays outside the lock
+            now = time.time()
+            dead = [sid for sid in self.session_levers if overrides.gone(last.get(sid.lower()), now)]
+            with self._rlock:  # re-check: a /signaller since the query may have revived one
+                dead = [sid for sid in dead if sid in self.session_levers]
+                if dead:
+                    for sid in dead:
+                        self.session_levers.pop(sid, None)
+                    write_json(self.lever_path, self.session_levers)
+        except Exception as e:
+            print("lever prune failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
 
     def set_routing(self, new: RoutingConfig) -> None:
         with self._rlock:  # file and memory must agree under concurrent PUTs
@@ -334,11 +416,13 @@ class App:
             new = config_from_json(j)
             self._put(new)
             if key:
-                self.keys.set(d["id"], key)
+                self.keys.set(d["id"], d["url"], key)
+            self.migrate_keys()  # a key left without a host (an old flat file's) ties to the downstream just added
             return new.downstreams[-1]
 
     def delete_downstream(self, id: str) -> list[str]:
-        """Remove a downstream, its own shadow and its key; if anything still points at it, remove nothing and return those."""
+        """Remove a downstream, its own shadow and its key; if anything still points at it, remove nothing and return those.
+        The key survives when an inactive preset still has the same id at the same host."""
         with self._rlock:
             refs = references(self.routing, id, self.session_levers)
             if refs:
@@ -346,9 +430,106 @@ class App:
             j = config_to_json(self.routing)
             j["downstreams"] = [d for d in j["downstreams"] if d["id"] != id]
             del j["doubling"]["shadow"][id]
+            ds = downstream(self.routing, id)  # before _put: the key is tied to the url it was set for
             self._put(config_from_json(j))
-            self.keys.delete(id)
+            shared = any(isinstance(d, dict) and d.get("id") == id and host_of(d.get("url", "")) == host_of(ds.url)
+                         for p in self.presets["presets"]
+                         if isinstance(p.get("config"), dict) and p["name"] != self.presets["active"]
+                         for d in p["config"].get("downstreams", []))
+            if ds and not shared:
+                self.keys.delete(id, ds.url)
             return []
+
+    def preset_names(self) -> list[str]:
+        return [p["name"] for p in self.presets["presets"]]
+
+    def _preset(self, name: str) -> dict:  # caller holds _rlock
+        entry = next((p for p in self.presets["presets"] if p["name"] == name), None)
+        if entry is None:
+            raise KeyError(name)
+        return entry
+
+    def _save_presets(self) -> None:  # caller holds _rlock
+        presets.save(self.config_dir, self.presets)
+
+    def save_preset(self, name: str, tagline: str) -> None:
+        """Save the current setup as a new inactive preset: session-bound lines and machine state dropped."""
+        self.add_preset(name, tagline, config_to_json(self.routing))
+
+    def add_preset(self, name: str, tagline: str, config: dict) -> None:
+        """Add an inactive preset from a config JSON (the current setup, or an import): session-bound lines and
+        machine state dropped. ValueError, nothing stored, when the config wouldn't load."""
+        with self._rlock:
+            new = presets.validated(config)  # ValueError propagates; nothing is stored then
+            name, tagline = presets.check_name(name), presets.check_tagline(tagline)
+            if name in self.preset_names():
+                raise ValueError(f"a preset named {name} exists")
+            self.presets["presets"].append({"name": name, "tagline": tagline, "config": config_to_json(new)})
+            self._save_presets()
+
+    def activate_preset(self, name: str) -> None:
+        """Switch setups, crash-safe at every step: (a) presets.json with the previous preset's config set to a
+        snapshot of the live config, active moved to the target — which still carries its own config; (b) the
+        target's config put into console.json (rev bumps); (c) presets.json with the target's config cleared.
+        A crash anywhere leaves a state the loader finishes; a failed put restores the store as it was.
+        KeyError on an unknown name."""
+        with self._rlock:
+            if name == self.presets["active"]:
+                return
+            target = self._preset(name)
+            new = replace(config_from_json(target["config"]), seeded=True, migrated_off=())
+            prev, prev_name = self._preset(self.presets["active"]), self.presets["active"]
+            try:
+                prev["config"] = config_to_json(self.routing)  # the person's own setup, before it's replaced
+                self.presets["active"] = name
+                self._save_presets()  # (a)
+                self._put(new)  # (b)
+            except Exception:
+                # the switch didn't happen: active back to the previous preset, its snapshot dropped (it is the
+                # live config), the target keeps its own. If this undo-save fails too, presets.json still shows
+                # the switch — the loader finishes it at the next start.
+                self.presets["active"] = prev_name
+                prev["config"] = None
+                try:
+                    self._save_presets()
+                except OSError:
+                    pass
+                raise
+            target["config"] = None
+            self._save_presets()  # (c)
+        threading.Thread(target=self.refresh_prices, daemon=True).start()  # prices/models off the request path: the switched-in ids may sit at new hosts
+
+    def delete_preset(self, name: str) -> None:
+        with self._rlock:
+            if name == self.presets["active"]:
+                raise ValueError(f"{name} is active; switch to another preset first")
+            self.presets["presets"].remove(self._preset(name))
+            self._save_presets()
+
+    def rename_preset(self, old: str, name: str, tagline: str) -> None:
+        """Edit any preset's name and tagline, active or not."""
+        with self._rlock:
+            entry = self._preset(old)
+            name, tagline = presets.check_name(name), presets.check_tagline(tagline)
+            if name != old and name in self.preset_names():
+                raise ValueError(f"a preset named {name} exists")
+            entry["name"], entry["tagline"] = name, tagline
+            if self.presets["active"] == old:
+                self.presets["active"] = name
+            self._save_presets()
+
+    def preset_config(self, name: str) -> dict:
+        """The config JSON of any preset; the active one's is the live config. KeyError on an unknown name."""
+        with self._rlock:
+            if name == self.presets["active"]:
+                return config_to_json(self.routing)
+            return self._preset(name)["config"]
+
+    def preset_meta(self, name: str) -> tuple[str, str]:
+        """(name, tagline) of a preset, under the lock. KeyError on an unknown name."""
+        with self._rlock:
+            p = self._preset(name)
+            return p["name"], p["tagline"]
 
 
 def default_config_dir() -> str:
@@ -404,7 +585,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             except (ValueError, AttributeError):
                 pass
             any_sid = session_of(self.headers, req)
-            lever = app.session_levers.get(any_sid)
+            lever = app.lever_for(any_sid)
             if lever:  # /signaller set this session's own lever
                 routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
@@ -581,7 +762,7 @@ def main() -> None:
     app.start_price_refresh()  # its thread also prunes settings on its first pass
     print("listening on %s:%d; anthropic=%s downstreams=%s" % (
         cfg.listen_host, cfg.listen_port, cfg.anthropic_url,
-        ", ".join("%s (%s)" % (d.id, "key set" if app.keys.has(d.id) else "no key") for d in app.routing.downstreams)),
+        ", ".join("%s (%s)" % (d.id, "key set" if app.keys.has(d.id, d.url) else "no key") for d in app.routing.downstreams)),
         file=sys.stderr, flush=True)
     try:
         srv.serve_forever()
