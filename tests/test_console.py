@@ -199,6 +199,12 @@ class ConsoleTest(Fixture):
         self.assertEqual(j["lever"], "rules")
         self.assertEqual(j["session"], None)
 
+    def test_state_serves_only_levers_the_setup_can_follow(self):
+        self.app.session_levers["s1"] = "valar"
+        self.app.session_levers["s2"] = "lemmi"  # a preset switch or restart dropped that track
+        self.assertEqual(self.js("GET", "/ui/api/state")[1]["session_levers"], {"s1": "valar"})
+        self.assertEqual(self.app.session_levers, {"s1": "valar", "s2": "lemmi"})  # the raw entry is kept
+
     def test_prompts_saved_and_served_to_the_plugin(self):
         s, j = self.put_cfg(prompts=[{"name": "execute", "text": "1. /signaller anthropic\n2. /simplify"}])
         self.assertEqual(s, 200)
@@ -450,6 +456,10 @@ class ConsoleTest(Fixture):
         self.assertEqual((j["name"], j["tagline"]), ("Shared", "for a friend"))
         s, j = self.js("GET", "/ui/api/presets/my%20setup/export?name=" + "x" * 61)  # a bad override answers with the reason
         self.assertEqual((s, j["error"]), (400, "a preset name must be 1–60 characters"))
+        r, j = self.export("?name=Shared&tagline=")  # a blank value means blank, not "the stored one again"
+        self.assertEqual((j["name"], j["tagline"]), ("Shared", ""))
+        s, j = self.js("GET", "/ui/api/presets/my%20setup/export?name=")
+        self.assertEqual((s, j["error"]), (400, "a preset name must be 1–60 characters"))
 
     def test_preview_and_import(self):
         self.save_night()
@@ -486,6 +496,13 @@ class ConsoleTest(Fixture):
         self.assertEqual((s, j["name"]), (200, "preview"))  # shown, so the panel can rename it
         s, j = self.js("POST", "/ui/api/presets", {"name": "preview", "tagline": "", "config": j["config"]})
         self.assertEqual((s, j["error"]), (400, "'preview' is a reserved preset name"))
+
+    def test_presets_non_object_config_is_400_with_a_reason(self):
+        for bad in ("a string", ["a", "list"], 5):
+            s, j = self.js("POST", "/ui/api/presets", {"name": "x", "tagline": "", "config": bad})
+            self.assertEqual((s, j["error"]), (400, "a preset's config must be an object"), bad)
+        s, j = self.js("POST", "/ui/api/presets", {"name": "x", "tagline": ""})  # no config: the current setup
+        self.assertEqual(s, 201)
 
     def test_export_refuses_a_broken_config(self):
         self.save_night()

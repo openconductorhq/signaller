@@ -246,7 +246,9 @@ def state(app, query=None):
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
             "downstreams": {d.id: {"key_set": app.keys.has(d.id, d.url), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
-            "recent_count": len(app.recent), "session_levers": dict(app.session_levers),
+            "recent_count": len(app.recent),
+            # effective levers only (lever_for): a raw entry the active setup can't follow would show a lever the router ignores
+            "session_levers": {s: l for s, l in ((s, app.lever_for(s)) for s in app.session_levers) if l},
             "collisions": app.collisions(),
             "preset": app.presets["active"], "presets": rows,
             "active_windows": overrides.active_windows(app.routing.settings, time.localtime().tm_hour),
@@ -538,5 +540,5 @@ def _handle(h, app):
         body = json.loads(raw) if raw else {}
     except ValueError:
         raise Err(400, "body is not valid JSON")
-    out = api(h, app, h.command, u.path, parse_qs(u.query), body)
+    out = api(h, app, h.command, u.path, parse_qs(u.query, keep_blank_values=True), body)  # blanks kept: an emptied export tagline is meant
     send_json(h, *(out if isinstance(out, tuple) else (200, out)))
