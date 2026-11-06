@@ -4,7 +4,10 @@ const TOOL = 'mcp__signaller__signaller_lever'
 const LEVER = JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] })
 
 // one stub router per test: everything the hooks need, with the test's own http.fetch
-const stub = ($: any, on: any, http: (e: any) => any) => {
+const stub = ($: any, on: any, http: (e: any) => any, store = new Map<string, unknown>()) => {
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => (store.set(e.key, e.value), { value: undefined }))
+  on('store.delete', (_, e) => (store.delete(e.key), { value: undefined }))
   on('command.register', () => ({ value: { command: 'signaller' } }))
   on('tool.register', () => ({ value: { tool: TOOL } }))
   on('session.id', () => ({ value: 's1' }))
@@ -219,4 +222,15 @@ test('/signaller run fills the prompt box with a saved prompt; sent, its /signal
   await $.prompt.submit({ text: filled[0]! })  // the person presses Enter
   expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toBeUndefined()
   expect((await $.tool.call({ tool: TOOL, lever: 'rules' })).deny).toBeUndefined()
+})
+
+test('typed steps outlive a restart, and quoting /signaller run or name keeps them', async ($, on) => {
+  const store = new Map<string, unknown>([['pending:s1', ['lever anthropic', 'lever rules']]])  // saved before a restart
+  await stub($, on, () => ({ value: { ok: true, status: 200, text: LEVER } }), store)
+
+  await $.prompt.submit({ text: 'status? I sent /signaller run execute and /signaller name presets earlier' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toBeUndefined()
+  expect(store.get('pending:s1')).toEqual(['lever rules'])
+  expect((await $.tool.call({ tool: TOOL, lever: 'rules' })).deny).toBeUndefined()
+  expect(store.has('pending:s1')).toBe(false)  // used up: nothing left behind
 })
