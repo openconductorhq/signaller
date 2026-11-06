@@ -411,6 +411,8 @@ def api(h, app, method, path, query, body):
             raise Err(400, "made by a newer Signaller")
         try:
             new = config_from_json(presets.portable(body["config"]))
+            presets.check_name(body.get("name"))  # the preview flags what Add would refuse
+            presets.check_tagline(body.get("tagline"))
         except ValueError as e:
             raise Err(400, str(e))
         return {"name": body.get("name"), "tagline": body.get("tagline"), "exported": body.get("exported"),
@@ -436,8 +438,13 @@ def api(h, app, method, path, query, body):
             tagline = presets.check_tagline((query.get("tagline") or [entry["tagline"]])[0])
         except ValueError as e:
             raise Err(400, str(e))
+        config = presets.portable(app.preset_config(name))
+        try:
+            config_from_json(config)  # never export a file the importer would reject
+        except ValueError as e:
+            raise Err(400, "this preset's config is broken and can't be exported: %s" % e)
         out = {"signaller_preset": presets.PRESET_FORMAT, "name": out_name, "tagline": tagline,
-               "exported": time.strftime("%Y-%m-%d"), "config": presets.portable(app.preset_config(name))}
+               "exported": time.strftime("%Y-%m-%d"), "config": config}
         slug = re.sub(r"[^a-z0-9]+", "-", out_name.lower()).strip("-") or "preset"
         return 200, out, {"Content-Disposition": 'attachment; filename="%s.signaller.json"' % slug}
     m = re.fullmatch(r"/ui/api/presets/([^/]+)", path)

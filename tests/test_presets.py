@@ -119,10 +119,52 @@ class PresetTest(unittest.TestCase):
             app.delete_preset("my setup")
 
     def test_reserved_names_refused(self):
-        # preview/activate/export would shadow the /ui/api/presets verb routes, so no preset can take them
+        # the names are reserved to keep /ui/api/presets/<name> URLs unambiguous, not because they'd shadow anything
         for name in ("preview", "activate", "export", "Preview"):
             with self.assertRaises(ValueError):
                 presets.check_name(name)
+
+    def test_tagline_and_name_reject_control_characters(self):
+        with self.assertRaises(ValueError):
+            presets.check_tagline("two\nlines")
+        with self.assertRaises(ValueError):
+            presets.check_name("two\nlines")
+        self.assertEqual(presets.check_tagline("still fine"), "still fine")
+
+    def test_unwritable_config_dir_falls_back(self):
+        saved = presets.save
+
+        def boom(d, s):
+            raise OSError("read-only")
+
+        presets.save = boom
+        try:
+            store, banner = presets.load(self.dir)
+        finally:
+            presets.save = saved
+        self.assertEqual([p["name"] for p in store["presets"]], ["my setup"])
+        self.assertIn("couldn't be written", banner)
+
+    def test_failed_put_keeps_the_old_preset_stored(self):
+        app = self.app()
+        app.save_preset("b", "")
+        before = config_to_json(app.routing)
+
+        def boom(_new):
+            raise OSError("disk full")
+
+        app._put = boom
+        with self.assertRaises(OSError):
+            app.activate_preset("b")
+        with open(os.path.join(self.dir, "presets.json")) as f:
+            store = json.load(f)
+        self.assertEqual(store["active"], "my setup")  # the switch didn't happen
+        self.assertEqual(store["presets"][0]["config"], before)  # and "my setup"'s own config is stored
+        self.assertIsNone(app.presets["presets"][0]["config"])  # memory matches the loader's invariant again
+        app2 = App(cfg(), self.dir)  # a restart after such a crash finds the old setup intact
+        self.addCleanup(app2.store.close)
+        self.assertEqual(app2.preset_names(), ["my setup", "b"])
+        self.assertFalse(app2.banner)  # no fallback banner: the store on disk is valid
 
 
 if __name__ == "__main__":

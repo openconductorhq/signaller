@@ -10,10 +10,11 @@ PRESET_FORMAT = 1
 NAME_MAX = 60
 TAGLINE_MAX = 200
 DEFAULT_NAME = "my setup"
-RESERVED = ("preview", "activate", "export")  # they'd shadow the /ui/api/presets verb routes on PUT/DELETE
+RESERVED = ("preview", "activate", "export")  # reserved to keep /ui/api/presets/<name> URLs unambiguous (route order already stops any real shadowing)
 BAD_SUFFIX = ".bad"
 BAD_BANNER = ('Your presets couldn\'t be read; they were moved to presets.json.bad '
               'and your current setup is kept as "my setup".')
+SAVE_BANNER = 'Your presets file couldn\'t be written; presets won\'t survive a restart, but your current setup is kept.'
 
 
 def fresh() -> dict:
@@ -22,11 +23,14 @@ def fresh() -> dict:
 
 def _valid(store) -> bool:
     ps = store.get("presets") if isinstance(store, dict) else None
+    # An inactive preset always carries its config. The active one's, when set, is a snapshot left by an
+    # interrupted switch (activate_preset stores it before console.json changes): it is ignored — the live
+    # config is console.json's — and rewritten by the next switch.
     return (isinstance(ps, list) and isinstance(store.get("active"), str) and bool(ps)
             and all(isinstance(p, dict) and isinstance(p.get("name"), str) and isinstance(p.get("tagline"), str)
                     and (p.get("config") is None or isinstance(p.get("config"), dict)) for p in ps)
             and len({p["name"] for p in ps}) == len(ps)
-            and all((p["config"] is None) == (p["name"] == store["active"]) for p in ps))
+            and all(p["config"] is not None or p["name"] == store["active"] for p in ps))
 
 
 def load(config_dir: str) -> tuple[dict, str | None]:
@@ -52,7 +56,11 @@ def load(config_dir: str) -> tuple[dict, str | None]:
             except OSError:
                 pass
         store = fresh()
-        save(config_dir, store)
+        try:
+            save(config_dir, store)
+        except OSError as e:  # an unwritable dir must never cost the router its start
+            print("presets.json unwritable: %s" % type(e).__name__, file=sys.stderr, flush=True)
+            banner = banner or SAVE_BANNER
     return store, banner
 
 
@@ -75,10 +83,16 @@ def portable(config_json: dict) -> dict:
     return out
 
 
+def _single_line(s: str) -> bool:
+    return not any(ord(c) < 32 or ord(c) == 127 for c in s)  # no newlines or control characters
+
+
 def check_name(name: str) -> str:
     name = name.strip() if isinstance(name, str) else ""
     if not 1 <= len(name) <= NAME_MAX:
         raise ValueError(f"a preset name must be 1–{NAME_MAX} characters")
+    if not _single_line(name):
+        raise ValueError("a preset name can't contain line breaks or control characters")
     if name.lower() in RESERVED:
         raise ValueError(f"'{name}' is a reserved preset name")
     return name
@@ -87,4 +101,6 @@ def check_name(name: str) -> str:
 def check_tagline(tagline: str) -> str:
     if not isinstance(tagline, str) or len(tagline) > TAGLINE_MAX:
         raise ValueError(f"a preset tagline must be at most {TAGLINE_MAX} characters")
+    if not _single_line(tagline):
+        raise ValueError("a preset tagline can't contain line breaks or control characters")
     return tagline

@@ -444,8 +444,16 @@ class App:
                 return
             target = self._preset(name)
             new = replace(config_from_json(target["config"]), seeded=True, migrated_off=())
-            self._preset(self.presets["active"])["config"] = config_to_json(self.routing)
-            self._put(new)
+            prev = self._preset(self.presets["active"])
+            # presets.json first: the de-activating preset's config is stored before console.json changes, so a
+            # crash in between only undoes the switch — the loader ignores the active entry's config snapshot.
+            prev["config"] = config_to_json(self.routing)
+            self._save_presets()
+            try:
+                self._put(new)
+            except Exception:
+                prev["config"] = None  # the switch didn't happen; memory matches the loader's invariant again
+                raise
             target["config"] = None
             self.presets["active"] = name
             self._save_presets()
