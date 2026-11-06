@@ -35,13 +35,39 @@ class KeysTest(unittest.TestCase):
         k.delete("lemmi", "https://b.example")
         self.assertEqual(Keys(self.d).get("lemmi", "https://a.example"), "KA")
 
+    def test_key_never_crosses_schemes(self):
+        k = Keys(self.d)
+        k.set("lemmi", "https://a.example", "KS")
+        self.assertEqual(k.get("lemmi", "https://a.example"), "KS")
+        self.assertEqual(k.get("lemmi", "http://a.example"), "")   # an http URL on the same host: no https key
+        k.set("lemmi", "http://a.example", "KH")
+        self.assertEqual((k.get("lemmi", "https://a.example"), k.get("lemmi", "http://a.example")), ("KS", "KH"))
+        k = Keys(self.d)  # re-read: both slots survive, each meaning its own scheme
+        self.assertEqual((k.get("lemmi", "https://a.example"), k.get("lemmi", "http://a.example")), ("KS", "KH"))
+        k.delete("lemmi", "http://a.example")
+        self.assertEqual(Keys(self.d).get("lemmi", "https://a.example"), "KS")
+        self.assertEqual(Keys(self.d).get("lemmi", "http://a.example"), "")
+
     def test_old_flat_file_migrates_to_current_hosts(self):
         with open(self.p, "w") as f:
             json.dump({"valar": "VK", "gone": "GK"}, f)
         k = Keys(self.d)
         k.migrate({"valar": "https://api.valarhq.ai"})
         self.assertEqual(Keys(self.d).get("valar", "https://api.valarhq.ai"), "VK")
-        self.assertEqual(Keys(self.d).get("gone", "https://x"), "")   # no downstream to tie it to: dropped
+        # no downstream to tie "gone" to: kept under the unknown slot, not dropped —
+        self.assertEqual(Keys(self.d).get("gone", "https://x"), "")
+        self.assertEqual(Keys(self.d).keys["gone"], {"": "GK"})
+        Keys(self.d).migrate({"gone": "https://x"})  # — and tied when its downstream appears
+        self.assertEqual(Keys(self.d).get("gone", "https://x"), "GK")
+
+    def test_migrate_never_over_a_key_set_since(self):
+        with open(self.p, "w") as f:
+            json.dump({"lemmi": "OLD"}, f)
+        k = Keys(self.d)  # pending; a console-set key for the same id+host is newer and stays
+        k.set("lemmi", "https://x", "NEW")
+        k.migrate({"lemmi": "https://x"})
+        self.assertEqual(Keys(self.d).get("lemmi", "https://x"), "NEW")
+        self.assertEqual(Keys(self.d).keys["lemmi"], {"x": "NEW"})  # the old one superseded, not beside it
 
     def test_migrate_noop_on_new_shape(self):
         Keys(self.d).set("a", "https://x", "ka")

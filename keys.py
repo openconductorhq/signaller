@@ -8,9 +8,15 @@ import threading
 from urllib.parse import urlsplit
 
 
+UNKNOWN = ""  # the slot a key sits under while no host is known for it: no URL maps there, a later migrate ties it
+
+
 @functools.lru_cache(maxsize=64)
 def host_of(url: str) -> str:
-    return urlsplit(url).netloc.lower()
+    """The slot a key lives under, by origin: https under the bare host (a bare host in an old file means
+    https), http under scheme://host — so a key never leaves for a URL of another scheme."""
+    u = urlsplit(url)
+    return u.netloc.lower() if u.scheme == "https" else "http://" + u.netloc.lower()
 
 
 def write_json(path: str, obj, indent=None) -> None:
@@ -59,12 +65,27 @@ class Keys:
             return {}
 
     def migrate(self, hosts: dict[str, str]) -> None:
-        """Tie the keys of an old flat file to the hosts of the current setup; an id with no downstream is dropped.
-        A no-op once the file is in the new shape."""
+        """Tie each key still without a host — an old flat file's, or one a start left under the unknown slot —
+        to the hosts of the current setup. An id with no downstream here is kept under the unknown slot, tied
+        by a later migrate; a key the person set for that host since stays theirs. Never loses a key."""
         with self.lock:
-            if self.pending is None:
+            old = dict(self.pending or {})
+            for i, d in self.keys.items():  # keys tied earlier but left waiting (a start with no host for them)
+                if UNKNOWN in d and i not in old:
+                    old[i] = d[UNKNOWN]
+            if not old:
+                self.pending = None
                 return
-            self._save({i: {host_of(hosts[i]): key} for i, key in self.pending.items() if hosts.get(i)})
+            out = {i: dict(d) for i, d in self.keys.items()}
+            for i, key in old.items():
+                d = out.setdefault(i, {})
+                if hosts.get(i):
+                    d.setdefault(host_of(hosts[i]), key)  # never over a key set for that host since
+                    d.pop(UNKNOWN, None)
+                else:
+                    d.setdefault(UNKNOWN, key)
+            if out != self.keys:
+                self._save(out)
             self.pending = None
 
     def get(self, id: str, url: str) -> str:
@@ -73,14 +94,24 @@ class Keys:
     def has(self, id: str, url: str) -> bool:
         return bool(self.get(id, url))
 
+    def _carry(self, keys: dict) -> dict:  # caller holds self.lock
+        """The flat file's still-untied ids ride along under the unknown slot, so a write while they wait
+        never drops them off the file."""
+        if not self.pending:
+            return keys
+        out = dict(keys)
+        for i, key in self.pending.items():
+            out.setdefault(i, {}).setdefault(UNKNOWN, key)
+        return out
+
     def set(self, id: str, url: str, key: str) -> None:
         with self.lock:  # build inside the lock: two concurrent sets must both land
-            self._save({**self.keys, id: {**self.keys.get(id, {}), host_of(url): key}})
+            self._save(self._carry({**self.keys, id: {**self.keys.get(id, {}), host_of(url): key}}))
 
     def delete(self, id: str, url: str) -> None:
         with self.lock:
             d = {h: k for h, k in self.keys.get(id, {}).items() if h != host_of(url)}
-            self._save({**self.keys, id: d} if d else {k: v for k, v in self.keys.items() if k != id})
+            self._save(self._carry({**self.keys, id: d} if d else {k: v for k, v in self.keys.items() if k != id}))
 
     def _save(self, keys: dict) -> None:  # caller holds self.lock
         write_json(self.path, keys)
