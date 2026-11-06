@@ -12,6 +12,7 @@ const label = (t) => NAME(t) + (gone(t) ? ", removed" : "");
 const col = (t) => t === "anthropic" ? "var(--anth)" : dsOf(t) ? dsOf(t).color : "var(--off)";
 const cv = (t) => "--c:" + col(t);
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const scrollTo = (node, opts) => node.scrollIntoView({ ...opts, behavior: reduceMotion.matches ? "auto" : "smooth" });
 
 const SVG = new Set(["circle", "path", "text", "tspan"]);
 function el(tag, attrs, ...kids) {
@@ -222,7 +223,7 @@ function applyState(st) {
   renderCollisions();  // every poll: /signaller or the picker can change them without this tab's config JSON changing
   $("presetGo").hidden = !st.preset;
   $("presetName").textContent = st.preset || "";
-  renderKeyBanner(st.missing_keys);
+  renderKeyBanner((st.presets.find((p) => p.active) || {}).missing_keys);
   renderPresets();
   if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /signaller at any time
 }
@@ -800,22 +801,12 @@ $("prAdd").addEventListener("click", () => {
 /* presets: saved setups, one card each; the active one's config is the live one */
 // Which card shows an inline form: the save-as form, or a preset's edit / export / delete confirm.
 const PUI = { save: false, edit: null, exp: null, del: null };
+// one inline form at a time: clear the others, set one (k null clears all), redraw
+const setForm = (k, v) => { PUI.save = false; PUI.edit = PUI.exp = PUI.del = null; if (k) PUI[k] = v; renderPresets(true); };
 let presetKey = "", keyBannerKey = "";
-// A preset call changes the config on the server: reload it (even after an error or a timeout),
-// so the next config PUT starts from the switched-in preset, as dsCall does.
-async function presetCall(method, path, body) {
-  let r, err = null;
-  try { r = await api(method, path, body, 15000); } catch (e) { err = e; }
-  try {
-    const st = await api("GET", "state" + qs(sessQ(), spanQ()));
-    applyState(st);
-    cfg = st.config;
-    renderConfig(true);
-  } catch (e) { if (!err) throw e; }  // the call's own error is the one to show
-  if (err) throw err;
-  return r;
-}
-$("presetGo").addEventListener("click", () => $("presets").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" }));
+// A preset call changes the config on the server: dsCall reloads it (even after an error or a timeout),
+// so the next config PUT starts from the switched-in preset.
+$("presetGo").addEventListener("click", () => scrollTo($("presets"), {}));
 function renderKeyBanner(mk) {
   const key = JSON.stringify(mk || []);
   if (key === keyBannerKey) return;
@@ -824,13 +815,18 @@ function renderKeyBanner(mk) {
   if (!mk || !mk.length) return;
   const ns = mk.map(NAME);
   $("keyBanner").replaceChildren(ns.length === 1 ? `${ns[0]} needs a key: enter it in Tracks` : `${ns.join(", ")} need keys: enter them in Tracks`, " — ",
-    el("button", { type: "button", class: "linkish", onclick: () => $("tracks").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" }) }, "Tracks"));
+    el("button", { type: "button", class: "linkish", onclick: () => scrollTo($("tracks"), {}) }, "Tracks"));
 }
 const summaryLine = (s) => s && [plural(s.rules || 0, "rule"),
-  (s.downstreams || []).length && (s.downstreams || []).map((d) => dsOf(d) ? dsOf(d).name : d).join(", "),
+  (s.downstreams || []).length && (s.downstreams || []).map(NAME).join(", "),
   plural(s.settings || 0, "schedule line"), plural(s.prompts || 0, "prompt")].filter(Boolean).join(" · ");
-const keyLine = (ids) => { const ns = ids.map((x) => dsOf(x) ? dsOf(x).name : x); return `${ns.join(", ")} ${ids.length === 1 ? "needs" : "need"} a key`; };
+const keyLine = (ids) => `${ids.map(NAME).join(", ")} ${ids.length === 1 ? "needs" : "need"} a key`;
 const perr = () => el("p", { class: "err", role: "alert", hidden: true });
+// the name+tagline input pair every preset form edits (cls: the import panel's own classes)
+const nameTag = (nl, tl, k, p, cls) => [
+  el("input", { class: cls && cls[0], value: (p && p.name) || "", placeholder: "Name", "aria-label": nl, autocomplete: "off", spellcheck: "false", "data-k": k + "name" }),
+  el("input", { class: cls && cls[1], value: (p && p.tagline) || "", placeholder: "Tagline: what this is good for", "aria-label": tl, autocomplete: "off", spellcheck: "false", "data-k": k + "tag" }),
+];
 const showPresetErr = (e, err) => showErr(err, e.status === 400 || e.status === 404 ? e.message : "Couldn't save: " + e.message);
 // The page re-renders on every poll; a form the user is typing in redraws after blur instead of eating the text.
 const typingPreset = () => { const f = document.activeElement; return !!f && $("presets").contains(f) && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea"); };
@@ -855,61 +851,60 @@ function presetCard(p) {
   if (PUI.del === p.name && !p.active) {
     acts.append(el("span", { class: "pdel" }, `Delete ${p.name}? `),
       el("button", { type: "button", class: "mini", onclick: async () => {
-        PUI.del = null;
-        try { await presetCall("DELETE", "presets/" + encodeURIComponent(p.name)); renderPresets(true); }
+        setForm();
+        try { await dsCall("DELETE", "presets/" + encodeURIComponent(p.name)); renderPresets(true); }
         catch (e) { showPresetErr(e, err); renderPresets(true); }
       } }, "Yes"),
-      el("button", { type: "button", class: "mini", onclick: () => { PUI.del = null; renderPresets(true); } }, "No"));
+      el("button", { type: "button", class: "mini", onclick: () => setForm() }, "No"));
   } else {
-    if (p.active) acts.append(el("button", { type: "button", class: "mini", onclick: () => { PUI.edit = p.name; renderPresets(true); } }, "Edit"));
+    if (p.active) acts.append(el("button", { type: "button", class: "mini", onclick: () => setForm("edit", p.name) }, "Edit"));
     else acts.append(el("button", { type: "button", class: "mini", onclick: async () => {
-      try { await presetCall("POST", "presets/" + encodeURIComponent(p.name) + "/activate"); }
+      try { await dsCall("POST", "presets/" + encodeURIComponent(p.name) + "/activate"); }
       catch (e) { showPresetErr(e, err); }
     } }, "Switch"));
-    acts.append(el("button", { type: "button", class: "mini", onclick: () => { PUI.exp = p.name; renderPresets(true); } }, "Export"));
-    if (!p.active) acts.append(el("button", { type: "button", class: "mini del", onclick: () => { PUI.del = p.name; renderPresets(true); } }, "Delete"));
+    acts.append(el("button", { type: "button", class: "mini", onclick: () => setForm("exp", p.name) }, "Export"));
+    if (!p.active) acts.append(el("button", { type: "button", class: "mini del", onclick: () => setForm("del", p.name) }, "Delete"));
   }
   card.append(acts);
   return card;
 }
 function presetEdit(p, card, err) {
-  const n = el("input", { value: p.name, placeholder: "Name", "aria-label": "Preset name", autocomplete: "off", spellcheck: "false", "data-k": "pname" });
-  const t = el("input", { value: p.tagline || "", placeholder: "Tagline: what this is good for", "aria-label": "Preset tagline", autocomplete: "off", spellcheck: "false", "data-k": "ptag" });
+  const [n, t] = nameTag("Preset name", "Preset tagline", "p", p);
   card.append(n, t,
     el("button", { type: "button", class: "btn primary", onclick: async () => {
       try {
-        await presetCall("PUT", "presets/" + encodeURIComponent(p.name), { name: n.value.trim(), tagline: t.value });
-        PUI.edit = null; renderPresets(true);
+        await dsCall("PUT", "presets/" + encodeURIComponent(p.name), { name: n.value.trim(), tagline: t.value });
+        setForm();
       } catch (e) { showPresetErr(e, err); }
     } }, "Save"),
-    el("button", { type: "button", class: "btn", onclick: () => { PUI.edit = null; renderPresets(true); } }, "Cancel"));
+    el("button", { type: "button", class: "btn", onclick: () => setForm() }, "Cancel"));
   return card;
 }
 function presetExport(p, card, err) {
-  const n = el("input", { value: p.name, placeholder: "Name", "aria-label": "Name in the exported file", autocomplete: "off", spellcheck: "false", "data-k": "xname" });
-  const t = el("input", { value: p.tagline || "", placeholder: "Tagline: what this is good for", "aria-label": "Tagline in the exported file", autocomplete: "off", spellcheck: "false", "data-k": "xtag" });
-  const a = el("a", { class: "btn", download: true }, "Download");
-  const setHref = () => { a.href = "/ui/api/presets/" + encodeURIComponent(p.name) + "/export?name=" + encodeURIComponent(n.value.trim() || p.name) + "&tagline=" + encodeURIComponent(t.value); };
+  const [n, t] = nameTag("Name in the exported file", "Tagline in the exported file", "x", p);
+  const a = el("a", { class: "btn", download: true }, "Download");  // download: the name travels with the file
+  const setHref = () => {
+    a.href = "/ui/api/presets/" + encodeURIComponent(p.name) + "/export?name=" + encodeURIComponent(n.value.trim() || p.name) + "&tagline=" + encodeURIComponent(t.value);
+    a.download = (slug(n.value.trim() || p.name) || "preset") + ".signaller.json";
+  };
   n.addEventListener("input", setHref); t.addEventListener("input", setHref); setHref();
-  card.append(n, t, a,
-    el("button", { type: "button", class: "btn", onclick: () => { PUI.exp = null; renderPresets(true); } }, "Done"));
+  card.append(n, t, a, el("button", { type: "button", class: "btn", onclick: () => setForm() }, "Done"));
   return card;
 }
 function saveCard() {
   const card = el("div", { class: "pcard psave" });
   if (!PUI.save) {
-    card.append(el("button", { type: "button", class: "btn", onclick: () => { PUI.save = true; renderPresets(true); } }, "+ Save current as…"));
+    card.append(el("button", { type: "button", class: "btn", onclick: () => setForm("save", true) }, "+ Save current as…"));
   } else {
-    const n = el("input", { placeholder: "Name", "aria-label": "Name for the saved setup", autocomplete: "off", spellcheck: "false", "data-k": "sname" });
-    const t = el("input", { placeholder: "Tagline: what this is good for", "aria-label": "Tagline for the saved setup", autocomplete: "off", spellcheck: "false", "data-k": "stag" });
+    const [n, t] = nameTag("Name for the saved setup", "Tagline for the saved setup", "s", null);
     const err = perr();
     card.append(n, t, el("button", { type: "button", class: "btn primary", onclick: async () => {
       try {
-        await presetCall("POST", "presets", { name: n.value.trim(), tagline: t.value });
-        PUI.save = false; renderPresets(true);
+        await dsCall("POST", "presets", { name: n.value.trim(), tagline: t.value });
+        setForm();
       } catch (e) { showPresetErr(e, err); }
     } }, "Save"),
-      el("button", { type: "button", class: "btn", onclick: () => { PUI.save = false; renderPresets(true); } }, "Cancel"), err);
+      el("button", { type: "button", class: "btn", onclick: () => setForm() }, "Cancel"), err);
   }
   // the import panel (below the cards) is opened from here
   card.append(el("button", { type: "button", class: "btn", id: "importBtn" }, "Import…"));
@@ -929,7 +924,7 @@ function impOpen(open) {
   $("imFile").value = "";
   $("imText").value = "";
   showErr($("imErr"), "");
-  $("impanel").scrollIntoView({ block: "nearest", behavior: reduceMotion.matches ? "auto" : "smooth" });
+  scrollTo($("impanel"), { block: "nearest" });
   $("imFile").focus();
 }
 document.addEventListener("click", (e) => { if (e.target.closest("#importBtn")) impOpen(true); });  // importBtn is redrawn with the cards
@@ -1002,8 +997,7 @@ function imPanel(pv) {
   const pName = (t) => t === "anthropic" ? "Anthropic" : ((pds.find((d) => d.id === t) || {}).name || t);
   const pCol = (t) => t === "anthropic" ? "var(--anth)" : ((pds.find((d) => d.id === t) || {}).color || "var(--off)");
   const ptrk = (t) => el("span", { class: "to", style: "--c:" + pCol(t) }, pName(t));
-  imName = el("input", { class: "imn", value: pv.name || "", placeholder: "Name", "aria-label": "Name for the imported preset", autocomplete: "off", spellcheck: "false", "data-k": "imname" });
-  imTag = el("input", { class: "imt", value: pv.tagline || "", placeholder: "Tagline: what this is good for", "aria-label": "Tagline for the imported preset", autocomplete: "off", spellcheck: "false", "data-k": "imtag" });
+  [imName, imTag] = nameTag("Name for the imported preset", "Tagline for the imported preset", "im", pv, ["imn", "imt"]);
   imNote = el("span", { class: "imtaken" });
   imName.addEventListener("input", imSetAdd);
   imSetAdd();
@@ -1053,7 +1047,7 @@ $("imAdd").addEventListener("click", async () => {
   const err = $("imErr");
   $("imAdd").disabled = true;
   try {
-    await presetCall("POST", "presets", { name: imName.value.trim(), tagline: imTag.value, config: imPv.config });
+    await dsCall("POST", "presets", { name: imName.value.trim(), tagline: imTag.value, config: imPv.config });
     impOpen(false);
   } catch (e) {
     showPresetErr(e, err);
@@ -1112,7 +1106,7 @@ function openEditor(i) {
   highlight();
   preview();
   (r ? $("edText") : $("edName")).focus();
-  $("editor").scrollIntoView({ block: "nearest", behavior: reduceMotion.matches ? "auto" : "smooth" });
+  scrollTo($("editor"), { block: "nearest" });
 }
 function closeEditor() {
   const back = ed && ed.orig;
@@ -1383,7 +1377,7 @@ async function showTurn(id) {
   const g = viewGen;
   await loadTurns();
   if (g !== viewGen) return;
-  $("pair").scrollIntoView({ behavior: reduceMotion.matches ? "auto" : "smooth" });
+  scrollTo($("pair"), {});
 }
 // Picked sessions: count the verdicts on their turns (side by side ignores the time span).
 // ponytail: the turns list holds the newest 100, so older verdicts drop out of a picked tally.
