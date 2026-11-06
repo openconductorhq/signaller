@@ -56,36 +56,45 @@ const downstreams = () => MODES.filter(m => m !== 'rules' && m !== 'anthropic')
 // Kept in the plugin's store under the session id, so a reload or a restart of the same session keeps it.
 // ponytail: an ended session's leftover steps stay in the store (tiny, keyed by an id nobody reuses).
 const qkey = async ($: EngineInterface) => `pending:${await $.session.id()}`
+// take/giveBack/grant are async read-modify-writes on the store: every queue op is chained through one
+// promise, so two calls in flight can't spend one grant twice or overwrite a newer prompt's queue.
+let qtail: Promise<unknown> = Promise.resolve()
+const serial = <T>(op: () => Promise<T>): Promise<T> => {
+  const run = qtail.then(op)
+  qtail = run.then(() => undefined, () => undefined)
+  return run
+}
 const queue = async ($: EngineInterface) => (((await $.store.get(await qkey($))) as string[] | undefined) ?? [])
 const save = async ($: EngineInterface, q: string[]) => {
   const k = await qkey($)
   await (q.length ? $.store.set(k, q) : $.store.delete(k))
 }
 // "/signaller run …" and "/signaller name …" are commands, not steps: quoting one in a prompt keeps the queue
-const GRANT = /(?:^|\s)\/signaller\s+(?!(?:run|name)(?:\s|$))([a-z0-9_-]+)/gi
+// (run/name are exempt unless a word continues: "runner" or "namext" are levers, "run," or "name (above)" aren't)
+const GRANT = /(?:^|\s)\/signaller\s+(?!(?:run|name)(?![a-z0-9_-]))([a-z0-9_-]+)/gi
 const GRANT_SETTINGS = new RegExp(`(?:^|\\s)\\/signaller\\s+${TAIL}`, 'gi') // the same form, as typed in a prompt
 // "/signaller <downstream> reset…" with more than the word "reset" there is a settings attempt that grants nothing
 const RESETISH = /(?:^|\s)\/signaller\s+[a-z0-9_-]+(?:\s+(?:fable|opus|sonnet|haiku))?\s+reset[a-z0-9_-]*/gi
-const grant = async ($: EngineInterface, text: string) => {
+const grant = ($: EngineInterface, text: string) => serial(async () => {
   const steps = new Map<number, string | null>() // keyed by where the "/signaller" starts; all three regexes share it
   for (const m of text.matchAll(GRANT_SETTINGS)) steps.set(m.index!, `set ${canon(form(m))}`)
   for (const m of text.matchAll(RESETISH)) if (!steps.has(m.index!)) steps.set(m.index!, null) // "resetting": an attempt, no grant
   for (const m of text.matchAll(GRANT)) if (!steps.has(m.index!)) steps.set(m.index!, `lever ${m[1]!.toLowerCase()}`) // modes are checked when used
   if (!steps.size) return
   await save($, [...steps].sort((a, b) => a[0] - b[0]).flatMap(([, s]) => (s ? [s] : [])))
-}
-const take = async ($: EngineInterface, want: string) => {
+})
+const take = ($: EngineInterface, want: string) => serial(async () => {
   const q = await queue($)
   if (q[0] !== want) return false
   q.shift()
   await save($, q)
   return true
-}
-const giveBack = async ($: EngineInterface, step: string) => {
+})
+const giveBack = ($: EngineInterface, step: string) => serial(async () => {
   const q = await queue($)
   q.unshift(step)
   await save($, q)
-}
+})
 const upNext = (q: string[]) => (q[0] ? ` The next one allowed is "/signaller ${q[0].replace(/^\S+ /, '').replace(' * ', ' ')}".` : '')
 
 // set (or reset) this session's settings line; the reply lists the session's resulting lines and any collisions.

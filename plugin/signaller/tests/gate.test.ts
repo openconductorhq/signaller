@@ -234,3 +234,39 @@ test('typed steps outlive a restart, and quoting /signaller run or name keeps th
   expect((await $.tool.call({ tool: TOOL, lever: 'rules' })).deny).toBeUndefined()
   expect(store.has('pending:s1')).toBe(false)  // used up: nothing left behind
 })
+
+test('quoting /signaller run or name keeps them, whatever follows the word', async ($, on) => {
+  const puts: string[] = []
+  await stub($, on, (e) => {
+    if (e.init?.method === 'PUT') puts.push(JSON.parse(String(e.init.body)).lever)
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+
+  await $.prompt.submit({ text: 'do /signaller anthropic' })
+  // punctuation after run/name — not a word continuing it: no step granted, the queue stands
+  await $.prompt.submit({ text: 'see /signaller run, and also /signaller name (as typed above)' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toContain('Not switching')  // used up
+  expect(puts).toEqual(['anthropic'])  // run/name granted nothing, no other switch went out
+
+  // a word that continues ("runner") is a lever like any other, not the run command
+  await $.prompt.submit({ text: 'do /signaller runner' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'runner' })).deny).toContain('Unknown lever')
+})
+
+test('two calls at once spend one typed grant once', async ($, on) => {
+  const puts: string[] = []
+  await stub($, on, (e) => {
+    if (e.init?.method === 'PUT') puts.push(JSON.parse(String(e.init.body)).lever)
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+
+  await $.prompt.submit({ text: 'do /signaller valar' })
+  const [a, b] = await Promise.all([  // parallel tool calls: one read-modify-write each, unserialized would race
+    $.tool.call({ tool: TOOL, lever: 'valar' }),
+    $.tool.call({ tool: TOOL, lever: 'valar' }),
+  ])
+  expect([a, b].some(x => x.deny === undefined)).toBe(true)  // exactly one switched
+  expect([a, b].some(x => (x.deny ?? '').includes('Not switching'))).toBe(true)  // the other was refused
+  expect(puts).toEqual(['valar'])  // one grant, one switch on the wire
+})
