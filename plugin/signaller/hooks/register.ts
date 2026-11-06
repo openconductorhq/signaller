@@ -55,12 +55,11 @@ const downstreams = () => MODES.filter(m => m !== 'rules' && m !== 'anthropic')
 // leftovers don't linger. Only the main agent spends the queue: subagents follow the session's lever anyway.
 // Kept in the plugin's store under the session id, so a reload or a restart of the same session keeps it.
 // ponytail: an ended session's leftover steps stay in the store (tiny, keyed by an id nobody reuses).
-let pending: string[] | null = null // "lever <mode>" or "set <canon>"; null until read from the store
 const qkey = async ($: EngineInterface) => `pending:${await $.session.id()}`
-const queue = async ($: EngineInterface) => (pending ??= ((await $.store.get(await qkey($))) as string[] | undefined) ?? [])
-const save = async ($: EngineInterface) => {
+const queue = async ($: EngineInterface) => (((await $.store.get(await qkey($))) as string[] | undefined) ?? [])
+const save = async ($: EngineInterface, q: string[]) => {
   const k = await qkey($)
-  await (pending?.length ? $.store.set(k, pending) : $.store.delete(k))
+  await (q.length ? $.store.set(k, q) : $.store.delete(k))
 }
 // "/signaller run …" and "/signaller name …" are commands, not steps: quoting one in a prompt keeps the queue
 const GRANT = /(?:^|\s)\/signaller\s+(?!(?:run|name)(?:\s|$))([a-z0-9_-]+)/gi
@@ -73,18 +72,21 @@ const grant = async ($: EngineInterface, text: string) => {
   for (const m of text.matchAll(RESETISH)) if (!steps.has(m.index!)) steps.set(m.index!, null) // "resetting": an attempt, no grant
   for (const m of text.matchAll(GRANT)) if (!steps.has(m.index!)) steps.set(m.index!, `lever ${m[1]!.toLowerCase()}`) // modes are checked when used
   if (!steps.size) return
-  pending = [...steps].sort((a, b) => a[0] - b[0]).flatMap(([, s]) => (s ? [s] : []))
-  await save($)
+  await save($, [...steps].sort((a, b) => a[0] - b[0]).flatMap(([, s]) => (s ? [s] : [])))
 }
 const take = async ($: EngineInterface, want: string) => {
   const q = await queue($)
   if (q[0] !== want) return false
   q.shift()
-  await save($)
+  await save($, q)
   return true
 }
-const giveBack = async ($: EngineInterface, step: string) => { (await queue($)).unshift(step); await save($) }
-const upNext = () => (pending?.[0] ? ` The next one allowed is "/signaller ${pending[0].replace(/^\S+ /, '').replace(' * ', ' ')}".` : '')
+const giveBack = async ($: EngineInterface, step: string) => {
+  const q = await queue($)
+  q.unshift(step)
+  await save($, q)
+}
+const upNext = (q: string[]) => (q[0] ? ` The next one allowed is "/signaller ${q[0].replace(/^\S+ /, '').replace(' * ', ' ')}".` : '')
 
 // set (or reset) this session's settings line; the reply lists the session's resulting lines and any collisions.
 // `typed`: the settings form as typed, when the call must be gated on the person's "/signaller …" (the tool path);
@@ -94,7 +96,7 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
     return { ok: false, text: `Unknown downstream "${f.ds}". The router's downstreams: ${downstreams().join(', ') || 'none yet'}.` }
   const c = canon(f)
   if (typed !== undefined && !(await take($, `set ${c}`)))
-    return { ok: false, text: `Not setting: "/signaller ${typed}" isn't the next step the person typed (each one they type allows one, in order).${upNext()} Only set a line when they tell you to that way; they can also type "/signaller ${typed}" themselves.` }
+    return { ok: false, text: `Not setting: "/signaller ${typed}" isn't the next step the person typed (each one they type allows one, in order).${upNext(await queue($))} Only set a line when they tell you to that way; they can also type "/signaller ${typed}" themselves.` }
   const session = await $.session.id()
   const body = 'reset' in f
     ? { session, downstream: f.ds, reset: true }
@@ -200,7 +202,7 @@ export const register: Register = on => {
     if (want && want !== 'reset' && !MODES.includes(want)) return { deny: `Unknown lever "${want}". Use one of: ${MODES.join(', ')}, or reset.` }
     if (want && sub) return { deny: 'Not switching: only the main agent switches signaller; a subagent follows its session.' }
     if (want && !(await take($, `lever ${want}`)))
-      return { deny: `Not switching: "/signaller ${want}" isn't the next step the person typed (each one they type allows one, in order).${upNext()} Only switch when they tell you to that way; they can also type "/signaller ${want}" themselves.` }
+      return { deny: `Not switching: "/signaller ${want}" isn't the next step the person typed (each one they type allows one, in order).${upNext(await queue($))} Only switch when they tell you to that way; they can also type "/signaller ${want}" themselves.` }
     const r = await switchTo($, want ?? '')
     if (!r.ok && want) await giveBack($, `lever ${want}`) // the switch didn't happen: the person's say-so still stands
     return r.ok ? { result: r.text } : { deny: r.text }
