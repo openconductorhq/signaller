@@ -90,11 +90,16 @@ breaks.
 - **Presets:** `console.json` is the active preset's config; `presets.json`
   holds the rest. `activate_preset` runs under `_rlock` and goes through
   `_put`, so the rev bumps and a page holding an older config gets 409 rather
-  than overwriting the switched-in preset. A saved or imported preset carries
-  `presets.portable(config)`: no machine state (`seeded`, `migrated_off`) and
-  no settings lines bound to a session; anything unparseable is kept for
-  `config_from_json` to reject with a reason. An unreadable `presets.json`
-  falls back to a fresh "my setup" with a banner, never a dead router.
+  than overwriting the switched-in preset. A switch is written crash-safe:
+  presets.json first (the previous preset's snapshot, active moved, the target
+  still carrying its config), then console.json, then the target's config
+  cleared — and the active preset still carrying a config at a start means the
+  switch was interrupted, so the loader finishes it. A saved or imported preset
+  carries `presets.portable(config)`: no machine state (`seeded`,
+  `migrated_off`) and no settings lines bound to a session; anything
+  unparseable is kept for `config_from_json` to reject with a reason. An
+  unreadable `presets.json` falls back to a fresh "my setup" with a banner,
+  never a dead router.
 - **The body is rewritten only when something changes** (leading tags, a
   downstream's model name, Valar's tool fixes): `req` is parsed once, edited,
   and re-serialised once. An untouched Anthropic request goes out byte for
@@ -107,10 +112,15 @@ breaks.
 ## Secrets
 
 - **Where they live:** downstream keys are only in `downstreams.keys.json`
-  (0600), keyed by id and then host — the same id at two hosts keeps two keys,
-  and `delete_downstream` leaves a key that an inactive preset still needs at
-  the same id and host. Never put them in `console.json`, `presets.json`, an
-  API response, a log line, a test fixture or a commit.
+  (0600), keyed by id and then origin (`host_of`: https under the bare host,
+  http under `scheme://host`, so a key never crosses schemes) — the same id at
+  two hosts or schemes keeps two keys, and `delete_downstream` leaves a key
+  that an inactive preset still needs at the same id and origin. Migration
+  never loses one: an id with no downstream in the current setup waits under
+  the unknown slot for a later `migrate`, and a start where `console.json`
+  couldn't be read never migrates against the default config. Never put keys
+  in `console.json`, `presets.json`, an API response, a log line, a test
+  fixture or a commit.
 - **Env files:** `.env.*` files are git-ignored and can hold real keys. Don't
   print them. To check which variables one sets, print names only:
   `grep -oE '^[A-Z_]+=' file`.
