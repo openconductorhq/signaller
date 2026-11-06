@@ -482,12 +482,12 @@ class ConsoleTest(Fixture):
         self.assertEqual(s, 400)
         self.assertIn("nowhere", j["error"])
 
-    def test_preview_flags_what_add_would_refuse(self):
+    def test_preview_lets_a_bad_name_be_fixed_before_add(self):
         r, file = self.export()
         s, j = self.js("POST", "/ui/api/presets/preview", {**file, "name": "preview"})
+        self.assertEqual((s, j["name"]), (200, "preview"))  # shown, so the panel can rename it
+        s, j = self.js("POST", "/ui/api/presets", {"name": "preview", "tagline": "", "config": j["config"]})
         self.assertEqual((s, j["error"]), (400, "'preview' is a reserved preset name"))
-        s, j = self.js("POST", "/ui/api/presets/preview", {**file, "tagline": "x" * 201})
-        self.assertEqual((s, j["error"]), (400, "a preset tagline must be at most 200 characters"))
 
     def test_export_refuses_a_broken_config(self):
         self.save_night()

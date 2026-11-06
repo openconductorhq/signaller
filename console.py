@@ -410,9 +410,7 @@ def api(h, app, method, path, query, body):
         if body["signaller_preset"] > presets.PRESET_FORMAT:
             raise Err(400, "made by a newer Signaller")
         try:
-            new = config_from_json(presets.portable(body["config"]))
-            presets.check_name(body.get("name"))  # the preview flags what Add would refuse
-            presets.check_tagline(body.get("tagline"))
+            new = config_from_json(presets.portable(body["config"]))  # name/tagline: checked on Add, editable in the panel first
         except ValueError as e:
             raise Err(400, str(e))
         return {"name": body.get("name"), "tagline": body.get("tagline"), "exported": body.get("exported"),
