@@ -822,10 +822,11 @@ const summaryLine = (s) => s && [plural(s.rules || 0, "rule"),
   plural(s.settings || 0, "schedule line"), plural(s.prompts || 0, "prompt")].filter(Boolean).join(" · ");
 const keyLine = (ids) => `${ids.map(NAME).join(", ")} ${ids.length === 1 ? "needs" : "need"} a key`;
 const perr = () => el("p", { class: "err", role: "alert", hidden: true });
-// the name+tagline input pair every preset form edits (cls: the import panel's own classes)
+// the name+tagline input pair every preset form edits (cls: the import panel's own classes); the
+// maxlengths match the router's presets.NAME_MAX / TAGLINE_MAX
 const nameTag = (nl, tl, k, p, cls) => [
-  el("input", { class: cls && cls[0], value: (p && p.name) || "", placeholder: "Name", "aria-label": nl, autocomplete: "off", spellcheck: "false", "data-k": k + "name" }),
-  el("input", { class: cls && cls[1], value: (p && p.tagline) || "", placeholder: "Tagline: what this is good for", "aria-label": tl, autocomplete: "off", spellcheck: "false", "data-k": k + "tag" }),
+  el("input", { class: cls && cls[0], value: (p && p.name) || "", placeholder: "Name", "aria-label": nl, autocomplete: "off", spellcheck: "false", maxlength: 60, "data-k": k + "name" }),
+  el("input", { class: cls && cls[1], value: (p && p.tagline) || "", placeholder: "Tagline: what this is good for", "aria-label": tl, autocomplete: "off", spellcheck: "false", maxlength: 200, "data-k": k + "tag" }),
 ];
 const showPresetErr = (e, err) => showErr(err, e.status === 400 || e.status === 404 ? e.message : "Couldn't save: " + e.message);
 // The page re-renders on every poll; a form the user is typing in redraws after blur instead of eating the text.
@@ -850,10 +851,10 @@ function presetCard(p) {
   const acts = el("div", { class: "pacts" });
   if (PUI.del === p.name && !p.active) {
     acts.append(el("span", { class: "pdel" }, `Delete ${p.name}? `),
+      // the confirm stays drawn until the delete answers, so its error lands in a node the person can see
       el("button", { type: "button", class: "mini", onclick: async () => {
-        setForm();
-        try { await dsCall("DELETE", "presets/" + encodeURIComponent(p.name)); renderPresets(true); }
-        catch (e) { showPresetErr(e, err); renderPresets(true); }
+        try { await dsCall("DELETE", "presets/" + encodeURIComponent(p.name)); setForm(); }
+        catch (e) { showPresetErr(e, err); }
       } }, "Yes"),
       el("button", { type: "button", class: "mini", onclick: () => setForm() }, "No"));
   } else {
@@ -882,13 +883,19 @@ function presetEdit(p, card, err) {
 }
 function presetExport(p, card, err) {
   const [n, t] = nameTag("Name in the exported file", "Tagline in the exported file", "x", p);
-  const a = el("a", { class: "btn", download: true }, "Download");  // download: the name travels with the file
-  const setHref = () => {
-    a.href = "/ui/api/presets/" + encodeURIComponent(p.name) + "/export?name=" + encodeURIComponent(n.value.trim() || p.name) + "&tagline=" + encodeURIComponent(t.value);
-    a.download = (slug(n.value.trim() || p.name) || "preset") + ".signaller.json";
-  };
-  n.addEventListener("input", setHref); t.addEventListener("input", setHref); setHref();
-  card.append(n, t, a, el("button", { type: "button", class: "btn", onclick: () => setForm() }, "Done"));
+  const file = () => (slug(n.value.trim() || p.name) || "preset") + ".signaller.json";
+  card.append(n, t,
+    // through api(): a 400 (a broken config) shows here instead of being saved as the file
+    el("button", { type: "button", class: "btn primary", onclick: async () => {
+      try {
+        const out = await api("GET", "presets/" + encodeURIComponent(p.name) + "/export" +
+          qs("name=" + encodeURIComponent(n.value.trim() || p.name), "tagline=" + encodeURIComponent(t.value)));
+        const url = URL.createObjectURL(new Blob([JSON.stringify(out, null, 2)], { type: "application/json" }));
+        el("a", { href: url, download: file() }).click();  // a same-origin blob: allowed under the CSP
+        setTimeout(() => URL.revokeObjectURL(url), 3000);
+      } catch (e) { showPresetErr(e, err); }
+    } }, "Download"),
+    el("button", { type: "button", class: "btn", onclick: () => setForm() }, "Done"));
   return card;
 }
 function saveCard() {
