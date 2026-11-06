@@ -415,7 +415,7 @@ class ConsoleTest(Fixture):
         self.assertEqual([p["name"] for p in st["presets"]], ["my setup", "night"])
         self.assertEqual([p["active"] for p in st["presets"]], [True, False])
         self.assertEqual(st["presets"][0]["summary"]["downstreams"], ["valar"])
-        self.assertEqual(st["missing_keys"], [])
+        self.assertEqual(st["presets"][0]["missing_keys"], [])  # the key banner reads the active row's
         self.assertEqual(self.js("POST", "/ui/api/presets/my%20setup/activate")[0], 200)  # already active: a no-op
         self.assertEqual(self.js("POST", "/ui/api/presets/night/activate")[0], 200)
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["preset"], "night")
@@ -441,7 +441,6 @@ class ConsoleTest(Fixture):
         self.set_settings({"when": "session is s1", "downstream": "valar", "tier": None, "set": "window", "value": "priority"})
         r, j = self.export()
         self.assertEqual(r.status, 200)
-        self.assertEqual(r.getheader("Content-Disposition"), 'attachment; filename="my-setup.signaller.json"')
         text = json.dumps(j)
         self.assertNotIn("VK", text)
         self.assertNotIn("session is", text)
@@ -449,7 +448,6 @@ class ConsoleTest(Fixture):
         self.assertEqual(j["name"], "my setup")
         r, j = self.export("?name=Shared&tagline=for%20a%20friend")
         self.assertEqual((j["name"], j["tagline"]), ("Shared", "for a friend"))
-        self.assertEqual(r.getheader("Content-Disposition"), 'attachment; filename="shared.signaller.json"')
         s, j = self.js("GET", "/ui/api/presets/my%20setup/export?name=" + "x" * 61)  # a bad override answers with the reason
         self.assertEqual((s, j["error"]), (400, "a preset name must be 1–60 characters"))
 

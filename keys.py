@@ -1,4 +1,5 @@
 """Downstream API keys: one 0600 file, {id: {host: key}}, kept out of console.json, every API answer and every log line."""
+import functools
 import json
 import os
 import sys
@@ -7,6 +8,7 @@ import threading
 from urllib.parse import urlsplit
 
 
+@functools.lru_cache(maxsize=64)
 def host_of(url: str) -> str:
     return urlsplit(url).netloc.lower()
 

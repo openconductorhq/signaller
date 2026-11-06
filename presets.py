@@ -4,6 +4,7 @@ import os
 import sys
 
 from keys import write_json
+from routing import config_from_json
 from rulelang import fields_of, parse_cond
 
 PRESET_FORMAT = 1
@@ -81,6 +82,12 @@ def portable(config_json: dict) -> dict:
         keep.append(s)  # anything unparseable is kept for config_from_json to reject with a reason
     out["settings"] = keep
     return out
+
+
+def validated(config_json: dict):
+    """What a stored, imported or exported preset's config must survive: portable(), then through
+    config_from_json. ValueError with the reason when the importer would reject it."""
+    return config_from_json(portable(config_json))
 
 
 def _single_line(s: str) -> bool:

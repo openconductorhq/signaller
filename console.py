@@ -34,13 +34,11 @@ class Err(Exception):
         self.status, self.body = status, {"error": msg, **extra}
 
 
-def send(h, status, body, ctype, cache=False, headers=None):
+def send(h, status, body, ctype, cache=False):
     h.send_response(status)
     h.send_header("Content-Type", ctype)
     h.send_header("Content-Length", str(len(body)))
     for k, v in SEC.items():
-        h.send_header(k, v)
-    for k, v in (headers or {}).items():
         h.send_header(k, v)
     if not cache:
         h.send_header("Cache-Control", "no-store")
@@ -49,8 +47,8 @@ def send(h, status, body, ctype, cache=False, headers=None):
         h.wfile.write(body)
 
 
-def send_json(h, status, obj, headers=None):
-    send(h, status, json.dumps(obj).encode(), "application/json", headers=headers)
+def send_json(h, status, obj):
+    send(h, status, json.dumps(obj).encode(), "application/json")
 
 
 def preview(app, body):
@@ -221,9 +219,11 @@ def filt(query):
     return ids, t0, t1
 
 
-def preset_row(app, p):
-    """One preset's state row: a summary of its config and the downstreams it lacks a key for."""
-    cfg = app.preset_config(p["name"])
+def preset_row(app, p, cfg=None):
+    """One preset's state row: a summary of its config and the downstreams it lacks a key for.
+    `cfg` is the caller's serialised live config, for the active row."""
+    if cfg is None:
+        cfg = app.preset_config(p["name"])
     dss = [d for d in cfg.get("downstreams", []) if isinstance(d, dict)]
     return {"name": p["name"], "tagline": p["tagline"], "active": p["name"] == app.presets["active"],
             "summary": {"rules": sum(1 for r in cfg.get("rules", []) if isinstance(r, dict) and r.get("enabled")),
@@ -238,8 +238,10 @@ def state(app, query=None):
     if t0 is None:  # whole session
         t0 = app.store.first_ts(ids)
     c, ts = app.cfg, tracks(app.routing)
-    rows = [preset_row(app, p) for p in app.presets["presets"]]
-    return {"config": config_to_json(app.routing), "config_rev": app.rev, "stats": app.store.stats(time.time(), ts),
+    live = config_to_json(app.routing)  # built once: the active preset row reads it too
+    rows = [preset_row(app, p, live if p["name"] == app.presets["active"] else None)
+            for p in app.presets["presets"]]
+    return {"config": live, "config_rev": app.rev, "stats": app.store.stats(time.time(), ts),
             "summary": app.store.summary(ids, t0, t1, time.time(), tracks(app.routing)), "banner": app.banner,
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
@@ -247,7 +249,6 @@ def state(app, query=None):
             "recent_count": len(app.recent), "session_levers": dict(app.session_levers),
             "collisions": app.collisions(),
             "preset": app.presets["active"], "presets": rows,
-            "missing_keys": next((r["missing_keys"] for r in rows if r["active"]), []),
             "active_windows": overrides.active_windows(app.routing.settings, time.localtime().tm_hour),
             "clock": {"tz": time.strftime("%Z"), "hm": time.strftime("%H:%M")}}
 
@@ -396,10 +397,8 @@ def api(h, app, method, path, query, body):
     if path == "/ui/api/presets" and method == "POST":  # save current, or add an imported preset when a config comes
         body = body if isinstance(body, dict) else {}
         try:
-            if body.get("config") is not None:
-                app.add_preset(body.get("name"), body.get("tagline"), body["config"])
-            else:
-                app.save_preset(body.get("name"), body.get("tagline"))
+            app.add_preset(body.get("name"), body.get("tagline"),
+                           body["config"] if body.get("config") is not None else config_to_json(app.routing))
         except ValueError as e:
             raise Err(400, str(e))
         return 201, {"ok": True}
@@ -410,7 +409,7 @@ def api(h, app, method, path, query, body):
         if body["signaller_preset"] > presets.PRESET_FORMAT:
             raise Err(400, "made by a newer Signaller")
         try:
-            new = config_from_json(presets.portable(body["config"]))  # name/tagline: checked on Add, editable in the panel first
+            new = presets.validated(body["config"])  # name/tagline: checked on Add, editable in the panel first
         except ValueError as e:
             raise Err(400, str(e))
         return {"name": body.get("name"), "tagline": body.get("tagline"), "exported": body.get("exported"),
@@ -428,23 +427,22 @@ def api(h, app, method, path, query, body):
     m = re.fullmatch(r"/ui/api/presets/([^/]+)/export", path)
     if m and method == "GET":
         name = unquote(m[1])
-        entry = next((p for p in app.presets["presets"] if p["name"] == name), None)
-        if entry is None:
+        try:
+            pname, ptag = app.preset_meta(name)
+        except KeyError:
             raise Err(404, "no preset named %s" % name)
         try:
-            out_name = presets.check_name((query.get("name") or [entry["name"]])[0])
-            tagline = presets.check_tagline((query.get("tagline") or [entry["tagline"]])[0])
+            out_name = presets.check_name((query.get("name") or [pname])[0])
+            tagline = presets.check_tagline((query.get("tagline") or [ptag])[0])
         except ValueError as e:
             raise Err(400, str(e))
         config = presets.portable(app.preset_config(name))
         try:
-            config_from_json(config)  # never export a file the importer would reject
+            presets.validated(config)  # never export a file the importer would reject
         except ValueError as e:
             raise Err(400, "this preset's config is broken and can't be exported: %s" % e)
-        out = {"signaller_preset": presets.PRESET_FORMAT, "name": out_name, "tagline": tagline,
-               "exported": time.strftime("%Y-%m-%d"), "config": config}
-        slug = re.sub(r"[^a-z0-9]+", "-", out_name.lower()).strip("-") or "preset"
-        return 200, out, {"Content-Disposition": 'attachment; filename="%s.signaller.json"' % slug}
+        return {"signaller_preset": presets.PRESET_FORMAT, "name": out_name, "tagline": tagline,
+                "exported": time.strftime("%Y-%m-%d"), "config": config}
     m = re.fullmatch(r"/ui/api/presets/([^/]+)", path)
     if m and method in ("PUT", "DELETE"):
         name = unquote(m[1])
@@ -541,7 +539,4 @@ def _handle(h, app):
     except ValueError:
         raise Err(400, "body is not valid JSON")
     out = api(h, app, h.command, u.path, parse_qs(u.query), body)
-    if isinstance(out, tuple) and len(out) == 3:  # (status, body, extra headers)
-        send_json(h, out[0], out[1], out[2])
-    else:
-        send_json(h, *(out if isinstance(out, tuple) else (200, out)))
+    send_json(h, *(out if isinstance(out, tuple) else (200, out)))

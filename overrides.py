@@ -180,11 +180,16 @@ def _drop_ids(settings, gone):
     return tuple(out)
 
 
+def gone(t, now, days=7):
+    """The prune rule, shared with the lever prune: an id with no sessions row, or not seen for `days`, is gone."""
+    return t is None or now - t > days * 86400
+
+
 def prune(settings, last_seen, now, days=7):
     """Drop ids not seen for `days` from session lines; a line left with no ids goes. An id with no sessions row
     counts as gone too (a session forgotten via the console's chip has its row deleted; ids written by /signaller
     or the picker always have one)."""
-    return _drop_ids(settings, lambda st, i: (t := last_seen(i)) is None or now - t > days * 86400)
+    return _drop_ids(settings, lambda st, i: gone(last_seen(i), now, days))
 
 
 def upsert_session(settings, st):

@@ -320,6 +320,8 @@ class App:
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
         """One small entry per session that used /signaller; saved so a restart keeps it."""
+        if self.session_levers.get(sid) == lever:  # unchanged: skip the fsync (a re-assert, or a reset of a session with none)
+            return
         with self._rlock:
             if lever:
                 self.session_levers[sid] = lever
@@ -344,18 +346,21 @@ class App:
         """The session's own /signaller lever, but only one the active setup can still follow (a restart, or a preset
         switch, may have dropped the track it named); otherwise the global lever applies. The raw entry is kept."""
         lever = self.session_levers.get(sid or "")
+        if not lever:  # the common case: no entry, no tracks() scan
+            return None
         return lever if lever == "rules" or lever in tracks(self.routing) else None
 
     def prune_levers(self) -> None:
         """Drop session ids not seen for a week (no sessions row counts as gone too; same rule as overrides.prune).
         Never raises; saves only when something went."""
         try:
-            with self._rlock:
-                if isinstance(self.store, NullStore) or not self.session_levers:
-                    return
-                last = self.store.session_last_seen(list(self.session_levers))
-                dead = [sid for sid in self.session_levers
-                        if (t := last.get(sid.lower())) is None or time.time() - t > 7 * 86400]
+            if isinstance(self.store, NullStore) or not self.session_levers:
+                return
+            last = self.store.session_last_seen(list(self.session_levers))  # the DB query stays outside the lock
+            now = time.time()
+            dead = [sid for sid in self.session_levers if overrides.gone(last.get(sid.lower()), now)]
+            with self._rlock:  # re-check: a /signaller since the query may have revived one
+                dead = [sid for sid in dead if sid in self.session_levers]
                 if dead:
                     for sid in dead:
                         self.session_levers.pop(sid, None)
@@ -418,18 +423,13 @@ class App:
 
     def save_preset(self, name: str, tagline: str) -> None:
         """Save the current setup as a new inactive preset: session-bound lines and machine state dropped."""
-        with self._rlock:
-            name, tagline = presets.check_name(name), presets.check_tagline(tagline)
-            if name in self.preset_names():
-                raise ValueError(f"a preset named {name} exists")
-            self.presets["presets"].append({"name": name, "tagline": tagline,
-                                            "config": presets.portable(config_to_json(self.routing))})
-            self._save_presets()
+        self.add_preset(name, tagline, config_to_json(self.routing))
 
     def add_preset(self, name: str, tagline: str, config: dict) -> None:
-        """Add an inactive preset from a config JSON (an import): session-bound lines and machine state dropped."""
+        """Add an inactive preset from a config JSON (the current setup, or an import): session-bound lines and
+        machine state dropped. ValueError, nothing stored, when the config wouldn't load."""
         with self._rlock:
-            new = config_from_json(presets.portable(config))  # ValueError propagates; nothing is stored then
+            new = presets.validated(config)  # ValueError propagates; nothing is stored then
             name, tagline = presets.check_name(name), presets.check_tagline(tagline)
             if name in self.preset_names():
                 raise ValueError(f"a preset named {name} exists")
@@ -483,6 +483,12 @@ class App:
             if name == self.presets["active"]:
                 return config_to_json(self.routing)
             return self._preset(name)["config"]
+
+    def preset_meta(self, name: str) -> tuple[str, str]:
+        """(name, tagline) of a preset, under the lock. KeyError on an unknown name."""
+        with self._rlock:
+            p = self._preset(name)
+            return p["name"], p["tagline"]
 
 
 def default_config_dir() -> str:
