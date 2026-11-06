@@ -25,7 +25,7 @@ from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from keys import host_of
 from prices import Prices, parse_valar
-from routing import (has_images, session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
+from routing import (DEFAULT_CONFIG, has_images, session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
                      references, route as decide_route, track_model, track_window, tracks)
 from keys import Keys, write_json
 from store import NullStore, Store, load_console_config, save_console_config
@@ -209,11 +209,12 @@ class App:
         self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
         self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
         self.keys = Keys(config_dir)
-        self.keys.migrate({d.id: d.url for d in self.routing.downstreams})
+        self.migrate_keys()
         self.seed()
         self.presets, pbanner = presets.load(config_dir)
         if pbanner:
             self.banner = " ".join(filter(None, [self.banner, pbanner]))
+        self._finish_switch()
         self.classifier = Classifier(self._classifier_upstream)
         try:
             # SIGNALLER_STATS_DIR: SQLite needs a real local disk, not a folder shared from the host (see compose.yaml)
@@ -227,6 +228,35 @@ class App:
         self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
         self.prices = Prices(config_dir)
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
+
+    def migrate_keys(self) -> None:
+        """Tie the keys still without a host (an old flat file's, or ones a start with an unreadable console.json
+        left hanging) to the current setup. Never raises: a failed write is bannered and retried at the next start.
+        A default-fallback config is never migrated against — its hosts aren't the person's."""
+        try:
+            if self.routing is not DEFAULT_CONFIG:
+                self.keys.migrate({d.id: d.url for d in self.routing.downstreams})
+        except OSError as e:
+            print("key migration not written: %s" % type(e).__name__, file=sys.stderr, flush=True)
+            self.banner = " ".join(filter(None, [self.banner,
+                                                "Your downstream keys couldn't be written; they're retried at the next start."]))
+
+    def _finish_switch(self) -> None:
+        """The active preset still carrying its config means activate_preset was interrupted between its two
+        writes: finish it — put that config into console.json, then clear it. Never raises: a failure is
+        bannered and the store stays as found, so the next start tries again."""
+        entry = next((p for p in self.presets["presets"] if p["name"] == self.presets["active"]), None)
+        if not entry or entry["config"] is None:
+            return
+        try:
+            with self._rlock:  # no server threads yet; the lock for the same invariant as every other write
+                self._put(replace(config_from_json(entry["config"]), seeded=True, migrated_off=()))
+                entry["config"] = None
+                self._save_presets()
+        except Exception as e:
+            print("preset switch not finished: %s" % type(e).__name__, file=sys.stderr, flush=True)
+            self.banner = " ".join(filter(None, [self.banner,
+                                                 "A preset switch was interrupted and couldn't be finished here; switch presets once more from the console."]))
 
     def _classifier_upstream(self, id: str) -> tuple[str, str, str] | None:
         _, url, key, ds = upstream(self, id)
@@ -387,6 +417,7 @@ class App:
             self._put(new)
             if key:
                 self.keys.set(d["id"], d["url"], key)
+            self.migrate_keys()  # a key left without a host (an old flat file's) ties to the downstream just added
             return new.downstreams[-1]
 
     def delete_downstream(self, id: str) -> list[str]:
@@ -437,26 +468,36 @@ class App:
             self._save_presets()
 
     def activate_preset(self, name: str) -> None:
-        """Switch setups: the active preset keeps its current config as-is, the target's config is put (rev bumps).
+        """Switch setups, crash-safe at every step: (a) presets.json with the previous preset's config set to a
+        snapshot of the live config, active moved to the target — which still carries its own config; (b) the
+        target's config put into console.json (rev bumps); (c) presets.json with the target's config cleared.
+        A crash anywhere leaves a state the loader finishes; a failed put restores the store as it was.
         KeyError on an unknown name."""
         with self._rlock:
             if name == self.presets["active"]:
                 return
             target = self._preset(name)
             new = replace(config_from_json(target["config"]), seeded=True, migrated_off=())
-            prev = self._preset(self.presets["active"])
-            # presets.json first: the de-activating preset's config is stored before console.json changes, so a
-            # crash in between only undoes the switch — the loader ignores the active entry's config snapshot.
-            prev["config"] = config_to_json(self.routing)
-            self._save_presets()
+            prev, prev_name = self._preset(self.presets["active"]), self.presets["active"]
             try:
-                self._put(new)
+                prev["config"] = config_to_json(self.routing)  # the person's own setup, before it's replaced
+                self.presets["active"] = name
+                self._save_presets()  # (a)
+                self._put(new)  # (b)
             except Exception:
-                prev["config"] = None  # the switch didn't happen; memory matches the loader's invariant again
+                # the switch didn't happen: active back to the previous preset, its snapshot dropped (it is the
+                # live config), the target keeps its own. If this undo-save fails too, presets.json still shows
+                # the switch — the loader finishes it at the next start.
+                self.presets["active"] = prev_name
+                prev["config"] = None
+                try:
+                    self._save_presets()
+                except OSError:
+                    pass
                 raise
             target["config"] = None
-            self.presets["active"] = name
-            self._save_presets()
+            self._save_presets()  # (c)
+        threading.Thread(target=self.refresh_prices, daemon=True).start()  # prices/models off the request path: the switched-in ids may sit at new hosts
 
     def delete_preset(self, name: str) -> None:
         with self._rlock:

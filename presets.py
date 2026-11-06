@@ -5,7 +5,7 @@ import sys
 
 from keys import write_json
 from routing import config_from_json
-from rulelang import fields_of, parse_cond
+from rulelang import RuleError, fields_of, parse_cond
 
 PRESET_FORMAT = 1
 NAME_MAX = 60
@@ -24,13 +24,14 @@ def fresh() -> dict:
 
 def _valid(store) -> bool:
     ps = store.get("presets") if isinstance(store, dict) else None
-    # An inactive preset always carries its config. The active one's, when set, is a snapshot left by an
-    # interrupted switch (activate_preset stores it before console.json changes): it is ignored — the live
-    # config is console.json's — and rewritten by the next switch.
+    # An inactive preset always carries its config. The active one's, when set, is a switch interrupted between
+    # activate_preset's two writes (presets.json goes first): App's loader finishes it — putting that config into
+    # console.json, then clearing it — so no crash loses or mislabels the person's setup.
     return (isinstance(ps, list) and isinstance(store.get("active"), str) and bool(ps)
             and all(isinstance(p, dict) and isinstance(p.get("name"), str) and isinstance(p.get("tagline"), str)
                     and (p.get("config") is None or isinstance(p.get("config"), dict)) for p in ps)
             and len({p["name"] for p in ps}) == len(ps)
+            and store["active"] in {p["name"] for p in ps}
             and all(p["config"] is not None or p["name"] == store["active"] for p in ps))
 
 
@@ -70,13 +71,20 @@ def save(config_dir: str, store: dict) -> None:
 
 
 def portable(config_json: dict) -> dict:
-    """A copy that can travel: no machine state (seeded, migrated_off) and no session-bound settings lines."""
+    """A copy that can travel: no machine state (seeded, migrated_off) and no session-bound settings lines.
+    A non-object config raises ValueError (the importer's 400 reason); an unparseable settings line is kept
+    for config_from_json to reject with "settings line N: …"."""
+    if not isinstance(config_json, dict):
+        raise ValueError("a preset's config must be an object")
     out = {k: v for k, v in config_json.items() if k not in ("seeded", "migrated_off")}
     keep = []
     for s in out.get("settings", []):
         w = s.get("when", "") if isinstance(s, dict) else None
         if isinstance(w, str):
-            cond = parse_cond(w)
+            try:
+                cond = parse_cond(w)
+            except RuleError:
+                cond = None
             if cond is not None and "session" in fields_of(cond):
                 continue
         keep.append(s)  # anything unparseable is kept for config_from_json to reject with a reason
