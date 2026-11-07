@@ -28,7 +28,7 @@ downstreams.
 
 | | |
 |---|---|
-| 🎚️ **One lever, steerable from the prompt** | Anthropic, Rules, or one downstream — globally from the console, or per session with `/signaller` without leaving Claude Code. |
+| 🎚️ **One lever, steerable from the prompt** | Anthropic, Rules, Auto, or one downstream — globally from the console, or per session with `/signaller` without leaving Claude Code. |
 | 📜 **A readable rulebook** | `when tier is opus go anthropic`. Tags, model tier, prompt size, or a classifier's guess at what the prompt is about. |
 | 🕐 **Settings by session and time** | "Background sessions and 00:00–07:00 use Valar's cheaper Priority window." |
 | 🗂️ **Named presets** | Save the whole setup — tracks, rules, schedule, prompts — under a name and switch between them. Export one to share; it carries no keys. |
@@ -50,7 +50,7 @@ session is going, and nothing you change here touches your other sessions.
 
 | You type | It does |
 |---|---|
-| `/signaller valar` · `/signaller anthropic` · `/signaller rules` | Switch **this session** (and its subagents); `/signaller reset` goes back to the global lever. |
+| `/signaller valar` · `/signaller anthropic` · `/signaller rules` · `/signaller auto` | Switch **this session** (and its subagents); `/signaller reset` goes back to the global lever. |
 | `/signaller valar window priority` | This session's Valar window, saved as a settings line that beats schedules. |
 | `/signaller valar sonnet model glm-4.8` | The model this session gets for a tier on that downstream. |
 | `/signaller name nightly infra cleanup` | How the session shows in the console. |
@@ -161,7 +161,7 @@ idle, so a change made in the console shows within a minute.
 | Command | What it does |
 |---------|--------------|
 | `/signaller` | Show the mode. |
-| `/signaller rules\|anthropic\|<downstream id>` | Switch this session only; its subagents follow. Other sessions keep the console's lever. |
+| `/signaller rules\|auto\|anthropic\|<downstream id>` | Switch this session only; its subagents follow. Other sessions keep the console's lever. |
 | `/signaller reset` | Go back to the global lever. |
 | `/signaller name <text>` | Name this session in the console. `/signaller name` alone clears the name. |
 | `/signaller run <name>` | Put a prompt saved in the console (**Prompts**) in the prompt box. You can add to it, then Enter sends it as your own, so the `/signaller` steps in it count as typed. `/signaller run` alone lists them with their text. |
@@ -201,6 +201,8 @@ unchanged.
 - **Anthropic** or **a downstream:** everything goes to that track (reason
   `lever`).
 - **Rules:** the Rulebook decides.
+- **Auto:** the router decides per turn whether it is planning or execution
+  (see [Auto mode](#auto-mode)).
 
 **The Rulebook:** rules are checked in order and the first one that decides
 wins. If none decides, the request goes to "Otherwise" (Anthropic by default).
@@ -294,6 +296,54 @@ classifier is switched off, `label` is `none`.
 The editor previews a rule against your last 200 requests. These are kept in
 memory only, so after a restart the preview covers only newer requests.
 
+### Auto mode
+
+Auto sends planning to Anthropic and execution to a downstream, without you
+switching by hand. It decides once per human turn, from the conversation
+alone, and a tool loop keeps that turn's answer.
+
+- **Planning opens** when a planning skill ran in the conversation
+  (`superpowers:brainstorming`, `superpowers:writing-plans`, or your own list in
+  the settings box), or when the optional model scores your message above the
+  threshold. Once open it stays open, so terse replies ("ok", "go ahead") are planning too.
+- **One way:** planning ends for good at an execution skill
+  (`superpowers:subagent-driven-development`, `executing-plans`) or at the first
+  edit outside the paths that don't end planning: spec and plan folders, and
+  Claude's own files (`/.claude/`, `/.superpowers/`, `/scratchpad/`). After
+  that the conversation is execution.
+- **No signal means execution.** Subagents and teammates start with none, so
+  they run on the execution downstream. Execution goes to the one you pick in
+  the box, else the first downstream, else Anthropic.
+- **A tag wins for one turn:** `#planning` or `#execution` at the start of the
+  message overrides the decision (see Tags).
+- **Between turns:** the switch happens at a human message, so within a turn
+  nothing moves. A downstream's unsigned thinking blocks from earlier turns
+  can't go to Anthropic, so on an Anthropic request in auto the router drops
+  them from earlier turns (Anthropic discards them anyway). That is the only
+  rewrite of an Anthropic body beyond tags and the model name.
+
+**What it gets right, and what it doesn't.** On 542 held-out requests from one
+developer's sessions, labelled planning or execution by Claude (so an estimate, not ground
+truth), the phase rules alone were right 92% of the time and moved 84% of
+main-thread turns off Anthropic. They also sent 38 of 82 planning turns (46%) to
+the execution downstream: auto saves money, it doesn't protect every planning
+turn. Put `#planning` on a turn that matters. With a model, 25 of 82 planning
+turns were misrouted, but more execution turns stayed on Anthropic (42 of 460 against 7)
+and overall accuracy fell to 88%, so the model is a trade, not a clear win.
+
+**The model is optional and ships untrained.** Without `auto_model.json` in the
+config dir, auto runs on the phase rules alone. A model is a small linear
+scorer over the words and word pairs in your message; the router reads it as plain JSON and
+needs nothing installed. To train one on your own transcripts, label a sample
+of your turns planning or execution and run `tools/auto_train.py` (`train` and
+`eval`; its docstring has the file formats). It needs scikit-learn in a separate
+venv (`python3 -m venv V && V/bin/pip install scikit-learn`); the router never
+imports it. Keep labels and weights out of the repo. A model that can't be
+read gives a banner and auto carries on without it.
+
+**Privacy:** deciding sends nothing anywhere. It reads the request in memory,
+makes no model call, and the training tool runs offline on your machine.
+
 ## Downstreams
 
 A downstream is any Anthropic-compatible service the router can send traffic
@@ -346,7 +396,8 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
 
 - **Presets:** the whole setup under a name, one card each, with Switch,
   Export and Delete (see [Presets](#presets)).
-- **Lever:** Anthropic, Rules, or one of your downstreams. With one session
+- **Lever:** Anthropic, Rules, Auto, or one of your downstreams. Auto opens a
+  small settings box. With one session
   picked, the lever shows and sets that session's own lever (the same one
   `/signaller` sets, updated live). "back to global" drops it.
 - **Tracks:** one row per downstream. Each row shows whether a key is set, the
@@ -513,6 +564,8 @@ the span are remembered in the browser.
 - `presets.json`: the saved presets and which one is active; the active one's
   config is `console.json`. An unreadable file moves to `presets.json.bad`, and
   your current setup is kept as "my setup" (a banner says so).
+- `auto_model.json`: the optional auto-mode scorer, written by `tools/auto_train.py`.
+  Absent by default; you put it here.
 - `session_levers.json`: each session's own `/signaller` lever, so a restart
   keeps it. A session id unseen for a week is dropped.
 - `downstreams.keys.json`: the downstreams' keys, by id and host — the same id
@@ -639,6 +692,8 @@ claude plugin test plugin/signaller
 | `store.py` | `console.json` load/save and the SQLite stats store (one writer thread) |
 | `console.py` | `/ui` static files and the JSON API, loopback Host/Origin checks |
 | `ui/` | the console: vanilla JS and CSS, no build step, strict CSP |
+| `autophase.py` | auto mode: phase from the history, the text scorer, old-thinking drop |
+| `tools/auto_train.py` | offline: train and evaluate auto's scorer (needs scikit-learn; never imported by the router) |
 | `plugin/signaller/` | the Claude Code plugin (`/signaller`, `signaller_lever` tool) |
 
 Design specs and plans are in `docs/superpowers/`. `AGENTS.md` has the

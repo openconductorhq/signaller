@@ -100,6 +100,15 @@ breaks.
   unparseable is kept for `config_from_json` to reject with a reason. An
   unreadable `presets.json` falls back to a fresh "my setup" with a banner,
   never a dead router.
+- **Auto mode:** `autophase.phase` is pure over the request's messages and
+  settings (and an optional scorer): no I/O, no state. The decision is made once
+  per `(session, turn_key, human index)` in `App.auto_decide`, so a tool loop's
+  steps agree; it never raises (a failure is `none`, which routes to execution).
+  Planning ends one way: nothing reopens it. The only Anthropic body rewrite
+  beyond tags and the model name is `drop_old_thinking`, in `prepare()`, auto
+  only. The model (`auto_model.json`) is optional; a bad one gives a banner,
+  not a failure. No datasets, labels or weights go in the repo; `tools/auto_train.py`
+  is the only file that may need scikit-learn, and the router never imports it.
 - **The body is rewritten only when something changes** (leading tags, a
   downstream's model name, Valar's tool fixes): `req` is parsed once, edited,
   and re-serialised once. An untouched Anthropic request goes out byte for
