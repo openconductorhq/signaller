@@ -23,15 +23,10 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import autophase  # noqa: E402
+from keys import write_json  # noqa: E402
 
 FOLLOW = re.compile(r"^\W*(go|go ahead|ok|okay|yes|yep|yeah|y|no|nope|n|sure|approved?|lgtm|do it|proceed|continue|"
                     r"done|looks (good|great|right)|sounds (good|right)|agree|both|[a-d1-9])\b[\s\S]{0,40}$", re.I)
-
-
-def features(text: str) -> set:
-    """Exactly what autophase.Model scores: binary [a-z0-9_]+ unigrams and space-joined bigrams."""
-    t = autophase.WORD_RE.findall(text.lower()[:20000])
-    return set(t) | {a + " " + b for a, b in zip(t, t[1:])}
 
 
 def follow_on(text: str) -> bool:
@@ -57,11 +52,6 @@ def _events(path):
                 continue
             if isinstance(e, dict):
                 yield e
-
-
-def _content(msg) -> list:
-    c = msg.get("content")
-    return [{"type": "text", "text": c}] if isinstance(c, str) else [b for b in c if isinstance(b, dict)] if isinstance(c, list) else []
 
 
 def _is_human(e) -> bool:
@@ -100,13 +90,13 @@ def replay(path):
             yield from flush(reply=True)
             mid = m.get("id")
             if msgs and msgs[-1]["role"] == "assistant" and mid and msgs[-1].get("_id") == mid:
-                msgs[-1]["content"] += _content(m)
+                msgs[-1]["content"] += autophase.blocks(m)
                 uuids[-1].add(u)
             else:
-                msgs.append({"role": "assistant", "content": _content(m), "_id": mid})
+                msgs.append({"role": "assistant", "content": autophase.blocks(m), "_id": mid})
                 uuids.append({u})
             continue
-        blocks = _content(m)
+        blocks = autophase.blocks(m)
         text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str))
         if msgs and msgs[-1]["role"] == "user":
             msgs[-1]["content"] += blocks
@@ -120,14 +110,6 @@ def replay(path):
     yield from flush()
 
 
-def main_turns(path):
-    """[(idx, messages, text)] for a main session; text = the human text the router scores for that turn."""
-    out = []
-    for i, (msgs, _) in enumerate(replay(path)):
-        out.append((i, msgs, autophase.human_text(msgs[-1]) or ""))
-    return out
-
-
 def brief(path):
     """([first user message], its text) of a subagent/teammate transcript: the brief, before any reply."""
     msg = {"role": "user", "content": []}
@@ -135,7 +117,7 @@ def brief(path):
         if e.get("type") == "assistant":
             break
         if e.get("type") == "user" and isinstance(e.get("message"), dict):
-            msg["content"] += _content(e["message"])
+            msg["content"] += autophase.blocks(e["message"])
     text = autophase.human_text(msg)
     return ([msg], text) if text else None
 
@@ -155,7 +137,7 @@ def agent_kind(path, text) -> str:
 def fit(rows: list, C=1.0, top=5000):
     from sklearn.feature_extraction.text import CountVectorizer
     from sklearn.linear_model import LogisticRegression
-    vec = CountVectorizer(analyzer=lambda t: sorted(features(t)), binary=True)
+    vec = CountVectorizer(analyzer=lambda t: sorted(autophase.features(t)), binary=True)
     X = vec.fit_transform([r["text"] for r in rows])
     y = [r["label"] == "planning" for r in rows]
     clf = LogisticRegression(C=C, class_weight="balanced", max_iter=5000).fit(X, y)
@@ -173,8 +155,7 @@ def cmd_train(a):
     rows = [json.loads(line) for line in open(a.labels)]
     tr, _ = split(rows)
     model = fit(train_rows(tr))
-    with open(a.out, "w") as f:
-        json.dump(model, f)
+    write_json(a.out, model)
     p = sum(r["label"] == "planning" for r in train_rows(tr))
     print("trained on %d rows (%d planning), %d weights → %s" % (len(train_rows(tr)), p, len(model["weights"]), a.out))
 
@@ -193,7 +174,7 @@ def requests(rows, transcripts):
             if b:
                 yield rs[0], b[0]
             continue
-        turns = {i: m for i, m, _ in main_turns(os.path.join(transcripts, sess + ".jsonl"))}
+        turns = {i: msgs for i, (msgs, _) in enumerate(replay(os.path.join(transcripts, sess + ".jsonl")))}
         for r in rs:
             if r["idx"] in turns:
                 yield r, turns[r["idx"]]
@@ -246,13 +227,7 @@ def cmd_eval(a):
         phase_pe = summary(run(0.8)[0]["phase only"])["pe"]
         for thr in [x / 100 for x in range(50, 100, 5)] + [0.99]:
             sweep[thr] = summary(run(thr)[0]["phase + model"])
-        chosen = min(t for t, s in sweep.items() if s["pe"] <= phase_pe)  # the brief's rule
-        if not a.plan_dirs:  # a what-if run with other plan dirs doesn't overwrite the recommendation
-            with open(a.model) as f:
-                d = json.load(f)
-            d["threshold"] = chosen
-            with open(a.model, "w") as f:
-                json.dump(d, f)
+        chosen = min(t for t, s in sweep.items() if s["pe"] <= phase_pe)  # the brief's rule, reported only
     else:
         chosen = 0.8
     thr = a.threshold if a.threshold is not None else chosen
@@ -286,7 +261,7 @@ def cmd_eval(a):
               "| threshold | accuracy | planning→execution | execution→anthropic | moved off |", "|---|---|---|---|---|"]
         for t, s in sweep.items():
             L.append("| %.2f | %.1f%% | %d | %d | %d |" % (t, 100 * s["acc"], s["pe"], s["ea"], s["off"]))
-        L += ["", "Brief's rule (lowest threshold with planning→execution ≤ phase only's = %d): **%.2f**, written to the model file as `threshold`." % (phase_pe, chosen)]
+        L += ["", "Brief's rule (lowest threshold with planning→execution ≤ phase only's = %d): **%.2f** — set it in the console's Auto section." % (phase_pe, chosen)]
     for name, rs in res.items():
         bad, by = [r for l, t, k, r in rs if l == "planning" and t == "valar"], {}
         L += ["", "## Remaining planning→execution misroutes: %s (%d)" % (name, len(bad)), ""]
@@ -324,7 +299,7 @@ def selftest():
         m = autophase.Model.load(p)
     plan, ex = m.score("brainstorm a spec for the plan"), m.score("fix the test and push")
     assert plan > 0.5 > ex, (plan, ex)
-    assert features("Fix the TEST") == {"fix", "the", "test", "fix the", "the test"}
+    assert autophase.features("Fix the TEST") == {"fix", "the", "test", "fix the", "the test"}
     assert follow_on("yes") and follow_on("2. go ahead") and not follow_on("let us brainstorm the design and write a spec")
     print("selftest ok (planning %.2f, execution %.2f)" % (plan, ex))
 

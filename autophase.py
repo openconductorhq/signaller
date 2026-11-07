@@ -21,7 +21,7 @@ class AutoSettings:
     threshold: float = 0.8
 
 
-def _blocks(msg) -> list:
+def blocks(msg) -> list:
     c = msg.get("content") if isinstance(msg, dict) else None
     if isinstance(c, str):
         return [{"type": "text", "text": c}]
@@ -32,28 +32,30 @@ def human_text(msg) -> Optional[str]:
     """Joined human text of a user message, None when it has none (same filter as routing.latest_human_text)."""
     if not isinstance(msg, dict) or msg.get("role") != "user":
         return None
-    texts = [b["text"] for b in _blocks(msg)
+    texts = [b["text"] for b in blocks(msg)
              if b.get("type") == "text" and isinstance(b.get("text"), str)
              and not b["text"].strip().startswith("<system-reminder>")]
     return "\n".join(texts) if texts else None
 
 
-def human_index(messages: list) -> int:
+def _last_user(messages: list, new_turn: bool) -> int:
+    """Backwards scan for the latest user message with human text; `new_turn` also skips ones carrying a tool_result."""
     for i in range(len(messages) - 1, -1, -1):
-        if human_text(messages[i]) is not None:
+        m = messages[i]
+        if human_text(m) is not None and not (new_turn and any(b.get("type") == "tool_result" for b in blocks(m))):
             return i
     return -1
+
+
+def human_index(messages: list) -> int:
+    return _last_user(messages, new_turn=False)
 
 
 def turn_index(messages: list) -> int:
     """Index of the message that opened the current human turn: the latest user message with human text and no
     tool_result. Claude Code appends text to a tool_result message (a skill's body, a task notification, an
     interrupt's new prompt); that continues the turn rather than starting one. -1 if none."""
-    for i in range(len(messages) - 1, -1, -1):
-        m = messages[i]
-        if human_text(m) is not None and not any(b.get("type") == "tool_result" for b in _blocks(m)):
-            return i
-    return -1
+    return _last_user(messages, new_turn=True)
 
 
 def phase(messages: list, s: AutoSettings, score: Optional[Callable[[str], float]]) -> tuple:
@@ -74,7 +76,7 @@ def phase(messages: list, s: AutoSettings, score: Optional[Callable[[str], float
             continue
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
-        for b in _blocks(msg):
+        for b in blocks(msg):
             if b.get("type") != "tool_use":
                 continue
             inp = b.get("input") if isinstance(b.get("input"), dict) else {}
@@ -97,10 +99,19 @@ def phase(messages: list, s: AutoSettings, score: Optional[Callable[[str], float
     return "none", "no planning signal"
 
 
+def features(text: str) -> set:
+    """What Model scores: binary [a-z0-9_]+ unigrams and space-joined bigrams of the first 20000 characters.
+    The offline trainer (tools/auto_train.py) uses the same function, so training and serving never diverge."""
+    t = WORD_RE.findall(text[:20000].lower())
+    return set(t) | {a + " " + b for a, b in zip(t, t[1:])}
+
+
 class Model:
     def __init__(self, bias: float, weights: dict):
         self.bias, self.weights = bias, weights
-        self.score = lru_cache(maxsize=2048)(self._score)
+        cached = lru_cache(maxsize=2048)(self._score)
+        self.score = lambda text: cached(text[:20000])  # keyed on the capped text: the scorer reads no further
+        self.score.cache_clear = cached.cache_clear  # the trainer times cold decisions
 
     @classmethod
     def load(cls, path: str) -> "Model":
@@ -123,8 +134,7 @@ class Model:
         return cls(bias, weights)
 
     def _score(self, text: str) -> float:
-        t = WORD_RE.findall(text.lower()[:20000])
-        feats = set(t) | {a + " " + b for a, b in zip(t, t[1:])}
+        feats = features(text)  # arrives capped at 20000 chars (self.score)
         z = self.bias + sum(self.weights.get(f, 0.0) for f in feats)
         return 1 / (1 + math.exp(-max(-60.0, min(60.0, z))))
 
@@ -147,6 +157,8 @@ def drop_old_thinking(req: dict) -> bool:
     for msg in msgs[:max(turn_index(msgs), 0)]:
         if not isinstance(msg, dict) or msg.get("role") != "assistant" or not isinstance(msg.get("content"), list):
             continue
+        if not any(isinstance(b, dict) and from_downstream(b) for b in msg["content"]):
+            continue  # the common case: nothing of theirs to drop
         keep = [b for b in msg["content"] if not (isinstance(b, dict) and from_downstream(b))]
         # a message that would be left empty is kept unchanged (an empty one 400s); Anthropic may still reject it
         if keep and len(keep) != len(msg["content"]):
