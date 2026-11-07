@@ -697,6 +697,36 @@ class ProxyTest(unittest.TestCase):
         self.post(body, {**HDRS, "X-Claude-Code-Session-Id": "s1"})
         self.assertEqual(self.a.seen[1][3], body)  # rules: byte for byte
 
+    def test_auto_text_on_a_tool_result_continues_the_turn(self):
+        brain = [U("an idea"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES]
+        think = lambda name: {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},
+                                                               {"type": "tool_use", "id": "x", "name": "Skill", "input": {"skill": name}}]}
+        skill_body = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"},
+                                                  {"type": "text", "text": "Base directory for this skill: /x"}]}
+        self.assertEqual(self.auto_post([U("go")]), (0, 1))  # no signal: the downstream
+        self.assertEqual(self.auto_post([U("go"), think("superpowers:brainstorming"), skill_body]), (0, 2))  # same turn, same track
+        self.assertEqual(self.auto_post(brain + [U("next")]), (1, 2))  # planning → Anthropic
+        self.auto_post(brain + [U("next"), think("superpowers:writing-plans"), skill_body])
+        self.assertEqual(json.loads(self.a.seen[1][3])["messages"][4]["content"][0]["type"], "thinking")  # the step's own: kept
+        interrupted = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "no", "is_error": True},
+                                                   {"type": "text", "text": "[Request interrupted by user for tool use]"},
+                                                   {"type": "text", "text": "do it differently"}]}
+        self.auto_post(brain + [U("next"), think("superpowers:writing-plans"), interrupted])
+        self.assertEqual(json.loads(self.a.seen[2][3])["messages"][4]["content"][0]["type"], "thinking")  # interrupted: kept
+
+    def test_auto_count_tokens_and_sessionless_requests(self):
+        self.auto_post([U("an idea"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES, U("go")])
+        self.post(body_for("claude-opus-5-5", {"messages": [U("fresh")]}), {**HDRS, "X-Claude-Code-Session-Id": "s1"},
+                  path="/v1/messages/count_tokens")
+        self.assertEqual(self.app.auto_for("s1")["phase"], "planning")  # count_tokens doesn't move it
+        n = len(self.app._auto)
+        f = signaller.Features.from_body(body_for("claude-opus-5-5", {"messages": [U("fresh")]}))
+        own = replace(self.app.routing.auto, planning_skills=("mine",))
+        self.assertEqual(self.app.auto_decide(f, own)[0], "none")
+        self.assertEqual(len(self.app._auto), n)  # no session: not cached
+        f.messages = [U("x"), tool("Skill", {"skill": "mine"}), RES, U("fresh")]
+        self.assertEqual(self.app.auto_decide(f, own)[0], "planning")  # the settings passed in, not app.routing's
+
     def test_auto_model_unreadable_or_failing_falls_back(self):
         with open(os.path.join(self.dir, "auto_model.json"), "w") as f:
             f.write("{nope")
@@ -706,10 +736,10 @@ class ProxyTest(unittest.TestCase):
         self.assertIn("Auto mode's model couldn't be read (ValueError)", app.banner)
         msgs = [U("an idea"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES, U("go")]
         f = signaller.Features.from_body(body_for("claude-opus-5-5", {"messages": msgs}))
-        self.assertEqual(app.auto_decide(f)[0], "planning")  # phase alone still decides
+        self.assertEqual(app.auto_decide(f, app.routing.auto)[0], "planning")  # phase alone still decides
         app.auto_model = mock.Mock(score=mock.Mock(side_effect=RuntimeError))
         f = signaller.Features.from_body(body_for("claude-opus-5-5", {"messages": [U("fresh")]}))
-        self.assertEqual(app.auto_decide(f), ("none", "model error"))  # never raised
+        self.assertEqual(app.auto_decide(f, app.routing.auto), ("none", "model error"))  # never raised
 
 
 def U(text):

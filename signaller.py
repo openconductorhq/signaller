@@ -1,5 +1,6 @@
 """signaller: route Claude Code requests to Anthropic or one of the downstreams set up in the console."""
 import collections
+import hashlib
 import http.client
 import http.server
 import ipaddress
@@ -127,7 +128,7 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
     settings lines applied. `req` (when a dict) is edited in place; `changed` says it must be re-serialised."""
     name, base, key, ds = upstream(app, track, routing)
     if not ds:
-        # auto only: a downstream's unsigned thinking from an earlier turn can't go to Anthropic (it discards them anyway)
+        # auto only: a downstream's unsigned thinking from an earlier turn can't go to Anthropic (it 400s on them)
         dropped = track == "anthropic" and (routing or app.routing).lever == "auto" and isinstance(req, dict) \
             and autophase.drop_old_thinking(req)
         return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, dropped, None
@@ -365,14 +366,17 @@ class App:
             self.banner = " ".join(filter(None, [self.banner, "Auto mode's model couldn't be read (%s); auto runs on the phase alone." % type(e).__name__]))
             return None
 
-    def auto_decide(self, f: Features) -> tuple[str, str]:
-        """(phase, why) for auto, decided once per human turn (a tool loop's steps share the key). Never raises."""
+    def auto_decide(self, f: Features, s: "autophase.AutoSettings", note: bool = True) -> tuple[str, str]:
+        """(phase, why) for auto, decided once per human turn: keyed on the message that opened it (turn_index), so
+        a tool loop's steps agree even when Claude Code appends text to a tool result. Never raises."""
         try:
-            key = (f.session, f.turn_key, autophase.human_index(f.messages))
+            i = autophase.turn_index(f.messages)
+            text = autophase.human_text(f.messages[i]) if i >= 0 else ""
+            key = (f.session, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), i) if f.session else None
         except Exception:
             return "none", "phase error"
         with self._auto_lock:
-            got = self._auto.get(key)
+            got = self._auto.get(key) if key else None
         if got is None:
             m, failed = self.auto_model, []
 
@@ -383,14 +387,16 @@ class App:
                     failed.append(True)
                     raise
             try:
-                got = autophase.phase(f.messages, self.routing.auto, score if m else None)
+                got = autophase.phase(f.messages, s, score if m else None)
             except Exception:
                 got = ("none", "model error") if failed else ("none", "phase error")
-            with self._auto_lock:
-                self._auto[key] = got
-                if len(self._auto) > 1024:
-                    self._auto.popitem(last=False)
-        self.note_auto(f, *got)
+            if key:  # no session: nothing to share a turn with
+                with self._auto_lock:
+                    self._auto[key] = got
+                    if len(self._auto) > 1024:
+                        self._auto.popitem(last=False)
+        if note:
+            self.note_auto(f, *got)
         return got
 
     def note_auto(self, f: Features, phase: str, why: str) -> None:
@@ -654,8 +660,10 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     # Claude Code sends an agent id on every request that isn't the main thread's (the team lead's,
                     # in a team); a subagent also has cc_is_subagent=true, so the rest are teammates
                     f.teammate = not f.subagent and bool(self.headers.get("x-claude-code-agent-id"))
-                d = decide_route(routing, f, app.classifier, auto=app.auto_decide if routing.lever == "auto" else None) if f else None
-                if d and d.reason == "tag" and routing.lever == "auto":  # a lead tag decided; auto_decide never ran
+                msgs = self.path.split("?", 1)[0] == "/v1/messages"  # count_tokens decides but doesn't move auto_last
+                auto = (lambda f: app.auto_decide(f, routing.auto, msgs)) if routing.lever == "auto" else None
+                d = decide_route(routing, f, app.classifier, auto=auto) if f else None
+                if d and d.reason == "tag" and routing.lever == "auto" and msgs:  # a lead tag decided; auto_decide never ran
                     app.note_auto(f, "planning" if d.track == "anthropic" else "execution", "tag")
             except Exception as e:
                 self._error(500, "signaller: routing failed")
