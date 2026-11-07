@@ -679,6 +679,14 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(self.auto_post(step), (2, 1))  # a tool-loop step of the planning turn keeps its decision
         self.assertEqual(self.app.auto_last["s1"]["phase"], "planning")
 
+    def test_auto_last_main_thread_only_and_tags(self):
+        self.auto_post([U("an idea"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES, U("go")])
+        self.app.set_session_lever("s1", "auto")
+        self.post(body_for("claude-opus-5-5", {"messages": [U("do a thing")]}), {**HDRS, "X-Claude-Code-Session-Id": "s1", "x-claude-code-agent-id": "a1"})
+        self.assertEqual(self.app.auto_for("s1")["phase"], "planning")  # a teammate's request leaves it alone
+        self.auto_post([U("#execution just build it")])
+        self.assertEqual(self.app.auto_for("s1"), {"phase": "execution", "why": "tag"})
+
     def test_auto_drops_old_thinking_for_anthropic_only(self):
         think = {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},
                                                   {"type": "tool_use", "id": "x", "name": "Skill", "input": {"skill": "superpowers:brainstorming"}}]}

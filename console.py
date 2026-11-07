@@ -246,7 +246,7 @@ def state(app, query=None):
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
             "downstreams": {d.id: {"key_set": app.keys.has(d.id, d.url), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
-            "recent_count": len(app.recent),
+            "recent_count": len(app.recent), "auto_model": app.auto_model is not None,
             # effective levers only (lever_for): a raw entry the active setup can't follow would show a lever the router ignores
             "session_levers": {s: l for s, l in ((s, app.lever_for(s)) for s in app.session_levers) if l},
             "collisions": app.collisions(),
@@ -330,8 +330,7 @@ def api(h, app, method, path, query, body):
         elif method != "GET":
             raise Err(405, "GET or PUT")
         own = app.lever_for(sid)
-        with app._auto_lock:  # the phase auto last chose for this session, while auto is its lever
-            auto = dict(app.auto_last[sid]) if (own or app.routing.lever) == "auto" and sid in app.auto_last else None
+        auto = app.auto_for(sid) if (own or app.routing.lever) == "auto" else None  # the phase auto last chose, while auto is its lever
         return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes, "auto": auto,
                 "name": st.session_name(sid), "notice": app.notices.get(sid), "prompts": dict(app.routing.prompts)}
     m = re.fullmatch(r"/ui/api/sessions/([^/]+)", path)

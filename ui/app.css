@@ -326,3 +326,6 @@ ol.prlist>li{padding:10px 4px;border-top:1px solid var(--line)}
 @media (prefers-reduced-motion:reduce){
   *{transition:none!important;animation:none!important}
 }
+
+.autobox{margin:0 0 12px}.autobox .hint{margin:0 0 6px}
+.autogrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}

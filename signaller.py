@@ -390,13 +390,22 @@ class App:
                 self._auto[key] = got
                 if len(self._auto) > 1024:
                     self._auto.popitem(last=False)
-        if f.session:
+        self.note_auto(f, *got)
+        return got
+
+    def note_auto(self, f: Features, phase: str, why: str) -> None:
+        """What auto last chose for a session's main thread (a subagent or teammate request doesn't overwrite it)."""
+        if f.session and not f.subagent and not f.teammate:
             with self._auto_lock:
-                self.auto_last[f.session] = {"phase": got[0], "why": got[1]}
+                self.auto_last[f.session] = {"phase": phase, "why": why}
                 self.auto_last.move_to_end(f.session)
                 if len(self.auto_last) > 1024:
                     self.auto_last.popitem(last=False)
-        return got
+
+    def auto_for(self, sid: str) -> dict | None:
+        with self._auto_lock:
+            got = self.auto_last.get(sid)
+            return dict(got) if got else None
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
         """One small entry per session that used /signaller; saved so a restart keeps it."""
@@ -646,6 +655,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     # in a team); a subagent also has cc_is_subagent=true, so the rest are teammates
                     f.teammate = not f.subagent and bool(self.headers.get("x-claude-code-agent-id"))
                 d = decide_route(routing, f, app.classifier, auto=app.auto_decide if routing.lever == "auto" else None) if f else None
+                if d and d.reason == "tag" and routing.lever == "auto":  # a lead tag decided; auto_decide never ran
+                    app.note_auto(f, "planning" if d.track == "anthropic" else "execution", "tag")
             except Exception as e:
                 self._error(500, "signaller: routing failed")
                 print("%s route=- reason=error status=500 err=%s shadow=-" % (

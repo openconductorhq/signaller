@@ -213,6 +213,11 @@ class ConsoleTest(Fixture):
         self.assertEqual(j["lever"], "rules")
         self.assertEqual(j["session"], None)
 
+    def test_state_says_whether_the_auto_model_is_loaded(self):
+        self.assertIs(self.js("GET", "/ui/api/state")[1]["auto_model"], False)
+        self.app.auto_model = object()
+        self.assertIs(self.js("GET", "/ui/api/state")[1]["auto_model"], True)
+
     def test_state_serves_only_levers_the_setup_can_follow(self):
         self.app.session_levers["s1"] = "valar"
         self.app.session_levers["s2"] = "lemmi"  # a preset switch or restart dropped that track

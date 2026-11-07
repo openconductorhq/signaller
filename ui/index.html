@@ -21,10 +21,22 @@
     <div class="frame" id="lever" role="radiogroup" aria-label="Lever: where requests go">
       <button type="button" class="lever" role="radio" data-v="anthropic" data-t="anthropic" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
       <button type="button" class="lever" role="radio" data-v="rules" aria-checked="false"><b>Rules</b><small>follow the rulebook</small></button>
+      <button type="button" class="lever" role="radio" data-v="auto" aria-checked="false"><b>Auto</b><small id="autoSub">planning → Anthropic, the rest → downstream</small></button>
     </div>
   </header>
   <p id="leverScope" class="hint"></p>
   <p id="leverErr" class="err" role="alert" hidden></p>
+  <section id="autoBox" class="autobox" aria-label="Auto settings" hidden>
+    <p class="hint">Auto settings apply to all sessions. <span id="autoModel"></span></p>
+    <div class="autogrid">
+      <label class="f">Execution runs on<select id="auExec" data-k="au:exec"></select></label>
+      <label class="f">Planning skills<input id="auPlan" data-k="au:plan" type="text" placeholder="comma-separated" autocomplete="off"></label>
+      <label class="f">Execution skills<input id="auSkills" data-k="au:skills" type="text" placeholder="comma-separated" autocomplete="off"></label>
+      <label class="f">Spec and plan folders<input id="auDirs" data-k="au:dirs" type="text" placeholder="comma-separated" autocomplete="off"></label>
+      <label class="f">Threshold (0.5–0.99)<input id="auThr" data-k="au:thr" type="number" min="0.5" max="0.99" step="0.01"></label>
+    </div>
+    <p id="autoErr" class="err" role="alert" hidden></p>
+  </section>
   <p id="localWarn" class="warnline" role="status" hidden><span id="localWarnT"></span> <button type="button" class="linkish" id="localWarnX">OK</button></p>
 
   <div class="tfrow">

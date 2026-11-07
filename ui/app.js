@@ -6,7 +6,7 @@ const DS = () => (cfg ? cfg.downstreams : []);
 const dsOf = (t) => DS().find((d) => d.id === t);
 const TRACKS = () => ["anthropic", ...DS().map((d) => d.id)];
 const gone = (t) => t !== "anthropic" && !dsOf(t);
-const NAME = (t) => t === "anthropic" ? "Anthropic" : dsOf(t) ? dsOf(t).name : t;
+const NAME = (t) => t === "anthropic" ? "Anthropic" : t === "auto" ? "Auto" : dsOf(t) ? dsOf(t).name : t;
 const label = (t) => NAME(t) + (gone(t) ? ", removed" : "");
 // Each track's colour reaches CSS as --c on its elements.
 const col = (t) => t === "anthropic" ? "var(--anth)" : dsOf(t) ? dsOf(t).color : "var(--off)";
@@ -218,7 +218,7 @@ function applyState(st) {
   if (t) t.textContent = tallyText();
   // don't clobber a field the user is typing in, or an optimistic edit in flight
   const f = document.activeElement;
-  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f) || $("prm").contains(f));
+  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f) || $("autoBox").contains(f) || $("prm").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }  // again after a save: fresh collisions, fresh settings
   renderCollisions();  // every poll: /signaller or the picker can change them without this tab's config JSON changing
   $("presetGo").hidden = !st.preset;
@@ -322,12 +322,15 @@ function renderLever() {
     b.setAttribute("aria-checked", String(on));
     b.tabIndex = on ? 0 : -1;
   }
-  const off = lv !== "rules";
+  const off = lv !== "rules", auto = lv === "auto";
   $("rulebook").classList.toggle("dim", off);
   $("leverNote").hidden = !off;
-  $("leverNote").style.color = off ? col(lv) : "";
-  $("leverNote").textContent = off ? `The lever is sending ${id ? "this session" : "everything"} to ${NAME(lv)}` : "";
-  for (const [t, y] of Object.entries(YARD)) y.trk.classList.toggle("dim", off && t !== lv);
+  $("leverNote").style.color = off && !auto ? col(lv) : "";
+  $("leverNote").textContent = !off ? "" : auto ? `Auto is choosing for ${id ? "this session" : "everything"}: planning to Anthropic, the rest to ${NAME(execTrack())}`
+    : `The lever is sending ${id ? "this session" : "everything"} to ${NAME(lv)}`;
+  $("autoSub").textContent = `planning → Anthropic, the rest → ${NAME(execTrack())}`;
+  renderAuto(auto);
+  for (const [t, y] of Object.entries(YARD)) y.trk.classList.toggle("dim", off && !auto && t !== lv);
   $("jlabel").textContent = off ? "lever" : "rulebook";
   if (!offTrack(lv)) $("localWarn").hidden = true;
   const sc = $("leverScope");
@@ -335,6 +338,29 @@ function renderLever() {
   else sc.replaceChildren("Lever for ", el("b", {}, fullLabel(id)), own ? " · its own" : ` · following the global lever (${cfg.lever === "rules" ? "Rules" : NAME(cfg.lever)})`,
     own ? " " : "", own ? el("button", { type: "button", class: "linkish", "data-k": "lever:reset", onclick: () => setLever(null) }, "back to global") : "");
 }
+// where auto sends execution: auto.execution, else the first downstream, else Anthropic (the router's exec_track)
+const execTrack = () => cfg.auto.execution && dsOf(cfg.auto.execution) ? cfg.auto.execution : DS().length ? DS()[0].id : "anthropic";
+const csv = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
+function renderAuto(show) {
+  $("autoBox").hidden = !show;
+  if (!show) return;
+  const a = cfg.auto, ex = $("auExec");
+  const opts = JSON.stringify(DS().map((d) => [d.id, d.name]));
+  if (ex.dataset.opts !== opts) {  // a poll must not rebuild an open dropdown
+    ex.dataset.opts = opts;
+    ex.replaceChildren(el("option", { value: "" }, "(first downstream)"), ...DS().map((d) => el("option", { value: d.id }, d.name)));
+  }
+  ex.value = a.execution || "";
+  for (const [id, v] of [["auPlan", a.planning_skills.join(", ")], ["auSkills", a.execution_skills.join(", ")], ["auDirs", a.plan_dirs.join(", ")], ["auThr", a.threshold]])
+    if (document.activeElement !== $(id)) $(id).value = v;
+  $("autoModel").textContent = S && S.auto_model ? "Model: loaded" : "Model: none — auto uses the phase alone";
+}
+const saveAuto = (patch) => save({ ...cfg, auto: { ...cfg.auto, ...patch } }, $("autoErr"));
+$("auExec").addEventListener("change", (e) => saveAuto({ execution: e.target.value || null }));
+$("auPlan").addEventListener("change", (e) => saveAuto({ planning_skills: csv(e.target.value) }));
+$("auSkills").addEventListener("change", (e) => saveAuto({ execution_skills: csv(e.target.value) }));
+$("auDirs").addEventListener("change", (e) => saveAuto({ plan_dirs: csv(e.target.value) }));
+$("auThr").addEventListener("change", (e) => saveAuto({ threshold: e.target.value === "" ? NaN : Number(e.target.value) }));
 const offTrack = (v) => !!dsOf(v);
 function warnOff(v) {
   $("localWarnT").textContent = `Conversations that run on ${NAME(v)} may fail when you switch back. Start a new session afterwards if they do.`;
@@ -1021,7 +1047,7 @@ function imPanel(pv) {
         el("small", {}, bits.filter(Boolean).join(" · ")));
     }) : el("div", { class: "imtrk" }, "Anthropic only"));
   const route = [];
-  if (c.lever && c.lever !== "rules") route.push(el("div", {}, "the lever sends everything → ", ptrk(c.lever)));
+  if (c.lever && c.lever !== "rules") route.push(el("div", {}, c.lever === "auto" ? "auto: planning → Anthropic, the rest → the execution downstream" : ["the lever sends everything → ", ptrk(c.lever)]));
   for (const r of c.rules || []) if (r.enabled) {
     if (r.kind === "classifier") for (const l of (c.classifier && c.classifier.labels) || []) route.push(el("div", {}, l.name, " → ", ptrk(l.track)));
     else for (const l of lines(r.text)) {
@@ -1190,6 +1216,7 @@ const OVERLAP = 50;
 function shortReason(reason, row) {
   if (!reason) return "";
   if (reason === "lever") return "lever";
+  if (reason.startsWith("auto:")) return "auto: " + reason.slice(5);
   if (reason === "default") return "otherwise";
   if (reason.startsWith("about:")) return "about: " + reason.slice(6);
   if (reason.startsWith("rule:")) {
