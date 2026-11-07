@@ -20,6 +20,18 @@ const stub = ($: any, on: any, http: (e: any) => any, store = new Map<string, un
   return $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 }
 
+// first in the file on purpose: MODES is the module default until a lever answer refreshes it, and this test
+// must see that default. The poll's GET fails (the router down at start), so nothing refreshes MODES first.
+test("a typed '/signaller auto' is known before the router has answered once", async ($, on) => {
+  await stub($, on, (e) => e.init?.method === 'PUT'
+    ? { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'auto', session: 'auto', global: 'rules', modes: ['rules', 'auto', 'anthropic'] }) } }
+    : { value: { ok: false, status: 503, text: 'down' } })
+  await $.prompt.submit({ text: 'do /signaller auto' })
+  const r = await $.tool.call({ tool: TOOL, lever: 'auto' })
+  expect(r.deny).toBeUndefined()
+  expect(String(r.result)).toContain('auto')
+})
+
 test('Claude switches the lever only when the latest prompt asks for it', async ($, on) => {
   const puts: string[] = []
   await stub($, on, (e) => {

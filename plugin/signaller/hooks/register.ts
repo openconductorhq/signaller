@@ -4,7 +4,7 @@ const BASE = 'http://127.0.0.1:8787'
 const LEVER = `${BASE}/ui/api/lever`
 const NAME = `${BASE}/ui/api/name`
 const SETTINGS = `${BASE}/ui/api/settings`
-let MODES = ['rules', 'anthropic'] // the router's list, refreshed by every lever answer
+let MODES = ['rules', 'auto', 'anthropic'] // until the router's list arrives: auto is a mode of the router itself
 const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the console takes writes from its own origin only
 
 type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null; auto?: { phase: string; why: string } | null; prompts?: Record<string, string>; notice?: { turn: string; text: string } | null }
