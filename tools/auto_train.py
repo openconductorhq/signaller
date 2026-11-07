@@ -105,7 +105,10 @@ def replay(path):
             msgs.append({"role": "user", "content": blocks})
             uuids.append({u})
         if _is_human(e) or ("<command-name>" in text and not e.get("isMeta")):
-            yield from flush()  # ponytail: two human events with no reply between → first one decided on its own history
+            # two human events with no reply between merge into one message (the merge above ran), so the first is
+            # decided with the second's text in it, not on its own history — ponytail: the router sees the same
+            # message Claude Code sends, and rebuilding it otherwise would need the reply events
+            yield from flush()
             pending = dict(e, _text=text)
     yield from flush()
 
@@ -211,7 +214,7 @@ def cmd_eval(a):
             res, ts = [], []
             for r, m in reqs:
                 if model:
-                    model.score.cache_clear()  # time a cold decision, not the lru cache
+                    model.cache_clear()  # time a cold decision, not the score memo
                 t0 = time.perf_counter()
                 tr = dec(r, m)
                 ts.append(time.perf_counter() - t0)

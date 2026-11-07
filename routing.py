@@ -1,12 +1,11 @@
 """Routing engine: features of a request, user-editable rules, and the decision with its explanation."""
-import hashlib
 import json
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Callable
 
-from autophase import AutoSettings, human_index, human_text
+from autophase import AutoSettings, human_index, human_text, text_hash, turn_text
 from rulelang import FIELDS, KEYWORDS, RuleError, evaluate, fields_of, parse
 
 ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
@@ -21,11 +20,6 @@ ID_RE = re.compile(r"[a-z][a-z0-9-]{0,23}")
 COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}")
 RESERVED_IDS = {"anthropic", "reset", "name", *LEVER_MODES} | KEYWORDS | set(FIELDS)
 PRICE_KEYS = ("in", "out", "cache_read", "cache_write")
-
-
-def text_hash(text: str) -> str:
-    """The sha256 of a text, tolerant of lone surrogates (turn keys, cache keys, prompt storage)."""
-    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def latest_human_text(messages: list) -> str:
@@ -171,13 +165,13 @@ def track_window(model: str, ds: Downstream) -> str | None:
 
 class Features:
     def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None, session=None, hour=None,
-                 teammate=False, messages=None):
+                 teammate=False, messages=None, tools=False):
         self.messages = messages if messages is not None else []
         self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
         self.step = step  # the tool results this request carries back (display only; routing uses text)
         self.prompt = untagged(text)  # uncapped and as sent upstream (no leading tags), for display
         self.tier, self.subagent, self.turn_key = tier_of(model), subagent, turn_key
-        self.session, self.hour, self.teammate = session, hour, teammate
+        self.session, self.hour, self.teammate, self.tools = session, hour, teammate, tools
 
     @classmethod
     def from_body(cls, body: bytes, req=None):
@@ -201,7 +195,7 @@ class Features:
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
             return None
         return cls(text, lead_tags(text), model, len(body) // 4, sub, text_hash(text), srv, step,
-                   messages=req["messages"])
+                   messages=req["messages"], tools=bool(req.get("tools")))
 
     def get(self, name: str, label: Callable[[], str]):
         return label() if name == "label" else getattr(self, {"tag": "tags"}.get(name, name))
@@ -557,9 +551,12 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
         # the lever can't send these anywhere useful: only Anthropic runs its own tools
         return Decision("anthropic", "rule:" + st.name, [{"rule": st.name, "outcome": "Anthropic-only tool, lever overridden → anthropic", "decided": True}])
     if cfg.lever == "auto":
-        tagged = "planning" in f.tags or "execution" in f.tags  # only the exact lead tags; the rest are ignored here
+        # the tags of the message that opened the turn, not of the latest human text: mid-turn that can be text
+        # Claude Code appended to a tool result, which must not tag the turn. Only the exact lead tags count.
+        tags = lead_tags(turn_text(f.messages))
+        tagged = "planning" in tags or "execution" in tags
         if tagged:
-            got = ph, why = ("planning" if "planning" in f.tags else "execution"), "tag"
+            got = ph, why = ("planning" if "planning" in tags else "execution"), "tag"
         else:
             got = ph, why = auto(f) if auto else ("none", "no planning signal")  # recorded as decided ("none" stays)
         ph = "planning" if ph == "planning" else "execution"

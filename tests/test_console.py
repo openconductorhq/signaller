@@ -202,7 +202,8 @@ class ConsoleTest(Fixture):
 
     def test_lever_answer_carries_the_auto_phase(self):
         self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "auto"})
-        self.post(body_for("claude-opus-5-5"), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.post(body_for("claude-opus-5-5", {"tools": [{"name": "Bash", "input_schema": {}}]}),
+                  {**HDRS, "X-Claude-Code-Session-Id": "s1"})  # a main-loop request carries its tools
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["auto"], {"phase": "none", "why": "no planning signal"})
         self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "rules"})
         self.assertIsNone(self.js("GET", "/ui/api/lever?session=s1")[1]["auto"])  # only while auto is its lever

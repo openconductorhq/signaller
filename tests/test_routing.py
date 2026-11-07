@@ -669,6 +669,17 @@ class AutoTests(unittest.TestCase):
         s.servertool = True
         self.assertEqual(route(self.cfg, s, boom, lambda _: ("execution", "x")).track, "anthropic")
 
+    def test_auto_tags_read_the_turns_opening_message(self):
+        # text Claude Code appends to a tool result mid-turn is not the turn's prompt: its tags, or lack of
+        # them, must not flip the track the turn was pinned to
+        msgs = [user(text("#execution build it")),
+                assistant([{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}]),
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"},
+                                             {"type": "text", "text": "Base directory for this skill: /r"}]}]
+        f = Features.from_body(body(msgs))
+        d = route(self.cfg, f, boom, lambda _: ("planning", "x"))
+        self.assertEqual((d.track, d.reason, d.auto), ("valar", "tag", ("execution", "tag")))
+
     def test_settings_round_trip_defaults_and_rejects(self):
         j = config_to_json(OFF)
         j.pop("auto")

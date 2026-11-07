@@ -188,6 +188,20 @@ class ProxyTest(unittest.TestCase):
         self.v.error = True  # any other downstream error passes through as it came
         self.assertEqual(self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "#execution hi"}]}), h)[0], 529)
 
+    def test_image_fallback_drops_the_current_turns_downstream_thinking(self):
+        # the fallback lands on Anthropic mid-turn, after the turn already ran on the downstream: its own
+        # thinking block is unsigned and Anthropic would 400 on it, so it goes from every message
+        self.v.no_images = True
+        img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}}
+        think = {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "stub"},
+                                                  {"type": "tool_use", "id": "x", "name": "Bash", "input": {}}]}
+        res = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}, img]}
+        msgs = [{"role": "user", "content": [img, {"type": "text", "text": "#execution look at this"}]}, think, res]
+        status, _ = self.post(body_for("claude-opus-5-5", {"messages": msgs}), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual(status, 200)
+        _, _, _, got = self.a.seen[0]
+        self.assertEqual([b["type"] for b in json.loads(got)["messages"][1]["content"]], ["tool_use"])
+
     def test_valar_swaps_credentials_and_model(self):
         self.post(body_for("claude-sonnet-5-5", {"max_tokens": 7}), {**HDRS, "x-api-key": "client"})
         _, path, h, got = self.v.seen[0]
@@ -667,7 +681,9 @@ class ProxyTest(unittest.TestCase):
 
     def auto_post(self, msgs, model="claude-opus-5-5"):
         self.app.set_session_lever("s1", "auto")
-        self.post(body_for(model, {"messages": msgs}), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        # main-loop requests carry their tools; a request without them is a side request (a title generation)
+        self.post(body_for(model, {"messages": msgs, "tools": [{"name": "Bash", "input_schema": {}}]}),
+                  {**HDRS, "X-Claude-Code-Session-Id": "s1"})
         return len(self.a.seen), len(self.v.seen)
 
     def test_auto_routes_by_phase_once_per_turn(self):
@@ -687,15 +703,18 @@ class ProxyTest(unittest.TestCase):
         self.auto_post([U("#execution just build it")])
         self.assertEqual(self.app.auto_for("s1"), {"phase": "execution", "why": "tag"})
 
-    def test_auto_drops_old_thinking_for_anthropic_only(self):
+    def test_anthropic_drops_downstream_thinking_every_lever_and_turn(self):
         think = {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},
                                                   {"type": "tool_use", "id": "x", "name": "Skill", "input": {"skill": "superpowers:brainstorming"}}]}
         self.auto_post([U("an idea"), think, RES, U("next")])
-        self.assertNotIn(b"thinking", self.a.seen[0][3])
+        self.assertNotIn(b"thinking", self.a.seen[0][3])  # auto: gone
         self.app.set_session_lever("s1", "rules")
         body = body_for("claude-opus-5-5", {"messages": [U("an idea"), think, RES, U("next")]})
         self.post(body, {**HDRS, "X-Claude-Code-Session-Id": "s1"})
-        self.assertEqual(self.a.seen[1][3], body)  # rules: byte for byte
+        self.assertNotIn(b"thinking", self.a.seen[1][3])  # rules after a downstream turn: gone too
+        clean = body_for("claude-opus-5-5", {"messages": [U("an idea"), RES, U("next")]})
+        self.post(clean, {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual(self.a.seen[2][3], clean)  # nothing of theirs to drop: byte for byte
 
     def test_auto_text_on_a_tool_result_continues_the_turn(self):
         brain = [U("an idea"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES]
@@ -707,12 +726,28 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(self.auto_post([U("go"), think("superpowers:brainstorming"), skill_body]), (0, 2))  # same turn, same track
         self.assertEqual(self.auto_post(brain + [U("next")]), (1, 2))  # planning → Anthropic
         self.auto_post(brain + [U("next"), think("superpowers:writing-plans"), skill_body])
-        self.assertEqual(json.loads(self.a.seen[1][3])["messages"][4]["content"][0]["type"], "thinking")  # the step's own: kept
+        # the current turn's own downstream thinking is dropped (no turn boundary); the tool_use it made stays
+        self.assertEqual(json.loads(self.a.seen[1][3])["messages"][4]["content"][0]["type"], "tool_use")
         interrupted = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "no", "is_error": True},
                                                    {"type": "text", "text": "[Request interrupted by user for tool use]"},
                                                    {"type": "text", "text": "do it differently"}]}
         self.auto_post(brain + [U("next"), think("superpowers:writing-plans"), interrupted])
-        self.assertEqual(json.loads(self.a.seen[2][3])["messages"][4]["content"][0]["type"], "thinking")  # interrupted: kept
+        self.assertEqual(json.loads(self.a.seen[2][3])["messages"][4]["content"][0]["type"], "tool_use")
+
+    def test_auto_decide_reads_history_up_to_the_turns_opening(self):
+        # sessionless, so no cache holds the turn: step 2's own Skill call sits after the opening message and
+        # must not flip the turn — it takes effect at the next turn, whose history then holds it
+        f = signaller.Features.from_body(body_for("claude-opus-5-5",
+                                                  {"messages": [U("x"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES]}))
+        self.assertEqual(self.app.auto_decide(f, self.app.routing.auto), ("none", "no planning signal"))
+
+    def test_auto_side_request_without_tools_leaves_auto_last(self):
+        self.auto_post([U("an idea"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES, U("go")])
+        # Claude Code's own main-thread side requests (a title generation: one message, no tools) don't
+        # overwrite what the person's last prompt chose; main-loop requests always carry their tools
+        self.post(body_for("claude-haiku-5-5", {"messages": [U("write a title for this chat")]}),
+                  {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual(self.app.auto_for("s1")["phase"], "planning")
 
     def test_auto_count_tokens_and_sessionless_requests(self):
         self.auto_post([U("an idea"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES, U("go")])

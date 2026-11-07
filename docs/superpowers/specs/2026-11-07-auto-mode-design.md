@@ -53,26 +53,32 @@ In order, first that decides wins:
 
 1. **Always-on overrides** (same as every mode): requests with a server-side tool only
    Anthropic runs → Anthropic; the image fallback still retries on Anthropic.
-2. **Tags** at the very start of the prompt: `#planning` → Anthropic, `#execution` →
-   execution downstream.
+2. **Tags** at the very start of the message that opened the turn (never text
+   Claude Code appended to a tool result mid-turn): `#planning` → Anthropic,
+   `#execution` → execution downstream.
 3. **Phase**, read from the conversation history the request already carries:
    - **Planning starts** when a planning skill starts: a brainstorming, spec-writing or
      plan-writing skill (in Claude Code, a `Skill` tool call or a typed slash command
      naming it).
    - **Planning ends** when implementation starts, whichever comes first: a skill that
-     executes a plan or dispatches implementers starts, or the first file edit
-     (`Edit`/`Write`/`NotebookEdit`; not `MultiEdit` or Bash) outside the spec and plan folders.
+     executes a plan or dispatches implementers starts (typed or called), or the
+     first file edit (`Edit`/`Write`/`NotebookEdit`, reading `file_path` or
+     `notebook_path`; not `MultiEdit` or Bash) outside the spec and plan folders.
    - Every request in between is planning, whatever the message says.
-   - **One way only:** a session moves from planning to execution, never back. Once a
-     session has gone to execution, auto keeps it there, even if a planning skill
-     starts later (the person's call: flows rarely switch back, and switching lanes
-     loses the prompt cache and mixes histories). A `#planning` tag still sends that
-     one turn to Anthropic.
+   - **One way only:** a session moves from planning to execution, never back. End
+     events count only after planning opened (a session that started with a code
+     edit can still plan later); once it has gone to execution, auto keeps it there,
+     even if a planning skill starts later (the person's call: flows rarely switch
+     back, and switching lanes loses the prompt cache and mixes histories). A
+     `#planning` tag still sends that one turn to Anthropic.
    - The phase comes from the request's own history, with no saved per-session state
-     (a rewound or forked conversation must route by what it actually holds). A
-     message the content model calls planning opens a phase just as a planning skill
-     does, and it lasts until an end event. After a compaction drops the history that
-     opened the phase, `#planning` restores it.
+     (a rewound or forked conversation must route by what it actually holds): the
+     history up to and including the message that opened the turn, exactly what
+     the turn's first request saw. A message the content model calls planning opens
+     a phase just as a planning skill does — the model scores only a message that
+     could open a turn, never text Claude Code appended to a tool result — and it
+     lasts until an end event. After a compaction drops the history that opened the
+     phase, `#planning` restores it.
    - The skill lists and the spec/plan folders are configurable in the console, with
      defaults for the superpowers skills and `docs/superpowers/specs|plans`.
 4. **Content model**, for what the phase can't see (planning started in plain words,
@@ -92,16 +98,17 @@ message with human text and no tool result: text Claude Code adds to a tool-resu
 message (a skill's body, a task notification, an interrupt's new prompt) continues
 the turn.
 
-**Mixed history.** On a request going to Anthropic, auto drops a downstream's
-thinking blocks from earlier turns, so they can't break the conversation. A
-downstream's block is told by its signature: the downstreams seen send an empty one
-or a 6-character stub, Anthropic's are 452+ characters. Anthropic's own signed
-thinking stays (current models keep earlier thinking in context, so dropping it
-would cost cache reads), as do redacted thinking, the current turn, and a message
-the drop would leave empty. This is the one exception to "an untouched Anthropic
-request goes out byte for byte", and it applies only in auto mode, only when there is
-a block to drop. With the one-way rule it rarely matters, but tags and subagent briefs
-can still reach Anthropic after a downstream turn.
+**Mixed history.** On any request bound for Anthropic — whatever lever sent it
+there: rules after a downstream turn, auto after a downstream turn or mid-turn
+on the image fallback — the router drops a downstream's thinking blocks from
+every assistant message, the current turn's included, so they can't break the
+conversation. A downstream's block is told by its signature: the downstreams seen
+send an empty one or a 6-character stub, Anthropic's are 452+ characters.
+Anthropic's own signed thinking stays (current models keep earlier thinking in
+context, so dropping it would cost cache reads), as do redacted thinking and a
+message the drop would leave empty. This is the one exception to "an untouched
+Anthropic request goes out byte for byte", and it applies only when there is a
+block to drop.
 
 **Phase only works without the model.** The content model is optional: with no
 weights file, auto runs steps 1–3 and 5, and can be used before any model is trained.

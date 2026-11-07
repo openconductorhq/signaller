@@ -312,7 +312,7 @@ alone, and a tool loop keeps that turn's answer.
   `Edit`, `Write` or `NotebookEdit` outside the paths that don't end planning
   (`MultiEdit` and edits made through Bash don't count). Edits to a path containing
   `docs/superpowers/specs/`, `docs/superpowers/plans/`, `/.claude/projects/`
-  (Claude's memory), `/tmp/claude-` (its scratchpads) or `/.superpowers/` never
+  (Claude's memory), `/private/tmp/claude-` (its scratchpads) or `/.superpowers/` never
   end planning; the settings box lists them. After that the conversation is
   execution.
 - **No signal means execution.** Subagents and teammates start with none (unless
@@ -323,12 +323,14 @@ alone, and a tool loop keeps that turn's answer.
 - **Between turns:** the switch happens at a human message, so within a turn
   nothing moves. The Anthropic-only server-tool override and settings lines
   (schedules) still apply in auto. A downstream's thinking blocks carry no
-  real signature, and Anthropic rejects them, so on an Anthropic request in auto
-  the router drops them from earlier turns (a block with an empty or short
-  signature; Anthropic's own signed thinking and redacted thinking stay, so its
-  prompt cache holds). Text Claude Code adds next to a tool result (a skill's
-  body, an interrupt) continues the turn rather than starting one. That is the
-  only rewrite of an Anthropic body beyond tags and the model name.
+  real signature, and Anthropic rejects them, so on a request bound for
+  Anthropic — whatever lever sent it there: rules after a downstream turn,
+  auto mid-turn on the image fallback — the router drops them from every
+  assistant message, the current turn's included (a block with an empty or
+  short signature; Anthropic's own signed thinking and redacted thinking stay,
+  so its prompt cache holds). Text Claude Code adds next to a tool result (a
+  skill's body, an interrupt) continues the turn rather than starting one. That
+  is the only rewrite of an Anthropic body beyond tags and the model name.
 
 **What it gets right, and what it doesn't.** On 542 held-out requests from one
 developer's sessions, labelled planning or execution by Claude (so an estimate, not ground
@@ -617,9 +619,10 @@ which is the `signaller_stats` volume in Docker.
 
 **A main session on a downstream:** `#execution` or `/model sonnet` works in the
 main session. But later requests to Anthropic then carry assistant turns that
-the downstream's model generated, such as thinking blocks without valid
-Anthropic signatures. Anthropic may reject those, which breaks that
-conversation. The router does no history cleaning.
+the downstream's model generated. The router drops their thinking blocks (an
+empty or short signature) from every request bound for Anthropic; anything
+else the downstream's model produced in the history may still be rejected by
+Anthropic, which breaks that conversation.
 - **Rule of thumb:** keep the main session on Anthropic, and send subagents
   (`when subagent go …`) and agent-team teammates (`when teammate go …`) to
   downstreams. The team lead is the main session: it is neither.

@@ -1,9 +1,10 @@
 """Auto mode helpers: planning/execution phase from the message history, a linear text scorer, old-thinking drop."""
+import collections
+import hashlib
 import json
 import math
 import re
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Callable, Optional
 
 FORMAT = "signaller-auto-1"
@@ -17,8 +18,26 @@ class AutoSettings:
     execution: Optional[str] = None
     planning_skills: tuple = ("superpowers:brainstorming", "superpowers:writing-plans")
     execution_skills: tuple = ("superpowers:subagent-driven-development", "superpowers:executing-plans")
-    plan_dirs: tuple = ("docs/superpowers/specs/", "docs/superpowers/plans/", "/.claude/projects/", "/tmp/claude-", "/.superpowers/")
+    plan_dirs: tuple = ("docs/superpowers/specs/", "docs/superpowers/plans/", "/.claude/projects/", "/private/tmp/claude-", "/.superpowers/")
     threshold: float = 0.8
+
+
+class BoundedDict(collections.OrderedDict):
+    """An insertion-ordered map that drops its oldest entry past `cap` (the small per-turn caches use it)."""
+
+    def __init__(self, cap: int):
+        super().__init__()
+        self.cap = cap
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.cap:
+            self.popitem(last=False)
+
+
+def text_hash(text: str) -> str:
+    """The sha256 of a text, tolerant of lone surrogates (turn keys, cache keys, the score memo)."""
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def blocks(msg) -> list:
@@ -58,21 +77,34 @@ def turn_index(messages: list) -> int:
     return _last_user(messages, new_turn=True)
 
 
+def turn_text(messages: list) -> str:
+    """Human text of the message that opened the current turn ("" when none): in auto, the lead tags are read from
+    this, not from the latest human text, which mid-turn may be text Claude Code appended to a tool result."""
+    i = turn_index(messages)
+    return (human_text(messages[i]) or "") if i >= 0 else ""
+
+
 def phase(messages: list, s: AutoSettings, score: Optional[Callable[[str], float]]) -> tuple:
+    """(phase, why) over a message list: planning opens at a planning skill (typed or called) or a human message the
+    model scores high, and ends for good at an execution skill (typed or called) or the first file edit outside the
+    plan folders. One way: end events count only after planning opened. The model scores only a message that could
+    open a turn (no tool_result), never text Claude Code appended to one (a skill's body, a task notification)."""
     opened = ended = None
     for msg in messages:
         if ended:
             break
         text = human_text(msg)
         if text is not None:
-            if not opened:
-                m = CMD_RE.search(text)
-                if m and m.group(1) in s.planning_skills:
-                    opened = "phase: " + m.group(1)
-                elif score is not None:
-                    p = score(text)
-                    if p >= s.threshold:
-                        opened = "model %.2f" % p
+            m = CMD_RE.search(text)
+            if m and m.group(1) in s.planning_skills and not opened:
+                opened = "phase: " + m.group(1)
+            elif m and m.group(1) in s.execution_skills and opened:
+                ended = "phase ended: " + m.group(1)
+            elif not opened and score is not None \
+                    and not any(b.get("type") == "tool_result" for b in blocks(msg)):
+                p = score(text)
+                if p >= s.threshold:
+                    opened = "model %.2f" % p
             continue
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
@@ -84,10 +116,10 @@ def phase(messages: list, s: AutoSettings, score: Optional[Callable[[str], float
                 sk = inp.get("skill")
                 if sk in s.planning_skills:
                     opened = opened or "phase: " + sk
-                elif sk in s.execution_skills:
+                elif sk in s.execution_skills and opened:
                     ended = "phase ended: " + sk
-            elif b.get("name") in EDIT_TOOLS:
-                fp = inp.get("file_path")
+            elif b.get("name") in EDIT_TOOLS and opened:
+                fp = inp.get("file_path") or inp.get("notebook_path")  # NotebookEdit's is notebook_path
                 if isinstance(fp, str) and not any(d in fp for d in s.plan_dirs):
                     ended = "phase ended: edit " + fp
             if ended:
@@ -107,11 +139,11 @@ def features(text: str) -> set:
 
 
 class Model:
+    MEMO = 2048  # remembered scores: keyed on the text's hash, never the text (2048 of those would be tens of MB)
+
     def __init__(self, bias: float, weights: dict):
         self.bias, self.weights = bias, weights
-        cached = lru_cache(maxsize=2048)(self._score)
-        self.score = lambda text: cached(text[:20000])  # keyed on the capped text: the scorer reads no further
-        self.score.cache_clear = cached.cache_clear  # the trainer times cold decisions
+        self._memo = BoundedDict(self.MEMO)  # text_hash -> score
 
     @classmethod
     def load(cls, path: str) -> "Model":
@@ -133,9 +165,20 @@ class Model:
             raise ValueError("non-finite weight")
         return cls(bias, weights)
 
+    def score(self, text: str) -> float:
+        """Score of the first 20000 characters (features reads no further), memoised on their hash."""
+        t = text[:20000]
+        h = text_hash(t)
+        got = self._memo.get(h)
+        if got is None:
+            self._memo[h] = got = self._score(t)
+        return got
+
+    def cache_clear(self) -> None:  # the trainer times cold decisions
+        self._memo.clear()
+
     def _score(self, text: str) -> float:
-        feats = features(text)  # arrives capped at 20000 chars (self.score)
-        z = self.bias + sum(self.weights.get(f, 0.0) for f in feats)
+        z = self.bias + sum(self.weights.get(f, 0.0) for f in features(text))
         return 1 / (1 + math.exp(-max(-60.0, min(60.0, z))))
 
 
@@ -148,13 +191,15 @@ def from_downstream(b) -> bool:
 
 
 def drop_old_thinking(req: dict) -> bool:
-    """Drop a downstream's thinking from messages before the current turn (turn_index); Anthropic's own signed
-    thinking and redacted_thinking stay, as does everything in the current turn (a tool loop needs it)."""
+    """Drop a downstream's thinking (empty or short signature) from every assistant message: it can't reach
+    Anthropic, which 400s on it — the image fallback needs this mid-turn, after the turn already ran on the
+    downstream. Anthropic's own signed thinking and redacted_thinking stay, as does a message the drop would
+    leave empty (an empty one 400s); an Anthropic-served turn holds no downstream blocks, so no turn boundary."""
     msgs = req.get("messages")
     if not isinstance(msgs, list):
         return False
     changed = False
-    for msg in msgs[:max(turn_index(msgs), 0)]:
+    for msg in msgs:
         if not isinstance(msg, dict) or msg.get("role") != "assistant" or not isinstance(msg.get("content"), list):
             continue
         if not any(isinstance(b, dict) and from_downstream(b) for b in msg["content"]):

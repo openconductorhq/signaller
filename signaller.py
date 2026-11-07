@@ -20,6 +20,7 @@ import autophase
 import console
 import overrides  # after routing: overrides imports routing
 import presets
+from autophase import BoundedDict
 from sessions import SessionDirectory, claude_dir
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
@@ -69,19 +70,6 @@ WINDOW_HEADER = "X-Valar-Completion-Window"  # the router owns it: a client's ow
 UPSTREAM_TIMEOUT = 600
 MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
                  b'"message":"signaller: upstream ended mid-stream"}}\n\n')
-
-
-class BoundedDict(collections.OrderedDict):
-    """An insertion-ordered map that drops its oldest entry past `cap` (the small per-turn caches use it)."""
-
-    def __init__(self, cap: int):
-        super().__init__()
-        self.cap = cap
-
-    def __setitem__(self, key, value):
-        super().__setitem__(key, value)
-        if len(self) > self.cap:
-            self.popitem(last=False)
 
 
 def upstream(app: "App", track: str, routing=None) -> tuple[str, str, str, Downstream | None]:
@@ -141,9 +129,10 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
     settings lines applied. `req` (when a dict) is edited in place; `changed` says it must be re-serialised."""
     name, base, key, ds = upstream(app, track, routing)
     if not ds:
-        # auto only: a downstream's unsigned thinking from an earlier turn can't go to Anthropic (it 400s on them)
-        dropped = track == "anthropic" and (routing or app.routing).lever == "auto" and isinstance(req, dict) \
-            and autophase.drop_old_thinking(req)
+        # any lever: a downstream's unsigned thinking can't reach Anthropic (it 400s on it) — in auto after a
+        # downstream turn, in rules after a switch back, or mid-turn on the image fallback. Nothing of theirs to
+        # drop → the request goes out byte for byte.
+        dropped = track == "anthropic" and isinstance(req, dict) and autophase.drop_old_thinking(req)
         return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, dropped, None
     out_model = track_model(model, ds)
     hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
@@ -225,6 +214,7 @@ class App:
         self.notices = {}  # session id -> {"turn", "text"}: the plugin shows it once (an image fallback)
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
         self._turn_hours = BoundedDict(512)  # turn_key -> the hour its turn runs at
+        # ponytail: 512 live turns, oldest dropped; a turn outliving them re-pins at a later hour boundary
         self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
         self.keys = Keys(config_dir)
         self.migrate_keys()
@@ -376,8 +366,10 @@ class App:
 
     def auto_decide(self, f: Features, s: "autophase.AutoSettings") -> tuple[str, str]:
         """(phase, why) for auto, decided once per human turn: keyed on the message that opened it (turn_index), so
-        a tool loop's steps agree even when Claude Code appends text to a tool result. Never raises. The handler
-        records the main-thread answer (Decision.auto) after route()."""
+        a tool loop's steps agree even when Claude Code appends text to a tool result. The phase is read from the
+        history up to and including that message — exactly what the turn's first request saw — so the cache is only
+        a speed-up and the current turn's own tool calls can't flip it mid-turn. Never raises. The handler records
+        the main-thread answer (Decision.auto) after route()."""
         try:
             i = autophase.turn_index(f.messages)
             text = autophase.human_text(f.messages[i]) if i >= 0 else ""
@@ -396,7 +388,7 @@ class App:
                     failed.append(True)
                     raise
             try:
-                got = autophase.phase(f.messages, s, score if m else None)
+                got = autophase.phase(f.messages if i < 0 else f.messages[:i + 1], s, score if m else None)
             except Exception:
                 got = ("none", "model error") if failed else ("none", "phase error")
             if key:  # no session: nothing to share a turn with
@@ -405,8 +397,10 @@ class App:
         return got
 
     def note_auto(self, f: Features, phase: str, why: str) -> None:
-        """What auto last chose for a session's main thread (a subagent or teammate request doesn't overwrite it)."""
-        if f.session and not f.subagent and not f.teammate:
+        """What auto last chose for a session's main thread: a subagent or teammate request doesn't overwrite it,
+        and neither does a main-thread side request (a title generation: one message, no tools) — main-loop
+        requests carry their tools, so only those count."""
+        if f.session and f.tools and not f.subagent and not f.teammate:
             with self._auto_lock:
                 self.auto_last[f.session] = {"phase": phase, "why": why}
                 self.auto_last.move_to_end(f.session)

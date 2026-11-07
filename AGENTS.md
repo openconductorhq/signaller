@@ -105,21 +105,27 @@ breaks.
   per turn in `App.auto_decide`, keyed on `(session, text hash, index)` of
   `autophase.turn_index` (the latest user message with human text and no
   tool_result: Claude Code appends a skill's body or an interrupt's prompt to a
-  tool_result message, and that must not start a turn), so a tool loop's steps
-  agree; no session means no cache. It never raises (a failure is `none`, which
-  routes to execution). count_tokens decides but doesn't update `auto_last`.
-  Planning ends one way: nothing reopens it. `plan_dirs` match as substrings,
-  so keep them narrow (`/.claude/projects/`, not `/.claude/`: worktrees live there). The only Anthropic body rewrite
-  beyond tags and the model name is `drop_old_thinking`, in `prepare()`, auto
-  only: it drops a downstream's thinking (empty or short signature) before
-  `turn_index`, and keeps Anthropic's signed thinking (current models keep it in
-  context, so dropping it costs cache reads). The model (`auto_model.json`) is optional; a bad one gives a banner,
+  tool_result message, and that must not start a turn), and read from the
+  history up to and including that message — exactly what the turn's first
+  request saw — so the current turn's own tool calls can't flip it mid-turn;
+  the cache is only a speed-up, and no session means none. It never raises (a
+  failure is `none`, which routes to execution). The turn's `#planning`/`#execution`
+  tags are read from that same opening message's text (`turn_text`), never the
+  latest human text. count_tokens decides but doesn't update `auto_last`, and
+  neither does a main-thread side request without tools (a title generation);
+  main-loop requests carry theirs. Planning ends one way: nothing reopens it,
+  and end events count only after planning opened. `plan_dirs` match as
+  substrings, so keep them narrow (`/.claude/projects/`, not `/.claude/`:
+  worktrees live there). The model (`auto_model.json`) is optional; a bad one gives a banner,
   not a failure. No datasets, labels or weights go in the repo; `tools/auto_train.py`
   is the only file that may need scikit-learn, and the router never imports it.
 - **The body is rewritten only when something changes** (leading tags, a
-  downstream's model name, Valar's tool fixes): `req` is parsed once, edited,
-  and re-serialised once. An untouched Anthropic request goes out byte for
-  byte.
+  downstream's model name, Valar's tool fixes, or a downstream thinking block
+  dropped from an Anthropic-bound request — any lever, the one rewrite
+  `drop_old_thinking` in `prepare()` makes for every mode, from every
+  assistant message, keeping Anthropic's signed thinking): `req` is parsed
+  once, edited, and re-serialised once. An untouched Anthropic request goes out
+  byte for byte.
 - **Prices:** Anthropic rates are per tier in `prices.DEFAULT_ANTHROPIC`. A new
   key there must load from an old `prices.json` (`load()` merges defaults).
   Downstream prices stay at the four `PRICE_KEYS`. Valar is priced from its
