@@ -1,5 +1,5 @@
 import pytest
-from autophase import AutoSettings, Model, drop_old_thinking, human_index, phase
+from autophase import AutoSettings, Model, drop_old_thinking, human_index, phase, turn_index
 
 S = AutoSettings()
 def skill(name): return {"role": "assistant", "content": [{"type": "tool_use", "name": "Skill", "input": {"skill": name}}]}
@@ -76,3 +76,18 @@ def test_claude_own_files_do_not_end_planning():
         assert phase(base + [edit(p), user("ok")], S, None)[0] == "planning"
     for p in ("/r/app.py", "/r/.claude/worktrees/w/app.py"):
         assert phase(base + [edit(p), user("ok")], S, None)[0] == "execution"
+
+
+def test_drop_old_thinking_downstream_only_and_edges():
+    signed = {"type": "thinking", "thinking": "t", "signature": "A" * 452}
+    red = {"type": "redacted_thinking", "data": "d"}
+    ds = {"type": "thinking", "thinking": "t", "signature": ""}
+    only = {"role": "assistant", "content": [dict(ds)]}
+    msgs = [user("a"), {"role": "assistant", "content": [signed, red, ds, {"type": "text", "text": "r"}]}, user("b"), only, user("c")]
+    req = {"messages": msgs}
+    assert drop_old_thinking(req) is True
+    assert [b["type"] for b in msgs[1]["content"]] == ["thinking", "redacted_thinking", "text"]  # Anthropic's own stay
+    assert only["content"] == [ds]  # would be left empty: kept unchanged
+    tr = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1", "content": "ok"}, {"type": "text", "text": "skill body"}]}
+    assert turn_index([{"role": "assistant", "content": [ds]}, tr]) == -1
+    assert drop_old_thinking({"messages": [{"role": "assistant", "content": [ds, {"type": "text", "text": "r"}]}, tr]}) is False

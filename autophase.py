@@ -29,7 +29,7 @@ def _blocks(msg) -> list:
 
 
 def human_text(msg) -> Optional[str]:
-    """Joined human text of a user message, None when it has none (same filter as routing.latesthuman_text)."""
+    """Joined human text of a user message, None when it has none (same filter as routing.latest_human_text)."""
     if not isinstance(msg, dict) or msg.get("role") != "user":
         return None
     texts = [b["text"] for b in _blocks(msg)
@@ -41,6 +41,17 @@ def human_text(msg) -> Optional[str]:
 def human_index(messages: list) -> int:
     for i in range(len(messages) - 1, -1, -1):
         if human_text(messages[i]) is not None:
+            return i
+    return -1
+
+
+def turn_index(messages: list) -> int:
+    """Index of the message that opened the current human turn: the latest user message with human text and no
+    tool_result. Claude Code appends text to a tool_result message (a skill's body, a task notification, an
+    interrupt's new prompt); that continues the turn rather than starting one. -1 if none."""
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if human_text(m) is not None and not any(b.get("type") == "tool_result" for b in _blocks(m)):
             return i
     return -1
 
@@ -118,15 +129,26 @@ class Model:
         return 1 / (1 + math.exp(-max(-60.0, min(60.0, z))))
 
 
+def from_downstream(b) -> bool:
+    """A thinking block Anthropic would reject: one a downstream wrote. Anthropic's are signed (452+ characters
+    in the transcripts checked); the downstreams seen leave the signature empty or a 6-character stub."""
+    # ponytail: a length check, not a verification; a downstream that sends long fake signatures still 400s
+    sig = b.get("signature")
+    return b.get("type") == "thinking" and not (isinstance(sig, str) and len(sig) >= 100)
+
+
 def drop_old_thinking(req: dict) -> bool:
+    """Drop a downstream's thinking from messages before the current turn (turn_index); Anthropic's own signed
+    thinking and redacted_thinking stay, as does everything in the current turn (a tool loop needs it)."""
     msgs = req.get("messages")
     if not isinstance(msgs, list):
         return False
     changed = False
-    for msg in msgs[:max(human_index(msgs), 0)]:
+    for msg in msgs[:max(turn_index(msgs), 0)]:
         if not isinstance(msg, dict) or msg.get("role") != "assistant" or not isinstance(msg.get("content"), list):
             continue
-        keep = [b for b in msg["content"] if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))]
+        keep = [b for b in msg["content"] if not (isinstance(b, dict) and from_downstream(b))]
+        # a message that would be left empty is kept unchanged (an empty one 400s); Anthropic may still reject it
         if keep and len(keep) != len(msg["content"]):
             msg["content"] = keep
             changed = True
