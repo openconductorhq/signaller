@@ -329,7 +329,7 @@ function renderLever() {
   $("leverNote").textContent = !off ? "" : auto ? `Auto is choosing for ${id ? "this session" : "everything"}: planning to Anthropic, the rest to ${NAME(S.exec_track)}`
     : `The lever is sending ${id ? "this session" : "everything"} to ${NAME(lv)}`;
   $("autoSub").textContent = `planning → Anthropic, the rest → ${NAME(S.exec_track)}`;
-  renderAuto(auto);
+  renderAuto(auto || !!(cfg.auto && cfg.auto.execution)); // also with auto.execution set: the box is the only place to clear it, and references() blocks deleting the downstream it names
   for (const [t, y] of Object.entries(YARD)) y.trk.classList.toggle("dim", off && !auto && t !== lv);
   $("jlabel").textContent = off ? "lever" : "rulebook";
   if (!offTrack(lv)) $("localWarn").hidden = true;
