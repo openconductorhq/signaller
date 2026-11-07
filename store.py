@@ -10,12 +10,11 @@ import sys
 import threading
 import zlib
 from collections import deque
-from hashlib import sha256
 from keys import write_json
 import time
 
 import sessions as sess
-from routing import DEFAULT_CONFIG, config_from_json, config_to_json
+from routing import DEFAULT_CONFIG, config_from_json, config_to_json, text_hash
 
 
 SCHEMA = """
@@ -71,7 +70,7 @@ class Prompts:
         self.recent = {}  # session -> deque of (hash, text, depth)
 
     def put(self, c, session, text):
-        h = sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+        h = text_hash(text)
         if session not in self.recent and len(self.recent) >= 64:
             del self.recent[next(iter(self.recent))]  # oldest session out
         recent = self.recent.setdefault(session, deque(maxlen=4))

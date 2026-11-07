@@ -16,10 +16,16 @@ TAG_RE = re.compile(r"(?<!\w)#(\w+)", re.I)
 LEAD_TAGS_RE = re.compile(r"\A\s*(?:#[A-Za-z]\w*[:,]?(?:\s+|\Z))+")
 TEXT_CAP = 20_000
 MAX_DOWNSTREAMS = 6
+LEVER_MODES = ("rules", "auto")  # the levers that aren't a track: every listing of them uses this
 ID_RE = re.compile(r"[a-z][a-z0-9-]{0,23}")
 COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}")
-RESERVED_IDS = {"anthropic", "rules", "auto", "reset", "name"} | KEYWORDS | set(FIELDS)
+RESERVED_IDS = {"anthropic", "reset", "name", *LEVER_MODES} | KEYWORDS | set(FIELDS)
 PRICE_KEYS = ("in", "out", "cache_read", "cache_write")
+
+
+def text_hash(text: str) -> str:
+    """The sha256 of a text, tolerant of lone surrogates (turn keys, cache keys, prompt storage)."""
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def latest_human_text(messages: list) -> str:
@@ -194,7 +200,7 @@ class Features:
             step = latest_tool_results(req["messages"])
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
             return None
-        return cls(text, lead_tags(text), model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), srv, step,
+        return cls(text, lead_tags(text), model, len(body) // 4, sub, text_hash(text), srv, step,
                    messages=req["messages"])
 
     def get(self, name: str, label: Callable[[], str]):
@@ -471,7 +477,7 @@ def config_from_json(obj: dict) -> RoutingConfig:
         for d in obj["downstreams"]:
             dss.append(_downstream(d, [x.id for x in dss]))
         ts = ("anthropic",) + tuple(d.id for d in dss)
-        if obj["lever"] not in ("rules", "auto"):
+        if obj["lever"] not in LEVER_MODES:
             _track(obj["lever"], ts, "lever")
         otherwise = _track(obj["otherwise"], ts, "otherwise")
         rules = tuple(Rule(r["name"], r["kind"], bool(r["enabled"]), r.get("text", ""), r.get("builtin"))
@@ -541,6 +547,7 @@ class Decision:
     reason: str
     explanation: list
     classified: ClassResult | None = None
+    auto: tuple | None = None  # (phase, why) for an auto decision, so the handler can record it without re-deciding
 
 
 def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, ClassifierSettings], ClassResult],
@@ -550,14 +557,15 @@ def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, Classif
         # the lever can't send these anywhere useful: only Anthropic runs its own tools
         return Decision("anthropic", "rule:" + st.name, [{"rule": st.name, "outcome": "Anthropic-only tool, lever overridden → anthropic", "decided": True}])
     if cfg.lever == "auto":
-        if "planning" in f.tags or "execution" in f.tags:  # only the exact lead tags; the rest are ignored here
-            ph, why, reason = ("planning" if "planning" in f.tags else "execution"), "tag", "tag"
+        tagged = "planning" in f.tags or "execution" in f.tags  # only the exact lead tags; the rest are ignored here
+        if tagged:
+            got = ph, why = ("planning" if "planning" in f.tags else "execution"), "tag"
         else:
-            ph, why = auto(f) if auto else ("none", "no planning signal")
-            reason = "auto:planning" if ph == "planning" else "auto:execution"
-            ph = "planning" if ph == "planning" else "execution"
+            got = ph, why = auto(f) if auto else ("none", "no planning signal")  # recorded as decided ("none" stays)
+        ph = "planning" if ph == "planning" else "execution"
         track = "anthropic" if ph == "planning" else exec_track(cfg)
-        return Decision(track, reason, [{"rule": "Auto", "outcome": f"{ph} ({why}) → {track}", "decided": True}])
+        return Decision(track, "tag" if tagged else "auto:" + ph,
+                        [{"rule": "Auto", "outcome": f"{ph} ({why}) → {track}", "decided": True}], auto=got)
     if cfg.lever != "rules":
         return Decision(cfg.lever, "lever", [{"rule": "Lever", "outcome": f"sending everything to {cfg.lever}", "decided": True}])
     cs = cfg.classifier

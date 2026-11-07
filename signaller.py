@@ -1,6 +1,5 @@
 """signaller: route Claude Code requests to Anthropic or one of the downstreams set up in the console."""
 import collections
-import hashlib
 import http.client
 import http.server
 import ipaddress
@@ -27,8 +26,9 @@ from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from keys import host_of
 from prices import Prices, parse_valar
-from routing import (DEFAULT_CONFIG, has_images, session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
-                     references, route as decide_route, track_model, track_window, tracks)
+from routing import (DEFAULT_CONFIG, LEVER_MODES, has_images, session_of, strip_lead_tags, text_hash, Downstream, Features, RoutingConfig,
+                     config_from_json, config_to_json, downstream, is_routed, references, route as decide_route,
+                     track_model, track_window, tracks)
 from keys import Keys, write_json
 from store import NullStore, Store, load_console_config, save_console_config
 
@@ -69,6 +69,19 @@ WINDOW_HEADER = "X-Valar-Completion-Window"  # the router owns it: a client's ow
 UPSTREAM_TIMEOUT = 600
 MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
                  b'"message":"signaller: upstream ended mid-stream"}}\n\n')
+
+
+class BoundedDict(collections.OrderedDict):
+    """An insertion-ordered map that drops its oldest entry past `cap` (the small per-turn caches use it)."""
+
+    def __init__(self, cap: int):
+        super().__init__()
+        self.cap = cap
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if len(self) > self.cap:
+            self.popitem(last=False)
 
 
 def upstream(app: "App", track: str, routing=None) -> tuple[str, str, str, Downstream | None]:
@@ -211,7 +224,7 @@ class App:
         self.session_levers = self._load_levers()  # session id -> lever /signaller chose for that session only
         self.notices = {}  # session id -> {"turn", "text"}: the plugin shows it once (an image fallback)
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
-        self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
+        self._turn_hours = BoundedDict(512)  # turn_key -> the hour its turn runs at
         self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
         self.keys = Keys(config_dir)
         self.migrate_keys()
@@ -221,7 +234,7 @@ class App:
             self.banner = " ".join(filter(None, [self.banner, pbanner]))
         self._finish_switch()
         # ponytail: 1024 turns / 1024 sessions, oldest dropped; an evicted turn is decided again from its history
-        self._auto_lock, self._auto, self.auto_last = threading.Lock(), collections.OrderedDict(), collections.OrderedDict()
+        self._auto_lock, self._auto, self.auto_last = threading.Lock(), BoundedDict(1024), BoundedDict(1024)
         self.auto_model = self._load_auto_model()
         self.classifier = Classifier(self._classifier_upstream)
         try:
@@ -349,12 +362,7 @@ class App:
     def hour_of(self, turn_key, hour):
         """The hour a turn runs at: pinned at its first request, so a tool loop crossing an hour boundary doesn't
         switch model mid-turn."""
-        # ponytail: 512 live turns, oldest inserted dropped; a turn outliving them re-pins at a later boundary
-        if turn_key not in self._turn_hours:
-            self._turn_hours[turn_key] = hour
-            if len(self._turn_hours) > 512:
-                self._turn_hours.popitem(last=False)
-        return self._turn_hours[turn_key]
+        return self._turn_hours.setdefault(turn_key, hour)
 
     def _load_auto_model(self):
         """The optional content model from the config dir. None when absent; unreadable → None plus a banner."""
@@ -366,13 +374,14 @@ class App:
             self.banner = " ".join(filter(None, [self.banner, "Auto mode's model couldn't be read (%s); auto runs on the phase alone." % type(e).__name__]))
             return None
 
-    def auto_decide(self, f: Features, s: "autophase.AutoSettings", note: bool = True) -> tuple[str, str]:
+    def auto_decide(self, f: Features, s: "autophase.AutoSettings") -> tuple[str, str]:
         """(phase, why) for auto, decided once per human turn: keyed on the message that opened it (turn_index), so
-        a tool loop's steps agree even when Claude Code appends text to a tool result. Never raises."""
+        a tool loop's steps agree even when Claude Code appends text to a tool result. Never raises. The handler
+        records the main-thread answer (Decision.auto) after route()."""
         try:
             i = autophase.turn_index(f.messages)
             text = autophase.human_text(f.messages[i]) if i >= 0 else ""
-            key = (f.session, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), i) if f.session else None
+            key = (f.session, text_hash(text), i) if f.session else None
         except Exception:
             return "none", "phase error"
         with self._auto_lock:
@@ -393,10 +402,6 @@ class App:
             if key:  # no session: nothing to share a turn with
                 with self._auto_lock:
                     self._auto[key] = got
-                    if len(self._auto) > 1024:
-                        self._auto.popitem(last=False)
-        if note:
-            self.note_auto(f, *got)
         return got
 
     def note_auto(self, f: Features, phase: str, why: str) -> None:
@@ -405,8 +410,6 @@ class App:
             with self._auto_lock:
                 self.auto_last[f.session] = {"phase": phase, "why": why}
                 self.auto_last.move_to_end(f.session)
-                if len(self.auto_last) > 1024:
-                    self.auto_last.popitem(last=False)
 
     def auto_for(self, sid: str) -> dict | None:
         with self._auto_lock:
@@ -443,7 +446,7 @@ class App:
         lever = self.session_levers.get(sid or "")
         if not lever:  # the common case: no entry, no tracks() scan
             return None
-        return lever if lever in ("rules", "auto") or lever in tracks(self.routing) else None
+        return lever if lever in LEVER_MODES or lever in tracks(self.routing) else None
 
     def prune_levers(self) -> None:
         """Drop session ids not seen for a week (no sessions row counts as gone too; same rule as overrides.prune).
@@ -661,10 +664,10 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     # in a team); a subagent also has cc_is_subagent=true, so the rest are teammates
                     f.teammate = not f.subagent and bool(self.headers.get("x-claude-code-agent-id"))
                 msgs = self.path.split("?", 1)[0] == "/v1/messages"  # count_tokens decides but doesn't move auto_last
-                auto = (lambda f: app.auto_decide(f, routing.auto, msgs)) if routing.lever == "auto" else None
+                auto = (lambda f: app.auto_decide(f, routing.auto)) if routing.lever == "auto" else None
                 d = decide_route(routing, f, app.classifier, auto=auto) if f else None
-                if d and d.reason == "tag" and routing.lever == "auto" and msgs:  # a lead tag decided; auto_decide never ran
-                    app.note_auto(f, "planning" if d.track == "anthropic" else "execution", "tag")
+                if d and d.auto and msgs:  # auto decided (or a lead tag did): record it for the console, main thread only
+                    app.note_auto(f, *d.auto)
             except Exception as e:
                 self._error(500, "signaller: routing failed")
                 print("%s route=- reason=error status=500 err=%s shadow=-" % (
