@@ -61,7 +61,7 @@ In order, first that decides wins:
      naming it).
    - **Planning ends** when implementation starts, whichever comes first: a skill that
      executes a plan or dispatches implementers starts, or the first file edit
-     (`Edit`/`Write`/`NotebookEdit`) outside the spec and plan folders.
+     (`Edit`/`Write`/`NotebookEdit`; not `MultiEdit` or Bash) outside the spec and plan folders.
    - Every request in between is planning, whatever the message says.
    - **One way only:** a session moves from planning to execution, never back. Once a
      session has gone to execution, auto keeps it there, even if a planning skill
@@ -86,12 +86,19 @@ Subagents and teammates use the same steps over their own history; their brief i
 their newest human text.
 
 **Tracks change only between turns.** The decision is made at a turn's first request
-and held for the whole turn (`turn_key`), so a tool loop never changes track in the
-middle; a phase change seen mid-turn takes effect at the next human turn.
+and held for the whole turn, so a tool loop never changes track in the middle; a phase
+change seen mid-turn takes effect at the next human turn. A turn starts at a user
+message with human text and no tool result: text Claude Code adds to a tool-result
+message (a skill's body, a task notification, an interrupt's new prompt) continues
+the turn.
 
-**Mixed history.** On a request going to Anthropic, auto drops thinking blocks from
-earlier turns (Anthropic discards them anyway), so a downstream's unsigned thinking
-can't break the conversation. This is the one exception to "an untouched Anthropic
+**Mixed history.** On a request going to Anthropic, auto drops a downstream's
+thinking blocks from earlier turns, so they can't break the conversation. A
+downstream's block is told by its signature: the downstreams seen send an empty one
+or a 6-character stub, Anthropic's are 452+ characters. Anthropic's own signed
+thinking stays (current models keep earlier thinking in context, so dropping it
+would cost cache reads), as do redacted thinking, the current turn, and a message
+the drop would leave empty. This is the one exception to "an untouched Anthropic
 request goes out byte for byte", and it applies only in auto mode, only when there is
 a block to drop. With the one-way rule it rarely matters, but tags and subagent briefs
 can still reach Anthropic after a downstream turn.

@@ -102,12 +102,18 @@ breaks.
   never a dead router.
 - **Auto mode:** `autophase.phase` is pure over the request's messages and
   settings (and an optional scorer): no I/O, no state. The decision is made once
-  per `(session, turn_key, human index)` in `App.auto_decide`, so a tool loop's
-  steps agree; it never raises (a failure is `none`, which routes to execution).
+  per turn in `App.auto_decide`, keyed on `(session, text hash, index)` of
+  `autophase.turn_index` (the latest user message with human text and no
+  tool_result: Claude Code appends a skill's body or an interrupt's prompt to a
+  tool_result message, and that must not start a turn), so a tool loop's steps
+  agree; no session means no cache. It never raises (a failure is `none`, which
+  routes to execution). count_tokens decides but doesn't update `auto_last`.
   Planning ends one way: nothing reopens it. `plan_dirs` match as substrings,
   so keep them narrow (`/.claude/projects/`, not `/.claude/`: worktrees live there). The only Anthropic body rewrite
   beyond tags and the model name is `drop_old_thinking`, in `prepare()`, auto
-  only. The model (`auto_model.json`) is optional; a bad one gives a banner,
+  only: it drops a downstream's thinking (empty or short signature) before
+  `turn_index`, and keeps Anthropic's signed thinking (current models keep it in
+  context, so dropping it costs cache reads). The model (`auto_model.json`) is optional; a bad one gives a banner,
   not a failure. No datasets, labels or weights go in the repo; `tools/auto_train.py`
   is the only file that may need scikit-learn, and the router never imports it.
 - **The body is rewritten only when something changes** (leading tags, a

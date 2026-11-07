@@ -309,7 +309,8 @@ alone, and a tool loop keeps that turn's answer.
   replies ("ok", "go ahead") are planning too.
 - **One way:** planning ends for good at an execution skill
   (`superpowers:subagent-driven-development`, `executing-plans`) or at the first
-  edit outside the paths that don't end planning. Edits to a path containing
+  `Edit`, `Write` or `NotebookEdit` outside the paths that don't end planning
+  (`MultiEdit` and edits made through Bash don't count). Edits to a path containing
   `docs/superpowers/specs/`, `docs/superpowers/plans/`, `/.claude/projects/`
   (Claude's memory), `/tmp/claude-` (its scratchpads) or `/.superpowers/` never
   end planning; the settings box lists them. After that the conversation is
@@ -321,20 +322,23 @@ alone, and a tool loop keeps that turn's answer.
   message overrides the decision (see Tags).
 - **Between turns:** the switch happens at a human message, so within a turn
   nothing moves. The Anthropic-only server-tool override and settings lines
-  (schedules) still apply in auto. A downstream's unsigned thinking blocks from earlier turns
-  can't go to Anthropic, so on an Anthropic request in auto the router drops
-  them from earlier turns (Anthropic discards them anyway). That is the only
-  rewrite of an Anthropic body beyond tags and the model name.
+  (schedules) still apply in auto. A downstream's thinking blocks carry no
+  real signature, and Anthropic rejects them, so on an Anthropic request in auto
+  the router drops them from earlier turns (a block with an empty or short
+  signature; Anthropic's own signed thinking and redacted thinking stay, so its
+  prompt cache holds). Text Claude Code adds next to a tool result (a skill's
+  body, an interrupt) continues the turn rather than starting one. That is the
+  only rewrite of an Anthropic body beyond tags and the model name.
 
 **What it gets right, and what it doesn't.** On 542 held-out requests from one
 developer's sessions, labelled planning or execution by Claude (so an estimate, not ground
 truth), the phase rules alone were right 92% of the time and moved 84% of
 main-thread turns off Anthropic. They also sent 38 of 82 planning turns (46%) to
 the execution downstream: auto saves money, it doesn't protect every planning
-turn. Put `#planning` on a turn that matters. With a model (measured at threshold
-0.50; the default is 0.8), 25 of 82 planning turns were misrouted, but more
-execution turns stayed on Anthropic (42 of 460 against 7) and overall accuracy
-fell to 88%, so the model is a trade, not a clear win.
+turn. Put `#planning` on a turn that matters. With a model at the default threshold (0.8), 31 of 82
+planning turns were misrouted, but more execution turns stayed on Anthropic
+(22 of 460 against 7), 79% of main-thread turns moved off and overall accuracy
+fell to 90%, so the model is a trade, not a clear win.
 
 **The model is optional and ships untrained.** Without `auto_model.json` in the
 config dir, auto runs on the phase rules alone. A model is a small linear
@@ -344,7 +348,12 @@ of your turns planning or execution and run `tools/auto_train.py` (`train` and
 `eval`; its docstring has the file formats). It needs scikit-learn in a separate
 venv (`python3 -m venv V && V/bin/pip install scikit-learn`); the router never
 imports it. Keep labels and weights out of the repo. A model that can't be
-read gives a banner and auto carries on without it.
+read gives a banner and auto carries on without it. The router reads the file
+at start: restart it after adding or replacing one.
+
+**Rolling back:** an older router doesn't know the `auto` lever or settings, so
+with the lever on auto it can't read the config and falls back to defaults with
+a banner. Set the lever back to rules before you roll back.
 
 **Privacy:** deciding sends nothing anywhere. It reads the request in memory,
 makes no model call, and the training tool runs offline on your machine.
