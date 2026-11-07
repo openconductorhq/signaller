@@ -72,6 +72,7 @@ def test_drop_old_thinking_keeps_the_current_turn():
 
 def test_claude_own_files_do_not_end_planning():
     base = [user("x"), skill("superpowers:brainstorming")]
-    for p in ("/r/.tmp/scratchpad/notes.md", "/Users/x/.claude/projects/p/memory/a.md", "/r/.superpowers/sdd/b.md"):
+    for p in ("/private/tmp/claude-502/proj/sess/scratchpad/notes.md", "/Users/x/.claude/projects/p/memory/a.md", "/r/.superpowers/sdd/b.md"):
         assert phase(base + [edit(p), user("ok")], S, None)[0] == "planning"
-    assert phase(base + [edit("/r/app.py"), user("ok")], S, None)[0] == "execution"
+    for p in ("/r/app.py", "/r/.claude/worktrees/w/app.py"):
+        assert phase(base + [edit(p), user("ok")], S, None)[0] == "execution"

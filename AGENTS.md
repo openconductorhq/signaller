@@ -104,7 +104,8 @@ breaks.
   settings (and an optional scorer): no I/O, no state. The decision is made once
   per `(session, turn_key, human index)` in `App.auto_decide`, so a tool loop's
   steps agree; it never raises (a failure is `none`, which routes to execution).
-  Planning ends one way: nothing reopens it. The only Anthropic body rewrite
+  Planning ends one way: nothing reopens it. `plan_dirs` match as substrings,
+  so keep them narrow (`/.claude/projects/`, not `/.claude/`: worktrees live there). The only Anthropic body rewrite
   beyond tags and the model name is `drop_old_thinking`, in `prepare()`, auto
   only. The model (`auto_model.json`) is optional; a bad one gives a banner,
   not a failure. No datasets, labels or weights go in the repo; `tools/auto_train.py`

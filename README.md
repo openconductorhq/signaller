@@ -304,20 +304,24 @@ alone, and a tool loop keeps that turn's answer.
 
 - **Planning opens** when a planning skill ran in the conversation
   (`superpowers:brainstorming`, `superpowers:writing-plans`, or your own list in
-  the settings box), or when the optional model scores your message above the
-  threshold. Once open it stays open, so terse replies ("ok", "go ahead") are planning too.
+  the settings box), or when the optional model scores a human message at or above the
+  threshold (before planning has ended). Once open it stays open, so terse
+  replies ("ok", "go ahead") are planning too.
 - **One way:** planning ends for good at an execution skill
   (`superpowers:subagent-driven-development`, `executing-plans`) or at the first
-  edit outside the paths that don't end planning: spec and plan folders, and
-  Claude's own files (`/.claude/`, `/.superpowers/`, `/scratchpad/`). After
-  that the conversation is execution.
-- **No signal means execution.** Subagents and teammates start with none, so
-  they run on the execution downstream. Execution goes to the one you pick in
+  edit outside the paths that don't end planning. Edits to a path containing
+  `docs/superpowers/specs/`, `docs/superpowers/plans/`, `/.claude/projects/`
+  (Claude's memory), `/tmp/claude-` (its scratchpads) or `/.superpowers/` never
+  end planning; the settings box lists them. After that the conversation is
+  execution.
+- **No signal means execution.** Subagents and teammates start with none (unless
+  the model scores their brief), so they run on the execution downstream. Execution goes to the one you pick in
   the box, else the first downstream, else Anthropic.
 - **A tag wins for one turn:** `#planning` or `#execution` at the start of the
   message overrides the decision (see Tags).
 - **Between turns:** the switch happens at a human message, so within a turn
-  nothing moves. A downstream's unsigned thinking blocks from earlier turns
+  nothing moves. The Anthropic-only server-tool override and settings lines
+  (schedules) still apply in auto. A downstream's unsigned thinking blocks from earlier turns
   can't go to Anthropic, so on an Anthropic request in auto the router drops
   them from earlier turns (Anthropic discards them anyway). That is the only
   rewrite of an Anthropic body beyond tags and the model name.
@@ -327,9 +331,10 @@ developer's sessions, labelled planning or execution by Claude (so an estimate, 
 truth), the phase rules alone were right 92% of the time and moved 84% of
 main-thread turns off Anthropic. They also sent 38 of 82 planning turns (46%) to
 the execution downstream: auto saves money, it doesn't protect every planning
-turn. Put `#planning` on a turn that matters. With a model, 25 of 82 planning
-turns were misrouted, but more execution turns stayed on Anthropic (42 of 460 against 7)
-and overall accuracy fell to 88%, so the model is a trade, not a clear win.
+turn. Put `#planning` on a turn that matters. With a model (measured at threshold
+0.50; the default is 0.8), 25 of 82 planning turns were misrouted, but more
+execution turns stayed on Anthropic (42 of 460 against 7) and overall accuracy
+fell to 88%, so the model is a trade, not a clear win.
 
 **The model is optional and ships untrained.** Without `auto_model.json` in the
 config dir, auto runs on the phase rules alone. A model is a small linear
@@ -397,8 +402,7 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
 - **Presets:** the whole setup under a name, one card each, with Switch,
   Export and Delete (see [Presets](#presets)).
 - **Lever:** Anthropic, Rules, Auto, or one of your downstreams. Auto opens a
-  small settings box. With one session
-  picked, the lever shows and sets that session's own lever (the same one
+  small settings box. With one session picked, the lever shows and sets that session's own lever (the same one
   `/signaller` sets, updated live). "back to global" drops it.
 - **Tracks:** one row per downstream. Each row shows whether a key is set, the
   model map and the prices, with Rename, Replace key and Delete. The classifier's
