@@ -68,3 +68,10 @@ def test_drop_old_thinking_keeps_the_current_turn():
     assert [b["type"] for b in req["messages"][1]["content"]] == ["text"]
     assert req["messages"][3]["content"][0]["type"] == "thinking"  # after the latest human message: kept
     assert drop_old_thinking(req) is False
+
+
+def test_claude_own_files_do_not_end_planning():
+    base = [user("x"), skill("superpowers:brainstorming")]
+    for p in ("/r/.tmp/scratchpad/notes.md", "/Users/x/.claude/projects/p/memory/a.md", "/r/.superpowers/sdd/b.md"):
+        assert phase(base + [edit(p), user("ok")], S, None)[0] == "planning"
+    assert phase(base + [edit("/r/app.py"), user("ok")], S, None)[0] == "execution"

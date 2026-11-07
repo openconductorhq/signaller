@@ -17,7 +17,7 @@ class AutoSettings:
     execution: Optional[str] = None
     planning_skills: tuple = ("superpowers:brainstorming", "superpowers:writing-plans")
     execution_skills: tuple = ("superpowers:subagent-driven-development", "superpowers:executing-plans")
-    plan_dirs: tuple = ("docs/superpowers/specs/", "docs/superpowers/plans/")
+    plan_dirs: tuple = ("docs/superpowers/specs/", "docs/superpowers/plans/", "/.claude/", "/.superpowers/", "/scratchpad/")
     threshold: float = 0.8
 
 
