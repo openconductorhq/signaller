@@ -665,6 +665,55 @@ class ProxyTest(unittest.TestCase):
         self.app.prune_levers()
         self.assertEqual(self.app.session_levers, {"s1": "valar"})
 
+    def auto_post(self, msgs, model="claude-opus-5-5"):
+        self.app.set_session_lever("s1", "auto")
+        self.post(body_for(model, {"messages": msgs}), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        return len(self.a.seen), len(self.v.seen)
+
+    def test_auto_routes_by_phase_once_per_turn(self):
+        plan = [U("an idea"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES, U("go")]
+        self.assertEqual(self.auto_post(plan), (1, 0))  # planning → Anthropic
+        built = plan + [tool("Edit", {"file_path": "/x/app.py"}), RES, U("go")]
+        self.assertEqual(self.auto_post(built), (1, 1))  # same text, a later turn: its own decision → downstream
+        step = plan + [tool("Edit", {"file_path": "/x/app.py"}), RES]
+        self.assertEqual(self.auto_post(step), (2, 1))  # a tool-loop step of the planning turn keeps its decision
+        self.assertEqual(self.app.auto_last["s1"]["phase"], "planning")
+
+    def test_auto_drops_old_thinking_for_anthropic_only(self):
+        think = {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},
+                                                  {"type": "tool_use", "id": "x", "name": "Skill", "input": {"skill": "superpowers:brainstorming"}}]}
+        self.auto_post([U("an idea"), think, RES, U("next")])
+        self.assertNotIn(b"thinking", self.a.seen[0][3])
+        self.app.set_session_lever("s1", "rules")
+        body = body_for("claude-opus-5-5", {"messages": [U("an idea"), think, RES, U("next")]})
+        self.post(body, {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual(self.a.seen[1][3], body)  # rules: byte for byte
+
+    def test_auto_model_unreadable_or_failing_falls_back(self):
+        with open(os.path.join(self.dir, "auto_model.json"), "w") as f:
+            f.write("{nope")
+        app = App(Config("127.0.0.1", 0, self.a.url, (self.v.url, "VK")), self.dir)
+        app.store.close()
+        self.assertIsNone(app.auto_model)
+        self.assertIn("Auto mode's model couldn't be read (ValueError)", app.banner)
+        msgs = [U("an idea"), tool("Skill", {"skill": "superpowers:brainstorming"}), RES, U("go")]
+        f = signaller.Features.from_body(body_for("claude-opus-5-5", {"messages": msgs}))
+        self.assertEqual(app.auto_decide(f)[0], "planning")  # phase alone still decides
+        app.auto_model = mock.Mock(score=mock.Mock(side_effect=RuntimeError))
+        f = signaller.Features.from_body(body_for("claude-opus-5-5", {"messages": [U("fresh")]}))
+        self.assertEqual(app.auto_decide(f), ("none", "model error"))  # never raised
+
+
+def U(text):
+    return {"role": "user", "content": text}
+
+
+def tool(name, inp):
+    return {"role": "assistant", "content": [{"type": "tool_use", "id": "x", "name": name, "input": inp}]}
+
+
+RES = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}]}
+
 
 class SeedTest(unittest.TestCase):
     def test_env_seeds_valar_once(self):

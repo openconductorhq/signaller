@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
+import autophase
 import console
 import overrides  # after routing: overrides imports routing
 import presets
@@ -126,7 +127,10 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
     settings lines applied. `req` (when a dict) is edited in place; `changed` says it must be re-serialised."""
     name, base, key, ds = upstream(app, track, routing)
     if not ds:
-        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, False, None
+        # auto only: a downstream's unsigned thinking from an earlier turn can't go to Anthropic (it discards them anyway)
+        dropped = track == "anthropic" and (routing or app.routing).lever == "auto" and isinstance(req, dict) \
+            and autophase.drop_old_thinking(req)
+        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, dropped, None
     out_model = track_model(model, ds)
     hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
     changed = isinstance(req, dict) and (hoisted or out_model != model)
@@ -215,6 +219,9 @@ class App:
         if pbanner:
             self.banner = " ".join(filter(None, [self.banner, pbanner]))
         self._finish_switch()
+        # ponytail: 1024 turns / 1024 sessions, oldest dropped; an evicted turn is decided again from its history
+        self._auto_lock, self._auto, self.auto_last = threading.Lock(), collections.OrderedDict(), collections.OrderedDict()
+        self.auto_model = self._load_auto_model()
         self.classifier = Classifier(self._classifier_upstream)
         try:
             # SIGNALLER_STATS_DIR: SQLite needs a real local disk, not a folder shared from the host (see compose.yaml)
@@ -347,6 +354,49 @@ class App:
             if len(self._turn_hours) > 512:
                 self._turn_hours.popitem(last=False)
         return self._turn_hours[turn_key]
+
+    def _load_auto_model(self):
+        """The optional content model from the config dir. None when absent; unreadable → None plus a banner."""
+        try:
+            return autophase.Model.load(os.path.join(self.config_dir, "auto_model.json"))
+        except FileNotFoundError:
+            return None
+        except Exception as e:  # the class name only, never the file's text
+            self.banner = " ".join(filter(None, [self.banner, "Auto mode's model couldn't be read (%s); auto runs on the phase alone." % type(e).__name__]))
+            return None
+
+    def auto_decide(self, f: Features) -> tuple[str, str]:
+        """(phase, why) for auto, decided once per human turn (a tool loop's steps share the key). Never raises."""
+        try:
+            key = (f.session, f.turn_key, autophase.human_index(f.messages))
+        except Exception:
+            return "none", "phase error"
+        with self._auto_lock:
+            got = self._auto.get(key)
+        if got is None:
+            m, failed = self.auto_model, []
+
+            def score(text):
+                try:
+                    return m.score(text)
+                except Exception:
+                    failed.append(True)
+                    raise
+            try:
+                got = autophase.phase(f.messages, self.routing.auto, score if m else None)
+            except Exception:
+                got = ("none", "model error") if failed else ("none", "phase error")
+            with self._auto_lock:
+                self._auto[key] = got
+                if len(self._auto) > 1024:
+                    self._auto.popitem(last=False)
+        if f.session:
+            with self._auto_lock:
+                self.auto_last[f.session] = {"phase": got[0], "why": got[1]}
+                self.auto_last.move_to_end(f.session)
+                if len(self.auto_last) > 1024:
+                    self.auto_last.popitem(last=False)
+        return got
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
         """One small entry per session that used /signaller; saved so a restart keeps it."""
@@ -595,7 +645,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     # Claude Code sends an agent id on every request that isn't the main thread's (the team lead's,
                     # in a team); a subagent also has cc_is_subagent=true, so the rest are teammates
                     f.teammate = not f.subagent and bool(self.headers.get("x-claude-code-agent-id"))
-                d = decide_route(routing, f, app.classifier) if f else None
+                d = decide_route(routing, f, app.classifier, auto=app.auto_decide if routing.lever == "auto" else None) if f else None
             except Exception as e:
                 self._error(500, "signaller: routing failed")
                 print("%s route=- reason=error status=500 err=%s shadow=-" % (
@@ -652,8 +702,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         route = "anthropic"
                         req2 = json.loads(orig_body)
                         stripped2 = strip_lead_tags(req2)
-                        name, base, key, ds, headers, out_model, window, _, override = prepare(app, route, model, req2, self.headers.items(), routing, f)
-                        body, shown = json.dumps(req2).encode() if stripped2 else orig_body, model
+                        name, base, key, ds, headers, out_model, window, changed2, override = prepare(app, route, model, req2, self.headers.items(), routing, f)
+                        body, shown = json.dumps(req2).encode() if stripped2 or changed2 else orig_body, model
                         d.explanation.append({"rule": "Fallback", "outcome": f"{fell} can't take images → anthropic", "decided": True})
                         if sid:
                             app.notices[sid] = {"turn": f.turn_key[:16], "text": f"This turn went to Anthropic, not {fell}: "
@@ -729,7 +779,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
                         "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window, "override": override,
                         "cost": cost, "api_cost": api_cost})
-                    f.prompt = None  # recorded; the preview deque keeps only the capped text
+                    f.prompt, f.messages = None, None  # recorded; the preview deque keeps only the capped text, not the history
                     app.recent.append((f, d, rid))
                 shown_reason = '"%s"' % reason if re.search(r"\s", reason) else reason
                 print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s shadow=%s%s" % (

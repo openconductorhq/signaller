@@ -330,7 +330,9 @@ def api(h, app, method, path, query, body):
         elif method != "GET":
             raise Err(405, "GET or PUT")
         own = app.lever_for(sid)
-        return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes,
+        with app._auto_lock:  # the phase auto last chose for this session, while auto is its lever
+            auto = dict(app.auto_last[sid]) if (own or app.routing.lever) == "auto" and sid in app.auto_last else None
+        return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes, "auto": auto,
                 "name": st.session_name(sid), "notice": app.notices.get(sid), "prompts": dict(app.routing.prompts)}
     m = re.fullmatch(r"/ui/api/sessions/([^/]+)", path)
     if m and method == "DELETE":  # the X on a session chip: its history goes; a live session starts again from zero

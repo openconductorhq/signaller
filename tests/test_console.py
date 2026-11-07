@@ -182,7 +182,7 @@ class ConsoleTest(Fixture):
     def test_session_lever_applies_to_that_session_only(self):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules",
                                                                          "modes": ["rules", "auto", "anthropic", "valar"], "name": None,
-                                                                         "notice": None, "prompts": {}})
+                                                                         "notice": None, "prompts": {}, "auto": None})
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})[1]["lever"], "valar")
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "bogus"})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "unknown", "lever": "valar"})[0], 400)
@@ -199,6 +199,13 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "auto"})[1]["lever"], "auto")
         self.app.routing = replace(self.app.routing, downstreams=())
         self.assertEqual(self.app.lever_for("s1"), "auto")
+
+    def test_lever_answer_carries_the_auto_phase(self):
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "auto"})
+        self.post(body_for("claude-opus-5-5"), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["auto"], {"phase": "none", "why": "no planning signal"})
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "rules"})
+        self.assertIsNone(self.js("GET", "/ui/api/lever?session=s1")[1]["auto"])  # only while auto is its lever
 
     def test_dangling_session_lever_shows_the_global(self):
         self.app.session_levers["s1"] = "lemmi"  # a track this setup lacks, saved before a restart

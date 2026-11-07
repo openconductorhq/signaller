@@ -103,7 +103,13 @@ class Model:
                 or isinstance(d.get("bias"), bool) or not isinstance(d.get("bias"), (int, float))
                 or not all(isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool) for k, v in w.items())):
             raise ValueError("not a %s model" % FORMAT)
-        return cls(float(d["bias"]), {k: float(v) for k, v in w.items()})
+        try:
+            bias, weights = float(d["bias"]), {k: float(v) for k, v in w.items()}
+        except OverflowError:  # an integer too big for a float
+            raise ValueError("weight out of range")
+        if not all(math.isfinite(v) for v in (bias, *weights.values())):  # a NaN weight would score every text ~1.0
+            raise ValueError("non-finite weight")
+        return cls(bias, weights)
 
     def _score(self, text: str) -> float:
         t = WORD_RE.findall(text.lower()[:20000])

@@ -54,6 +54,12 @@ def test_model_load_rejects_bad_files(tmp_path):
     with pytest.raises(ValueError): Model.load(str(p))
     with pytest.raises(FileNotFoundError): Model.load(str(tmp_path / "none.json"))
 
+def test_model_load_rejects_non_finite_weights(tmp_path):
+    p = tmp_path / "m.json"; p.write_text('{"format": "signaller-auto-1", "bias": 0, "weights": {"a": NaN}}')
+    with pytest.raises(ValueError): Model.load(str(p))
+    p.write_text('{"format": "signaller-auto-1", "bias": 0, "weights": {"a": 1%s}}' % ("0" * 400))
+    with pytest.raises(ValueError): Model.load(str(p))
+
 def test_drop_old_thinking_keeps_the_current_turn():
     req = {"messages": [user("a"), {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"}, {"type": "text", "text": "r"}]},
                         user("b"), {"role": "assistant", "content": [{"type": "thinking", "thinking": "t2", "signature": "s2"}, {"type": "tool_use", "id": "1", "name": "Bash", "input": {}}]},
