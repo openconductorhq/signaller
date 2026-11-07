@@ -326,9 +326,9 @@ function renderLever() {
   $("rulebook").classList.toggle("dim", off);
   $("leverNote").hidden = !off;
   $("leverNote").style.color = off && !auto ? col(lv) : "";
-  $("leverNote").textContent = !off ? "" : auto ? `Auto is choosing for ${id ? "this session" : "everything"}: planning to Anthropic, the rest to ${NAME(execTrack())}`
+  $("leverNote").textContent = !off ? "" : auto ? `Auto is choosing for ${id ? "this session" : "everything"}: planning to Anthropic, the rest to ${NAME(S.exec_track)}`
     : `The lever is sending ${id ? "this session" : "everything"} to ${NAME(lv)}`;
-  $("autoSub").textContent = `planning → Anthropic, the rest → ${NAME(execTrack())}`;
+  $("autoSub").textContent = `planning → Anthropic, the rest → ${NAME(S.exec_track)}`;
   renderAuto(auto);
   for (const [t, y] of Object.entries(YARD)) y.trk.classList.toggle("dim", off && !auto && t !== lv);
   $("jlabel").textContent = off ? "lever" : "rulebook";
@@ -338,9 +338,12 @@ function renderLever() {
   else sc.replaceChildren("Lever for ", el("b", {}, fullLabel(id)), own ? " · its own" : ` · following the global lever (${cfg.lever === "rules" ? "Rules" : NAME(cfg.lever)})`,
     own ? " " : "", own ? el("button", { type: "button", class: "linkish", "data-k": "lever:reset", onclick: () => setLever(null) }, "back to global") : "");
 }
-// where auto sends execution: auto.execution, else the first downstream, else Anthropic (the router's exec_track)
-const execTrack = () => cfg.auto.execution && dsOf(cfg.auto.execution) ? cfg.auto.execution : DS().length ? DS()[0].id : "anthropic";
-const csv = (s) => s.split(",").map((x) => x.trim()).filter(Boolean);
+// where auto sends execution comes from the router (state's exec_track): one definition, no client copy
+const parts = (s, sep) => s.split(sep).map((x) => x.trim()).filter(Boolean);
+const csv = (s) => parts(s, ",");
+// the auto fields: element id, config key, how the input text turns into the value
+const AU = [["auPlan", "planning_skills", csv], ["auSkills", "execution_skills", csv], ["auDirs", "plan_dirs", csv],
+  ["auThr", "threshold", (v) => v === "" ? NaN : Number(v)]];
 function renderAuto(show) {
   $("autoBox").hidden = !show;
   if (!show) return;
@@ -351,16 +354,14 @@ function renderAuto(show) {
     ex.replaceChildren(el("option", { value: "" }, "(first downstream)"), ...DS().map((d) => el("option", { value: d.id }, d.name)));
   }
   ex.value = a.execution || "";
-  for (const [id, v] of [["auPlan", a.planning_skills.join(", ")], ["auSkills", a.execution_skills.join(", ")], ["auDirs", a.plan_dirs.join(", ")], ["auThr", a.threshold]])
-    if (document.activeElement !== $(id)) $(id).value = v;
+  for (const [id, k, parse] of AU)
+    if (document.activeElement !== $(id)) $(id).value = Array.isArray(a[k]) ? a[k].join(", ") : a[k];
   $("autoModel").textContent = S && S.auto_model ? "Model: loaded" : "Model: none — auto uses the phase alone";
 }
 const saveAuto = (patch) => save({ ...cfg, auto: { ...cfg.auto, ...patch } }, $("autoErr"));
 $("auExec").addEventListener("change", (e) => saveAuto({ execution: e.target.value || null }));
-$("auPlan").addEventListener("change", (e) => saveAuto({ planning_skills: csv(e.target.value) }));
-$("auSkills").addEventListener("change", (e) => saveAuto({ execution_skills: csv(e.target.value) }));
-$("auDirs").addEventListener("change", (e) => saveAuto({ plan_dirs: csv(e.target.value) }));
-$("auThr").addEventListener("change", (e) => saveAuto({ threshold: e.target.value === "" ? NaN : Number(e.target.value) }));
+for (const [id, k, parse] of AU)
+  $(id).addEventListener("change", (e) => saveAuto({ [k]: parse(e.target.value) }));
 const offTrack = (v) => !!dsOf(v);
 function warnOff(v) {
   $("localWarnT").textContent = `Conversations that run on ${NAME(v)} may fail when you switch back. Start a new session afterwards if they do.`;
@@ -616,7 +617,7 @@ const DEFAULT_TEXT = {
   tier: ["when tier is opus or tier is fable go anthropic\nwhen tier is sonnet or tier is haiku or tier is other go valar",
     () => ["opus & fable → ", trk("anthropic"), ", sonnet, haiku & anything else → ", trk("valar")]],
 };
-const lines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
+const lines = (text) => parts(text, "\n");
 // "Can send your main session off Anthropic": a line going to a downstream whose condition never looks at tier or subagent.
 const GO_OFF = /\bgo\s+(?!anthropic\s*$)[\w-]+\s*$/i;
 const risky = (r) => r.kind === "dsl" && lines(r.text).some((l) => GO_OFF.test(l) && !/\btier\b|\bsubagent\b|\bteammate\b/i.test(l.replace(GO_OFF, "")));

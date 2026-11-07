@@ -13,8 +13,8 @@ from keys import write_json
 from prices import parse_valar
 import overrides
 import presets
-from routing import (MAX_DOWNSTREAMS, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, untagged, config_from_json, config_to_json,
-                     downstream, route, tracks, valid_id)
+from routing import (MAX_DOWNSTREAMS, LEVER_MODES, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, untagged, config_from_json,
+                     config_to_json, downstream, exec_track, route, tracks, valid_id)
 from rulelang import RuleError, parse
 
 UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui")
@@ -247,6 +247,7 @@ def state(app, query=None):
             "dropped": app.store.dropped,
             "downstreams": {d.id: {"key_set": app.keys.has(d.id, d.url), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
             "recent_count": len(app.recent), "auto_model": app.auto_model is not None,
+            "exec_track": exec_track(app.routing),  # where auto sends execution, so the page and the router agree
             # effective levers only (lever_for): a raw entry the active setup can't follow would show a lever the router ignores
             "session_levers": {s: l for s, l in ((s, app.lever_for(s)) for s in app.session_levers) if l},
             "collisions": app.collisions(),
@@ -321,7 +322,7 @@ def api(h, app, method, path, query, body):
         sid = body.get("session") if method == "PUT" else (query.get("session") or [None])[0]
         if not _sid_ok(sid):
             raise Err(400, "session must be a Claude Code session id")
-        modes = ["rules", "auto", *tracks(app.routing)]
+        modes = [*LEVER_MODES, *tracks(app.routing)]
         if method == "PUT":
             lever = body.get("lever")
             if lever is not None and lever not in modes:
