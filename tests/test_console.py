@@ -673,7 +673,7 @@ class DownstreamApiTest(Fixture):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["modes"], ["rules", "auto", "anthropic", "valar"])
         self.add()
         s, j = self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "lemmi"})
-        self.assertEqual((s, j["lever"], j["modes"]), (200, "lemmi", ["rules", "anthropic", "valar", "lemmi"]))
+        self.assertEqual((s, j["lever"], j["modes"]), (200, "lemmi", ["rules", "auto", "anthropic", "valar", "lemmi"]))
         s, j = self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "local"})
         self.assertEqual(s, 400)
         self.assertIn("lemmi", j["error"])
