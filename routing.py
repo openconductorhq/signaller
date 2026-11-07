@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Callable
 
+from autophase import AutoSettings, human_index
 from rulelang import FIELDS, KEYWORDS, RuleError, evaluate, fields_of, parse
 
 ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
@@ -17,25 +18,21 @@ TEXT_CAP = 20_000
 MAX_DOWNSTREAMS = 6
 ID_RE = re.compile(r"[a-z][a-z0-9-]{0,23}")
 COLOR_RE = re.compile(r"#[0-9A-Fa-f]{6}")
-RESERVED_IDS = {"anthropic", "rules", "reset", "name"} | KEYWORDS | set(FIELDS)
+RESERVED_IDS = {"anthropic", "rules", "auto", "reset", "name"} | KEYWORDS | set(FIELDS)
 PRICE_KEYS = ("in", "out", "cache_read", "cache_write")
 
 
 def latest_human_text(messages: list) -> str:
     """Text of the most recent user message that has non-system-reminder text."""
-    for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str):
-            content = [{"type": "text", "text": content}]
-        texts = [
-            b["text"] for b in content
-            if b.get("type") == "text" and not b["text"].strip().startswith("<system-reminder>")
-        ]
-        if texts:
-            return "\n".join(texts)
-    return ""
+    i = human_index(messages)
+    if i < 0:
+        return ""
+    m = messages[i]
+    c = m["content"]
+    if isinstance(c, str):
+        return c
+    return "\n".join(b["text"] for b in c if isinstance(b, dict) and b.get("type") == "text"
+                     and isinstance(b.get("text"), str) and not b["text"].strip().startswith("<system-reminder>"))
 
 
 def lead_tags(text: str) -> frozenset:
@@ -175,7 +172,8 @@ def track_window(model: str, ds: Downstream) -> str | None:
 
 class Features:
     def __init__(self, text, tags, model, tokens, subagent, turn_key, servertool=False, step=None, session=None, hour=None,
-                 teammate=False):
+                 teammate=False, messages=None):
+        self.messages = messages if messages is not None else []
         self.text, self.tags, self.model, self.tokens, self.servertool = text[:TEXT_CAP], tags, model, tokens, servertool
         self.step = step  # the tool results this request carries back (display only; routing uses text)
         self.prompt = untagged(text)  # uncapped and as sent upstream (no leading tags), for display
@@ -203,7 +201,8 @@ class Features:
             step = latest_tool_results(req["messages"])
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
             return None
-        return cls(text, lead_tags(text), model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), srv, step)
+        return cls(text, lead_tags(text), model, len(body) // 4, sub, hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest(), srv, step,
+                   messages=req["messages"])
 
     def get(self, name: str, label: Callable[[], str]):
         return label() if name == "label" else getattr(self, {"tag": "tags"}.get(name, name))
@@ -268,10 +267,18 @@ class RoutingConfig:
     migrated_off: tuple[str, ...] = field(default=(), compare=False)  # rules the v2→v3 migration switched off; banner only
     settings: tuple = ()  # overrides.Setting lines; last so positional constructors stay valid
     prompts: tuple = ()  # (name, text): what /signaller run <name> submits in Claude Code
+    auto: AutoSettings = AutoSettings()
 
 
 def tracks(cfg: RoutingConfig) -> tuple[str, ...]:
     return ("anthropic",) + tuple(d.id for d in cfg.downstreams)
+
+
+def exec_track(cfg: RoutingConfig) -> str:
+    """Where auto sends execution: auto.execution if it names a downstream, else the first downstream, else Anthropic."""
+    if cfg.auto.execution and downstream(cfg, cfg.auto.execution):
+        return cfg.auto.execution
+    return cfg.downstreams[0].id if cfg.downstreams else "anthropic"
 
 
 def downstream(cfg: RoutingConfig, id: str) -> Downstream | None:
@@ -433,6 +440,26 @@ def prompts_from_json(items) -> tuple:
     return tuple(out)
 
 
+def _auto_from_json(a, dss) -> AutoSettings:
+    d = AutoSettings()
+    if a is None:
+        return d
+    if not isinstance(a, dict):
+        raise ValueError("auto: must be an object")
+
+    def strs(k):
+        v = a.get(k, getattr(d, k))
+        if not isinstance(v, (list, tuple)) or len(v) > 20 or not all(isinstance(x, str) and 0 < len(x) <= 200 for x in v):
+            raise ValueError(f"auto {k}: up to 20 non-empty strings of at most 200 characters")
+        return tuple(v)
+
+    ex = a.get("execution")
+    if ex is not None and ex not in [x.id for x in dss]:
+        raise ValueError(f"auto execution: no downstream named {ex}")
+    thr = _num(a.get("threshold", d.threshold), 0.5, 0.99, "auto threshold must be 0.5–0.99")
+    return AutoSettings(ex, strs("planning_skills"), strs("execution_skills"), strs("plan_dirs"), float(thr))
+
+
 def config_from_json(obj: dict) -> RoutingConfig:
     try:
         if obj.get("version") == 1:
@@ -450,7 +477,7 @@ def config_from_json(obj: dict) -> RoutingConfig:
         for d in obj["downstreams"]:
             dss.append(_downstream(d, [x.id for x in dss]))
         ts = ("anthropic",) + tuple(d.id for d in dss)
-        if obj["lever"] != "rules":
+        if obj["lever"] not in ("rules", "auto"):
             _track(obj["lever"], ts, "lever")
         otherwise = _track(obj["otherwise"], ts, "otherwise")
         rules = tuple(Rule(r["name"], r["kind"], bool(r["enabled"]), r.get("text", ""), r.get("builtin"))
@@ -488,7 +515,7 @@ def config_from_json(obj: dict) -> RoutingConfig:
                              ClassifierSettings(str(c["model"]), thr,
                                                 float(_num(c["timeout_s"], 0.1, 30, "classifier time limit must be 0.1–30 s")), labels,
                                                 c["upstream"]), dbl, tuple(dss), bool(obj.get("seeded", False)), off, settings,
-                             prompts_from_json(obj.get("prompts", [])))
+                             prompts_from_json(obj.get("prompts", [])), _auto_from_json(obj.get("auto"), dss))
     except (KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"bad config: {e!r}") from None
 
@@ -508,6 +535,9 @@ def config_to_json(cfg: RoutingConfig) -> dict:
         "doubling": {"rate": cfg.doubling.rate, "tag": cfg.doubling.tag,
                      "shadow": dict(cfg.doubling.shadow)},
         "downstreams": [asdict(d) for d in cfg.downstreams],
+        "auto": {"execution": cfg.auto.execution, "planning_skills": list(cfg.auto.planning_skills),
+                 "execution_skills": list(cfg.auto.execution_skills), "plan_dirs": list(cfg.auto.plan_dirs),
+                 "threshold": cfg.auto.threshold},
     }
 
 
@@ -519,11 +549,21 @@ class Decision:
     classified: ClassResult | None = None
 
 
-def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, ClassifierSettings], ClassResult]) -> Decision:
+def route(cfg: RoutingConfig, f: Features, classify: Callable[[Features, ClassifierSettings], ClassResult],
+          auto: Callable[[Features], tuple] | None = None) -> Decision:
     st = next((r for r in cfg.rules if r.builtin == "servertool"), None)
     if cfg.lever != "rules" and f.servertool and st and st.enabled and st.text.strip() == SERVERTOOL_RULE.text:
         # the lever can't send these anywhere useful: only Anthropic runs its own tools
         return Decision("anthropic", "rule:" + st.name, [{"rule": st.name, "outcome": "Anthropic-only tool, lever overridden → anthropic", "decided": True}])
+    if cfg.lever == "auto":
+        if "planning" in f.tags or "execution" in f.tags:  # only the exact lead tags; the rest are ignored here
+            ph, why, reason = ("planning" if "planning" in f.tags else "execution"), "tag", "tag"
+        else:
+            ph, why = auto(f) if auto else ("none", "no planning signal")
+            reason = "auto:planning" if ph == "planning" else "auto:execution"
+            ph = "planning" if ph == "planning" else "execution"
+        track = "anthropic" if ph == "planning" else exec_track(cfg)
+        return Decision(track, reason, [{"rule": "Auto", "outcome": f"{ph} ({why}) → {track}", "decided": True}])
     if cfg.lever != "rules":
         return Decision(cfg.lever, "lever", [{"rule": "Lever", "outcome": f"sending everything to {cfg.lever}", "decided": True}])
     cs = cfg.classifier

@@ -179,7 +179,7 @@ class ConsoleTest(Fixture):
 
     def test_session_lever_applies_to_that_session_only(self):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules",
-                                                                         "modes": ["rules", "anthropic", "valar"], "name": None,
+                                                                         "modes": ["rules", "auto", "anthropic", "valar"], "name": None,
                                                                          "notice": None, "prompts": {}})
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})[1]["lever"], "valar")
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "bogus"})[0], 400)
@@ -192,6 +192,11 @@ class ConsoleTest(Fixture):
         self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["session"], None)
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["session_levers"], {})
+
+    def test_auto_session_lever_survives_without_downstreams(self):
+        self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "auto"})[1]["lever"], "auto")
+        self.app.routing = replace(self.app.routing, downstreams=())
+        self.assertEqual(self.app.lever_for("s1"), "auto")
 
     def test_dangling_session_lever_shows_the_global(self):
         self.app.session_levers["s1"] = "lemmi"  # a track this setup lacks, saved before a restart
@@ -665,7 +670,7 @@ class DownstreamApiTest(Fixture):
         return r.status, json.loads(r.read())
 
     def test_lever_modes(self):
-        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["modes"], ["rules", "anthropic", "valar"])
+        self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1]["modes"], ["rules", "auto", "anthropic", "valar"])
         self.add()
         s, j = self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "lemmi"})
         self.assertEqual((s, j["lever"], j["modes"]), (200, "lemmi", ["rules", "anthropic", "valar", "lemmi"]))

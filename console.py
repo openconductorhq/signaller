@@ -321,7 +321,7 @@ def api(h, app, method, path, query, body):
         sid = body.get("session") if method == "PUT" else (query.get("session") or [None])[0]
         if not _sid_ok(sid):
             raise Err(400, "session must be a Claude Code session id")
-        modes = ["rules", *tracks(app.routing)]
+        modes = ["rules", "auto", *tracks(app.routing)]
         if method == "PUT":
             lever = body.get("lever")
             if lever is not None and lever not in modes:

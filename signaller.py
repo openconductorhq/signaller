@@ -378,7 +378,7 @@ class App:
         lever = self.session_levers.get(sid or "")
         if not lever:  # the common case: no entry, no tracks() scan
             return None
-        return lever if lever == "rules" or lever in tracks(self.routing) else None
+        return lever if lever in ("rules", "auto") or lever in tracks(self.routing) else None
 
     def prune_levers(self) -> None:
         """Drop session ids not seen for a week (no sessions row counts as gone too; same rule as overrides.prune).
