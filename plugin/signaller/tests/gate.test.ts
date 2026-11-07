@@ -270,3 +270,22 @@ test('two calls at once spend one typed grant once', async ($, on) => {
   expect([a, b].some(x => (x.deny ?? '').includes('Not switching'))).toBe(true)  // the other was refused
   expect(puts).toEqual(['valar'])  // one grant, one switch on the wire
 })
+
+test('auto is a mode, not a downstream: one typed step, the phase in the status, no settings form', async ($, on) => {
+  const AUTO = { lever: 'auto', session: 'auto', global: 'rules', modes: ['rules', 'auto', 'valar', 'anthropic'], auto: { phase: 'planning', why: 'x' } }
+  const puts: string[] = []
+  await stub($, on, (e) => {
+    if (e.init?.method === 'PUT') puts.push(String(e.init.body))
+    return { value: { ok: true, status: 200, text: JSON.stringify(AUTO) } }
+  })
+
+  await $.prompt.submit({ text: 'do /signaller auto' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'auto' })).deny).toBeUndefined()
+  expect(puts).toEqual([JSON.stringify({ session: 's1', lever: 'auto' })])
+  expect((await $.tool.call({ tool: TOOL, lever: 'auto' })).deny).toContain('Not switching')  // used up
+  expect((await $.tool.call({ tool: TOOL })).result).toBe('auto · planning (this session)')
+
+  await $.prompt.submit({ text: 'do /signaller auto window now' })
+  expect((await $.tool.call({ tool: TOOL, settings: 'auto window now' })).deny).toContain('Unknown downstream')
+  expect(puts.length).toBe(1)
+})

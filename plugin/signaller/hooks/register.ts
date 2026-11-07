@@ -7,7 +7,7 @@ const SETTINGS = `${BASE}/ui/api/settings`
 let MODES = ['rules', 'anthropic'] // the router's list, refreshed by every lever answer
 const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the console takes writes from its own origin only
 
-type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null; prompts?: Record<string, string>; notice?: { turn: string; text: string } | null }
+type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null; auto?: { phase: string; why: string } | null; prompts?: Record<string, string>; notice?: { turn: string; text: string } | null }
 type Line = { downstream: string; tier: string | null; set: string; value: string }
 type Form = { ds: string; tier: string | null; key: 'window' | 'model'; value: string } | { ds: string; reset: true }
 
@@ -46,7 +46,7 @@ const parseForm = (s: string): Form | null => {
   return m ? form(m) : null
 }
 const canon = (f: Form): string => ('reset' in f ? `${f.ds} reset` : `${f.ds} ${f.tier ?? '*'} ${f.key} ${f.value}`)
-const downstreams = () => MODES.filter(m => m !== 'rules' && m !== 'anthropic')
+const downstreams = () => MODES.filter(m => m !== 'rules' && m !== 'auto' && m !== 'anthropic')
 
 // Claude may switch the lever or change settings only on the person's say-so. The "/signaller <mode>" and
 // settings forms a prompt carries become the queue of allowed steps, in the order typed: each call must match
@@ -138,7 +138,8 @@ const switchTo = async ($: EngineInterface, want: string): Promise<{ ok: boolean
   }
 }
 
-const label = (l: Lever) => `${l.lever} (${l.session ? 'this session' : 'global'})${l.name ? `, session name: ${l.name}` : ''}`
+const phase = (l: Lever) => (l.lever === 'auto' && (l.auto?.phase === 'planning' || l.auto?.phase === 'execution') ? ` · ${l.auto.phase}` : '')
+const label = (l: Lever) => `${l.lever}${phase(l)} (${l.session ? 'this session' : 'global'})${l.name ? `, session name: ${l.name}` : ''}`
 // an image fallback the router reports for this session: a line in the transcript (shown, never sent to the
 // model) and a band above the prompt, once per turn; the first poll after a (re)load only takes note, so an
 // old one isn't shown again. The band holds until the person's next prompt clears it.
@@ -171,7 +172,7 @@ export const register: Register = on => {
       name: 'signaller_lever',
       description:
         "Show or switch signaller's lever for this Claude Code session (its subagents follow). " +
-        'lever: rules (follow the rulebook), anthropic, or a downstream id (send everything there), reset (back to the global lever); omit it to only read the current one. ' +
+        'lever: rules (follow the rulebook), auto (the router decides per turn: planning or execution), anthropic, or a downstream id (send everything there), reset (back to the global lever); omit it to only read the current one. ' +
         'settings: "<downstream> [<tier>] window|model <value>" sets this session’s window or model on a downstream (tier: fable, opus, sonnet or haiku); "<downstream> reset" clears this session’s lines for it. ' +
         'Never switch on your own initiative: only when the person tells you to with "/signaller <mode>" or "/signaller <downstream> [<tier>] window|model <value>" in a message (e.g. "do /signaller anthropic", or a plan with "/signaller rules" at a later step). ' +
         'Each form they typed allows one use of exactly that form, in the order they typed them; others are refused, and so is any call from a subagent.',
