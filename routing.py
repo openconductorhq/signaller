@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Callable
 
-from autophase import AutoSettings, human_index
+from autophase import AutoSettings, human_index, human_text
 from rulelang import FIELDS, KEYWORDS, RuleError, evaluate, fields_of, parse
 
 ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
@@ -25,14 +25,7 @@ PRICE_KEYS = ("in", "out", "cache_read", "cache_write")
 def latest_human_text(messages: list) -> str:
     """Text of the most recent user message that has non-system-reminder text."""
     i = human_index(messages)
-    if i < 0:
-        return ""
-    m = messages[i]
-    c = m["content"]
-    if isinstance(c, str):
-        return c
-    return "\n".join(b["text"] for b in c if isinstance(b, dict) and b.get("type") == "text"
-                     and isinstance(b.get("text"), str) and not b["text"].strip().startswith("<system-reminder>"))
+    return human_text(messages[i]) if i >= 0 else ""
 
 
 def lead_tags(text: str) -> frozenset:
@@ -303,6 +296,7 @@ def references(cfg: RoutingConfig, id: str, session_levers: Mapping[str, str]) -
     out += [f"rule '{r.name}' line {n}" for r in cfg.rules if r.enabled for n, ln in enumerate(r.lines, 1) if ln.track == id]
     out += [f"settings line {n}" for n, s in enumerate(cfg.settings, 1) if s.downstream == id]
     out += ["Otherwise"] if cfg.otherwise == id else []
+    out += ["auto execution"] if cfg.auto.execution == id else []
     out += [f"classifier label '{l.name}'" for l in cfg.classifier.labels if l.track == id]
     out += ["classifier upstream"] if cfg.classifier.upstream == id else []
     out += [f"side by side: {t} → {o}" for t, o in cfg.doubling.shadow.items() if o == id]  # its own shadow[id] goes with it

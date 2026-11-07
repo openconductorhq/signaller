@@ -28,8 +28,8 @@ def _blocks(msg) -> list:
     return [b for b in c if isinstance(b, dict)] if isinstance(c, list) else []
 
 
-def _human_text(msg) -> Optional[str]:
-    """Joined human text of a user message, None when it has none (same filter as routing.latest_human_text)."""
+def human_text(msg) -> Optional[str]:
+    """Joined human text of a user message, None when it has none (same filter as routing.latesthuman_text)."""
     if not isinstance(msg, dict) or msg.get("role") != "user":
         return None
     texts = [b["text"] for b in _blocks(msg)
@@ -40,7 +40,7 @@ def _human_text(msg) -> Optional[str]:
 
 def human_index(messages: list) -> int:
     for i in range(len(messages) - 1, -1, -1):
-        if _human_text(messages[i]) is not None:
+        if human_text(messages[i]) is not None:
             return i
     return -1
 
@@ -50,7 +50,7 @@ def phase(messages: list, s: AutoSettings, score: Optional[Callable[[str], float
     for msg in messages:
         if ended:
             break
-        text = _human_text(msg)
+        text = human_text(msg)
         if text is not None:
             if not opened:
                 m = CMD_RE.search(text)

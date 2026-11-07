@@ -3,6 +3,8 @@ import os
 import time
 import unittest
 from dataclasses import replace
+
+from autophase import AutoSettings
 from http.client import HTTPConnection
 
 import contextlib
@@ -636,6 +638,13 @@ class DownstreamApiTest(Fixture):
         self.assertIn("lemmi", self.js("GET", "/ui/api/state")[1]["downstreams"])
         self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
         self.assertEqual(self.js("DELETE", "/ui/api/downstreams/lemmi")[0], 200)
+
+    def test_delete_blocked_by_auto_execution(self):
+        self.add()
+        self.app.routing = replace(self.app.routing, auto=AutoSettings(execution="lemmi"))
+        s, j = self.js("DELETE", "/ui/api/downstreams/lemmi")
+        self.assertEqual((s, j["references"]), (409, ["auto execution"]))
+        self.assertIn("lemmi", self.js("GET", "/ui/api/state")[1]["downstreams"])
 
     def test_probe_bad_endpoints(self):
         def slow(h):
