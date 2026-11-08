@@ -17,6 +17,7 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
 import autophase
+import autotrain
 import console
 import overrides  # after routing: overrides imports routing
 import presets
@@ -27,7 +28,7 @@ from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from keys import host_of
 from prices import Prices, parse_valar
-from routing import (DEFAULT_CONFIG, LEVER_MODES, has_images, session_of, strip_lead_tags, text_hash, Downstream, Features, RoutingConfig,
+from routing import (DEFAULT_CONFIG, LEVER_MODES, has_images, session_of, strip_lead_tags, text_hash, Decision, Downstream, Features, RoutingConfig,
                      config_from_json, config_to_json, downstream, is_routed, references, route as decide_route,
                      track_model, track_window, tracks)
 from keys import Keys, write_json
@@ -237,6 +238,7 @@ class App:
         self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
         self.started = time.time()
         self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
+        self.trainer = autotrain.Trainer(config_dir, self.sessions.dir, lambda: self.routing.auto)
         self.prices = Prices(config_dir)
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
 
@@ -361,7 +363,8 @@ class App:
         except FileNotFoundError:
             return None
         except Exception as e:  # the class name only, never the file's text
-            self.banner = " ".join(filter(None, [self.banner, "Auto mode's model couldn't be read (%s); auto runs on the phase alone." % type(e).__name__]))
+            self._bad_auto_banner = "Auto mode's model couldn't be read (%s); auto runs on the phase alone." % type(e).__name__
+            self.banner = " ".join(filter(None, [self.banner, self._bad_auto_banner]))
             return None
 
     def auto_decide(self, f: Features, s: "autophase.AutoSettings") -> tuple[str, str]:
@@ -409,6 +412,19 @@ class App:
         with self._auto_lock:
             got = self.auto_last.get(sid)
             return dict(got) if got else None
+
+    def use_trained_model(self) -> None:
+        """Install the job's fitted model without a restart: auto_model.json written atomically,
+        the live scorer swapped, the training folder (labels included) deleted, and the banner about an
+        unreadable model dropped (this one replaces it). ValueError when nothing finished."""
+        model = self.trainer.use()
+        write_json(os.path.join(self.config_dir, "auto_model.json"), model)
+        self.auto_model = autophase.Model(model["bias"], model["weights"])
+        bad = getattr(self, "_bad_auto_banner", "")
+        if bad and bad in self.banner:
+            self.banner = " ".join(self.banner.replace(bad, "").split())
+            self._bad_auto_banner = ""
+        self.trainer.reset()
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
         """One small entry per session that used /signaller; saved so a restart keeps it."""
@@ -652,16 +668,25 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
                 f = Features.from_body(body, req) if is_routed(self.command, self.path) else None
+                msgs = self.path.split("?", 1)[0] == "/v1/messages"  # count_tokens decides but doesn't move auto_last
+                labelling = f is not None and msgs and autotrain.is_label_request(req)
                 if f is not None:
                     f.session, f.hour = any_sid, app.hour_of(f.turn_key, time.localtime(t0).tm_hour)
                     # Claude Code sends an agent id on every request that isn't the main thread's (the team lead's,
                     # in a team); a subagent also has cc_is_subagent=true, so the rest are teammates
                     f.teammate = not f.subagent and bool(self.headers.get("x-claude-code-agent-id"))
-                msgs = self.path.split("?", 1)[0] == "/v1/messages"  # count_tokens decides but doesn't move auto_last
-                auto = (lambda f: app.auto_decide(f, routing.auto)) if routing.lever == "auto" else None
-                d = decide_route(routing, f, app.classifier, auto=auto) if f else None
-                if d and d.auto and msgs:  # auto decided (or a lead tag did): record it for the console, main thread only
-                    app.note_auto(f, *d.auto)
+                    if labelling:
+                        # the labeller's own request: its prompt text never reaches the store, the console or a shadow
+                        f.prompt, f.step = "", None
+                if labelling:
+                    # the marker says who sent it: straight to Anthropic, whatever the lever or the rules say
+                    d = Decision("anthropic", "auto training",
+                                 [{"rule": "Auto training", "outcome": "labelling request → anthropic", "decided": True}])
+                else:
+                    auto = (lambda f: app.auto_decide(f, routing.auto)) if routing.lever == "auto" else None
+                    d = decide_route(routing, f, app.classifier, auto=auto) if f else None
+                    if d and d.auto and msgs:  # auto decided (or a lead tag did): record it for the console, main thread only
+                        app.note_auto(f, *d.auto)
             except Exception as e:
                 self._error(500, "signaller: routing failed")
                 print("%s route=- reason=error status=500 err=%s shadow=-" % (
@@ -679,7 +704,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     pass
             pair, cap, shadow, turn_id = None, None, "-", None
             try:  # a doubling fault must never change the served request
-                turn_id = app.doubler.turn_for(f, route, routing.doubling, sid) if rec and app.doubler else None
+                # a labelling request has no shadow: its text goes to Anthropic and nowhere else
+                turn_id = app.doubler.turn_for(f, route, routing.doubling, sid) if rec and app.doubler and not labelling else None
                 if turn_id:  # shadow starts before the served upstream; it never touches the served path again
                     pair = app.doubler.pending_served(turn_id, rid, route, routing.doubling.shadow[route])
                     shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
@@ -689,11 +715,17 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 pair, shadow, turn_id = None, "-", None
             orig_body = body  # an image fallback to Anthropic starts again from the request as Claude Code sent it
             stripped = False
-            try:  # routing already read the tags; no upstream needs them
-                stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
-            except Exception:
-                pass
-            name, base, key, ds, headers, out_model, window, changed, override = prepare(app, route, model, req, self.headers.items(), routing, f)
+            if labelling:
+                # untouched in every way: no tag strip, no thinking drop, no settings lines, byte for byte
+                name, base, key, ds = upstream(app, "anthropic")
+                headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]
+                out_model, window, changed, override = model, None, False, None
+            else:
+                try:  # routing already read the tags; no upstream needs them
+                    stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
+                except Exception:
+                    pass
+                name, base, key, ds, headers, out_model, window, changed, override = prepare(app, route, model, req, self.headers.items(), routing, f)
             if stripped or changed:
                 body = json.dumps(req).encode()
             if out_model != model:

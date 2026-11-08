@@ -344,14 +344,46 @@ fell to 90%, so the model is a trade, not a clear win.
 
 **The model is optional and ships untrained.** Without `auto_model.json` in the
 config dir, auto runs on the phase rules alone. A model is a small linear
-scorer over the words and word pairs in your message; the router reads it as plain JSON and
-needs nothing installed. To train one on your own transcripts, label a sample
-of your turns planning or execution and run `tools/auto_train.py` (`train` and
-`eval`; its docstring has the file formats). It needs scikit-learn in a separate
-venv (`python3 -m venv V && V/bin/pip install scikit-learn`); the router never
-imports it. Keep labels and weights out of the repo. A model that can't be
-read gives a banner and auto carries on without it. The router reads the file
-at start: restart it after adding or replacing one.
+scorer over the words and word pairs in your message; the router reads it as
+plain JSON and needs nothing installed. The console's **Teach auto how you
+work** card and the plugin's `/signaller train` fit one for you (below);
+`tools/auto_train.py` remains the offline path (`train` and `eval`; its
+docstring has the file formats, and it needs scikit-learn in a separate venv —
+the router never imports it). Keep labels and weights out of the repo. A model
+that can't be read gives a banner and auto carries on without it.
+
+**Teach auto how you work.** The card lists your Claude Code projects (from
+`~/.claude/projects`, the same transcripts the router reads session labels
+from) and how many of each one's prompts are worth labelling. Pick projects
+and the router sends each prompt's text to Haiku with one question — is this
+planning or execution? — then fits the scorer on 80% of the sessions and
+checks it on the other 20%: how many of your planning turns it keeps on
+Anthropic, against the phase rules alone. **Use it** installs the model
+without a restart (it writes `auto_model.json` and the router picks it up at
+once; it's offered only when the held-out check had enough planning turns to
+judge); **Keep rules only** drops it.
+
+- **Cost:** a few tenths of a cent per prompt at Haiku's rates. The job stops
+  offering everything when the estimate of what's still unlabelled passes the
+  cut-off — the `train cap`
+  field in the card (`auto.train_cap`, default $5`) — and offers the newest
+  sessions under it instead (prompts already labelled never count toward it).
+  What you spent so far shows while it runs.
+- **Where labels live:** `<config>/training/labels.jsonl` (prompt ids and
+  their labels, never the text; the folder is 0700 and the file 0600). A
+  restart, a re-plan or a router crash resumes from them instead of paying
+  for the same prompts again. **Use it** and **Keep rules only** both delete
+  the folder.
+- **Privacy:** the labelling sends each prompt's text to Haiku and nowhere
+  else. It is never written to the labels file, the config, a log line or any
+  other API answer; `POST /ui/api/train/next` (loopback, like every
+  console write) is the only endpoint that serves it. The labelling request
+  itself is marked (its system text starts with `signaller-label-v1`), so the
+  router sends it to Anthropic untouched — whatever the lever or the rules
+  say — and records it with no prompt text and no preview; the classifier,
+  auto state and the doubling shadow never see it. In Docker the
+  `~/.claude/projects` mount is now read for prompt text too, not only for
+  session labels — it stays read-only.
 
 **Rolling back:** an older router doesn't know the `auto` lever or settings, so
 with the lever on auto it can't read the config and falls back to defaults with
@@ -579,8 +611,9 @@ the span are remembered in the browser.
 - `presets.json`: the saved presets and which one is active; the active one's
   config is `console.json`. An unreadable file moves to `presets.json.bad`, and
   your current setup is kept as "my setup" (a banner says so).
-- `auto_model.json`: the optional auto-mode scorer, written by `tools/auto_train.py`.
-  Absent by default; you put it here.
+- `auto_model.json`: the optional auto-mode scorer, written by **Use it** in the
+  training card (or `tools/auto_train.py`). Absent by default; the router also
+  reads it here at start.
 - `session_levers.json`: each session's own `/signaller` lever, so a restart
   keeps it. A session id unseen for a week is dropped.
 - `downstreams.keys.json`: the downstreams' keys, by id and host — the same id
@@ -709,6 +742,7 @@ claude plugin test plugin/signaller
 | `console.py` | `/ui` static files and the JSON API, loopback Host/Origin checks |
 | `ui/` | the console: vanilla JS and CSS, no build step, strict CSP |
 | `autophase.py` | auto mode: phase from the history, the text scorer, old-thinking drop |
+| `autotrain.py` | the training job: transcript scan, labelling batches, the stdlib fit (one worker thread) |
 | `tools/auto_train.py` | offline: train and evaluate auto's scorer (needs scikit-learn; never imported by the router) |
 | `plugin/signaller/` | the Claude Code plugin (`/signaller`, `signaller_lever` tool) |
 

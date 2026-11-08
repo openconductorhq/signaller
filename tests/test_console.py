@@ -15,11 +15,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
+import autotrain
 import overrides
-from signaller import App, Config
+from signaller import App, Config, make_server
 from routing import MODEL_TIERS
 from tests import test_proxy
-from tests.test_proxy import body_for, HDRS
+from tests.test_autotrain import write_transcript, user as tu, asst as ta
+from tests.test_proxy import body_for, HDRS, CLASSIFIER_OFF, VALAR
 
 
 
@@ -182,7 +184,7 @@ class ConsoleTest(Fixture):
     def test_session_lever_applies_to_that_session_only(self):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules",
                                                                          "modes": ["rules", "auto", "anthropic", "valar"], "name": None,
-                                                                         "notice": None, "prompts": {}, "auto": None})
+                                                                         "notice": None, "prompts": {}, "auto": None, "trained": False})
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})[1]["lever"], "valar")
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "bogus"})[0], 400)
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "unknown", "lever": "valar"})[0], 400)
@@ -792,6 +794,268 @@ class MigrationBannerTest(unittest.TestCase):
             again.store.close()
         self.assertIsNone(again.banner)
         self.assertFalse(next(r for r in again.routing.rules if r.name == "Mine").enabled)
+
+
+class TrainTest(Fixture):
+    """The training job's API, against a fixture app whose Claude dir is a temp folder seeded with
+    synthetic transcripts (never the real ~/.claude/projects)."""
+
+    def setUp(self):
+        self.claude = tempfile.mkdtemp(prefix="train-claude-")
+        self.addCleanup(shutil.rmtree, self.claude, True)
+        self._old_ccd = os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ["CLAUDE_CONFIG_DIR"] = self.claude
+        def _restore():
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            if self._old_ccd is not None:
+                os.environ["CLAUDE_CONFIG_DIR"] = self._old_ccd
+        self.addCleanup(_restore)
+        super().setUp()
+
+    def restart(self):  # a new app on the same config dir: labels on disk must survive it
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.app.store.close()
+        cfg = Config("127.0.0.1", 0, self.a.url, (self.v.url, "VK"))
+        self.app = App(cfg, self.dir)
+        self.app.routing = replace(CLASSIFIER_OFF, downstreams=(replace(VALAR, url=self.v.url),))
+        self.srv = make_server(cfg, self.app)
+        threading.Thread(target=self.srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+        self.port = self.srv.server_address[1]
+
+    def seed(self, pdir="proj", sessions=3, turns=2):
+        d = os.path.join(self.claude, "projects", pdir)
+        os.makedirs(d, exist_ok=True)
+        texts = []
+        for s in range(sessions):
+            events = []
+            for t in range(turns):
+                if (s + t) % 2 == 0:
+                    txt = "please plan the design for feature %d in session %d" % (t, s)
+                else:
+                    txt = "now fix the failing parser test in module %d of session %d" % (t, s)
+                texts.append(txt)
+                events += [tu(txt), ta("m%d" % t)]
+            write_transcript(d, "sess%d" % s, events)
+        return texts
+
+    def req(self, method, path, body=None, origin="own", host=None, hdrs=None):
+        h = dict(hdrs or {})
+        if origin == "own":
+            origin = "http://127.0.0.1:%d" % self.port
+        if origin:
+            h["Origin"] = origin
+        if host:
+            h["Host"] = host
+        c = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request(method, path, json.dumps(body) if body is not None else None, h)
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r, data
+
+    def js(self, *a, **k):
+        r, d = self.req(*a, **k)
+        return r.status, json.loads(d)
+
+    def train_get(self):
+        return self.js("GET", "/ui/api/train")[1]
+
+    def wait(self, state, timeout=10):
+        t, j = time.time(), None
+        while time.time() - t < timeout:
+            j = self.train_get()
+            if j["state"] == state:
+                return j
+            time.sleep(0.02)
+        self.assertEqual(j["state"], state)
+
+    def plan(self, **patch):
+        return self.js("POST", "/ui/api/train/plan", {"projects": ["proj"], "cut": False, **patch})
+
+    def test_train_flow(self):
+        texts = self.seed(sessions=30)  # 60 candidates, half planning: enough for the held-out check to judge
+        j = self.wait("ready")  # the first GET starts the scan
+        self.assertEqual(j["cap"], 5.0)
+        self.assertEqual([(p["dir"], p["name"], p["sessions"], p["prompts"]) for p in j["projects"]],
+                         [("proj", "proj", 30, 60)])
+        s, job = self.plan()
+        self.assertEqual(s, 200)
+        self.assertEqual((job["items"], job["labelled"], job["failed"], job["remaining"]), (60, 0, 0, 60))
+        self.assertGreater(job["usd_est"], 0)
+        self.assertIsNone(job["cut"])
+        self.assertFalse(job["cut_applied"])
+        self.assertEqual(self.train_get()["state"], "labelling")
+        got = []
+
+        def label(items, start):
+            return self.js("POST", "/ui/api/train/labels", {
+                "labels": [{"id": x["id"], "label": "planning" if (start + i) % 2 == 0 else "execution"}
+                           for i, x in enumerate(items)],
+                "failed": [], "usage": {"input_tokens": 100, "output_tokens": 5}})
+        for _ in range(2):  # n is capped at 50 a batch: two rounds cover all 60
+            s, batch = self.js("POST", "/ui/api/train/next", {"n": 50})
+            got += batch["items"]
+            s, job = label(batch["items"], len(got) - len(batch["items"]))
+        self.assertEqual(len(got), 60)
+        self.assertEqual({x["text"] for x in got}, set(texts))
+        self.assertEqual((s, job["labelled"], job["remaining"]), (200, 60, 0))
+        self.assertGreater(job["usd_spent"], 0)
+        self.assertEqual(self.js("POST", "/ui/api/train/finish", {})[0], 200)
+        j = self.wait("done")
+        self.assertIn(j["result"]["verdict"], ("better", "no better"))
+        self.assertEqual(self.js("POST", "/ui/api/train/use", {})[0], 200)
+        self.assertTrue(self.js("GET", "/ui/api/state")[1]["auto_model"])
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "training")))
+        with open(os.path.join(self.dir, "auto_model.json")) as f:
+            self.assertEqual(json.load(f)["format"], "signaller-auto-1")
+        self.assertIsNotNone(self.app.auto_model)
+        self.assertEqual(self.train_get()["state"], "scanning")  # the job is gone; the rows list again after a use
+
+    def test_train_get_never_serves_text(self):
+        texts = self.seed()
+        self.plan()
+        for path in ("/ui/api/train", "/ui/api/state", "/ui/api/lever?session=s1"):
+            _, data = self.req("GET", path)
+            for t in texts:
+                self.assertNotIn(t.encode(), data, (path, t))
+
+    def test_train_resume_after_restart(self):
+        self.seed()
+        self.plan()
+        s, got = self.js("POST", "/ui/api/train/next", {"n": 3})
+        self.assertEqual(len(got["items"]), 3)
+        done = {x["id"] for x in got["items"]}
+        self.js("POST", "/ui/api/train/labels",
+                {"labels": [{"id": i, "label": "planning"} for i in done],
+                 "failed": [], "usage": {"input_tokens": 1, "output_tokens": 1}})
+        self.restart()
+        s, job = self.plan()
+        self.assertEqual((s, job["items"], job["labelled"]), (200, 6, 3))
+        s, got = self.js("POST", "/ui/api/train/next", {"n": 50})
+        self.assertEqual({x["id"] for x in got["items"]} | done,
+                         {"sess%d:%d" % (a, b) for a in range(3) for b in range(2)})
+
+    def test_train_next_needs_origin(self):
+        self.seed()
+        self.plan()
+        self.assertEqual(self.req("POST", "/ui/api/train/next", {"n": 5}, origin=None)[0].status, 403)
+
+    def test_train_unreadable_transcript(self):
+        self.seed(sessions=2)
+        self.plan()
+        os.remove(os.path.join(self.claude, "projects", "proj", "sess0.jsonl"))
+        s, got = self.js("POST", "/ui/api/train/next", {"n": 50})
+        self.assertEqual((s, [x["id"] for x in got["items"]]), (200, ["sess1:0", "sess1:1"]))
+        job = self.train_get()["job"]
+        self.assertEqual((job["items"], job["failed"]), (4, 2))
+
+    def test_train_bad_label_400(self):
+        self.seed()
+        self.plan()
+        _, got = self.js("POST", "/ui/api/train/next", {"n": 2})
+        self.assertEqual(self.js("POST", "/ui/api/train/labels",
+                                 {"labels": [{"id": got["items"][0]["id"], "label": "bogus"}], "failed": []})[0], 400)
+        self.assertEqual(self.js("POST", "/ui/api/train/labels",
+                                 {"labels": [{"id": "nope:9", "label": "planning"}], "failed": []})[0], 400)
+        self.assertEqual(self.js("POST", "/ui/api/train/next", {"n": 0})[0], 400)
+
+    def test_train_no_job_400s(self):
+        self.assertEqual(self.js("POST", "/ui/api/train/next", {"n": 5})[0], 400)
+        self.assertEqual(self.js("POST", "/ui/api/train/labels", {"labels": []})[0], 400)
+        self.assertEqual(self.js("POST", "/ui/api/train/finish", {})[0], 400)
+        self.assertEqual(self.js("POST", "/ui/api/train/use", {})[0], 409)
+        self.assertEqual(self.js("POST", "/ui/api/train/plan", {"projects": ["nope"]})[0], 400)
+        self.assertEqual(self.js("POST", "/ui/api/train/discard", {})[0], 200)  # idempotent
+
+    def test_train_bad_origin_on_plan(self):
+        self.seed()
+        self.assertEqual(self.req("POST", "/ui/api/train/plan", {"projects": ["proj"]}, origin=None)[0].status, 403)
+
+    def test_train_held_out_transcript_deleted_still_done(self):
+        self.seed()  # 3 sessions, 2 candidates each
+        self.plan()
+        _, got = self.js("POST", "/ui/api/train/next", {"n": 50})
+        self.js("POST", "/ui/api/train/labels",
+                {"labels": [{"id": x["id"], "label": "planning" if i % 2 == 0 else "execution"}
+                            for i, x in enumerate(got["items"])], "failed": []})
+        _, test = autotrain.split([{"session": "sess%d" % s} for s in range(3)])
+        os.remove(os.path.join(self.claude, "projects", "proj", test[0]["session"] + ".jsonl"))
+        self.assertEqual(self.js("POST", "/ui/api/train/finish", {})[0], 200)
+        j = self.wait("done")  # the vanished held-out transcript is skipped, not a failed job
+        self.assertIn(j["result"]["verdict"], ("better", "no better", "too few"))
+
+    def test_train_get_answers_while_scanning(self):
+        d = os.path.join(self.claude, "projects", "big")
+        os.makedirs(d)
+        pad = "x" * 200000
+        events = [tu("please plan the design of the cache layer for me"), ta("m1")]
+        for i in range(60):  # ~12 MB of tool results: the scan replays it on the worker
+            events.append({"type": "user", "uuid": "t%d" % i,
+                           "message": {"role": "user", "content": [{"type": "tool_result", "content": pad}]}})
+        events += [tu("now fix the failing parser test in module one"), ta("m2")]
+        write_transcript(d, "big", events)
+        self.js("GET", "/ui/api/train")  # the first GET starts the scan
+        t0 = time.time()
+        s, j = self.js("GET", "/ui/api/train")  # and never blocks on it
+        self.assertEqual((s, time.time() - t0 < 1), (200, True))
+        self.assertEqual(j["state"], "scanning")
+        self.assertIsNone(j["projects"][0]["prompts"])
+        self.wait("ready")
+        self.assertEqual(self.train_get()["projects"][0]["prompts"], 2)
+
+    def test_lever_answer_trained_flag(self):
+        self.assertFalse(self.js("GET", "/ui/api/lever?session=s1")[1]["trained"])
+        with open(os.path.join(self.dir, "auto_model.json"), "w") as f:
+            json.dump({"format": "signaller-auto-1", "bias": 0.1, "weights": {"fix": 0.2}}, f)
+        self.restart()
+        self.assertTrue(self.js("GET", "/ui/api/lever?session=s1")[1]["trained"])
+
+    def test_label_request_goes_to_anthropic_untouched_and_unstored(self):
+        self.app.routing = replace(self.app.routing, lever="valar")
+        body = json.dumps({"model": "claude-haiku-5-5", "stream": False,
+                           "system": autotrain.LABEL_MARKER + "\nAnswer with one word: planning or execution.",
+                           "messages": [{"role": "user", "content": "please plan the design of the parser"}]}).encode()
+        self.assertEqual(self.post(body, {**HDRS, "X-Claude-Code-Session-Id": "s1"}), (200, b"{}"))
+        self.assertEqual(self.v.seen, [])  # whatever the lever says, a marked request never leaves Anthropic
+        self.assertEqual(self.a.seen[0][3], body)  # byte for byte: no tag strip, no thinking drop, no rewrite
+        self.assertEqual(self.a.seen[0][2]["Authorization"], HDRS["Authorization"])
+        self.logged(1)
+        self.assertIn('reason="auto training"', self.err.getvalue())
+        self.assertIsNone(self.app.auto_for("s1"))  # never the classifier, never auto state
+        t0 = time.time()
+        while time.time() - t0 < 2 and not self.app.store.request(1):
+            time.sleep(0.01)
+        row = self.app.store.request(1)
+        self.assertEqual((row["track"], row["reason"]), ("anthropic", "auto training"))
+        self.assertIsNone(row["prompt_hash"])  # recorded with no prompt text and no preview; the cost is kept
+        self.assertIsNone(row["prompt"])
+        self.assertEqual(row["preview"], "")
+
+    def test_train_plan_conflict_409(self):
+        self.seed(sessions=2)
+        self.seed(pdir="proj2", sessions=1)
+        self.plan()
+        _, got = self.js("POST", "/ui/api/train/next", {"n": 1})
+        self.js("POST", "/ui/api/train/labels", {"labels": [{"id": got["items"][0]["id"], "label": "planning"}],
+                                                 "failed": [], "usage": {"input_tokens": 1, "output_tokens": 1}})
+        s, j = self.js("POST", "/ui/api/train/plan", {"projects": ["proj2"], "cut": False})
+        self.assertEqual((s, j["error"]), (409, "a training run is in progress; discard it first"))
+        s, job = self.js("POST", "/ui/api/train/plan", {"projects": ["proj"], "cut": False})  # the same: a resume
+        self.assertEqual((s, job["labelled"]), (200, 1))
+
+    def test_use_clears_the_unreadable_model_banner(self):
+        with open(os.path.join(self.dir, "auto_model.json"), "w") as f:
+            f.write("not a model")
+        self.restart()
+        self.assertIn("couldn't be read", self.app.banner)
+        tr = self.app.trainer
+        tr.state = "done"
+        tr.model = {"format": "signaller-auto-1", "bias": 0.0, "weights": {"fix": 0.5}}
+        tr.result = {"verdict": "better"}
+        self.app.use_trained_model()
+        self.assertNotIn("couldn't be read", self.app.banner)  # the installed model replaces the complaint
+        self.assertIsNotNone(self.app.auto_model)
 
 
 class ListModelsRedirectTest(unittest.TestCase):

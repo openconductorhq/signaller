@@ -451,7 +451,8 @@ def _auto_from_json(a, dss) -> AutoSettings:
     if ex is not None and ex not in [x.id for x in dss]:
         raise ValueError(f"auto execution: no downstream named {ex}")
     thr = _num(a.get("threshold", d.threshold), 0.5, 0.99, "auto threshold must be 0.5–0.99")
-    return AutoSettings(ex, strs("planning_skills"), strs("execution_skills"), strs("plan_dirs"), float(thr))
+    cap = _num(a.get("train_cap", d.train_cap), 0.5, 1000, "auto train_cap must be 0.5–1000")
+    return AutoSettings(ex, strs("planning_skills"), strs("execution_skills"), strs("plan_dirs"), float(thr), float(cap))
 
 
 def config_from_json(obj: dict) -> RoutingConfig:
@@ -531,7 +532,7 @@ def config_to_json(cfg: RoutingConfig) -> dict:
         "downstreams": [asdict(d) for d in cfg.downstreams],
         "auto": {"execution": cfg.auto.execution, "planning_skills": list(cfg.auto.planning_skills),
                  "execution_skills": list(cfg.auto.execution_skills), "plan_dirs": list(cfg.auto.plan_dirs),
-                 "threshold": cfg.auto.threshold},
+                 "threshold": cfg.auto.threshold, "train_cap": cfg.auto.train_cap},
     }
 
 

@@ -329,3 +329,24 @@ ol.prlist>li{padding:10px 4px;border-top:1px solid var(--line)}
 
 .autobox{margin:0 0 12px}.autobox .hint{margin:0 0 6px}
 .autogrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px}
+
+/* train card */
+#trainCard{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
+#trainCard h3{font-size:17px;margin:0 0 4px}
+.trow{display:flex;gap:8px;align-items:baseline;padding:3px 0;font-size:13px;cursor:pointer}
+.trow input{margin:0}
+.trow b{min-width:110px}
+.trow span{color:var(--muted)}
+.ttotals{font-size:13px;font-weight:600;margin:8px 0 0}
+.tcut{font-size:12.5px;color:var(--muted);margin:4px 0 0}
+.tcap{display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted);margin-top:8px}
+.tcap input{width:80px;font:12px var(--mono);border:1px solid var(--off);background:#fff;border-radius:6px;padding:4px 6px;color:var(--ink)}
+.tcmd{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0}
+.tcmd code{background:var(--well);border-radius:6px;padding:5px 8px;font-size:12px;word-break:break-all}
+.tcmd .btn{margin-top:0}
+.tbar{height:8px;background:var(--well);border-radius:4px;overflow:hidden;margin:8px 0}
+.tfill{height:100%;width:var(--w,0%);background:var(--ok)}
+.tres{margin:8px 0;font-size:13px;max-width:480px}
+.tresrow{display:grid;grid-template-columns:1fr 110px 110px;gap:8px;padding:4px 0;align-items:baseline}
+.tresrow :nth-child(2),.tresrow :nth-child(3){text-align:right}
+.treshead{color:var(--muted);font-size:12px}

@@ -10,6 +10,7 @@ from dataclasses import asdict, replace
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from keys import write_json
+import autotrain
 from prices import parse_valar
 import overrides
 import presets
@@ -256,6 +257,16 @@ def state(app, query=None):
             "clock": {"tz": time.strftime("%Z"), "hm": time.strftime("%H:%M")}}
 
 
+def train(fn, *a, code=400):
+    """The train endpoints' one shape: a ValueError from the job answers 400, a Conflict 409 (use is 409 too)."""
+    try:
+        return fn(*a)
+    except autotrain.Conflict as e:
+        raise Err(409, str(e))
+    except ValueError as e:
+        raise Err(code, str(e))
+
+
 def api(h, app, method, path, query, body):
     st = app.store
     if path == "/ui/api/state" and method == "GET":
@@ -333,6 +344,7 @@ def api(h, app, method, path, query, body):
         own = app.lever_for(sid)
         auto = app.auto_for(sid) if (own or app.routing.lever) == "auto" else None  # the phase auto last chose, while auto is its lever
         return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes, "auto": auto,
+                "trained": app.auto_model is not None,
                 "name": st.session_name(sid), "notice": app.notices.get(sid), "prompts": dict(app.routing.prompts)}
     m = re.fullmatch(r"/ui/api/sessions/([^/]+)", path)
     if m and method == "DELETE":  # the X on a session chip: its history goes; a live session starts again from zero
@@ -476,6 +488,30 @@ def api(h, app, method, path, query, body):
         if refs:
             raise in_use(m[1], refs)
         forget_models(app, [m[1]])
+        return {"ok": True}
+    if path == "/ui/api/train" and method == "GET":  # the training job: no prompt text ever comes back
+        app.trainer.start_scan()  # the first GET kicks the worker's project scan off; never blocks
+        return app.trainer.status()
+    if path == "/ui/api/train/plan" and method == "POST":
+        body = body if isinstance(body, dict) else {}
+        return train(app.trainer.plan, body.get("projects"), bool(body.get("cut")))
+    if path == "/ui/api/train/next" and method == "POST":  # the one endpoint that serves prompt text
+        body = body if isinstance(body, dict) else {}
+        n = body.get("n", 20)
+        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 50:
+            raise Err(400, "n must be an integer from 1 to 50")
+        return train(app.trainer.next, n)
+    if path == "/ui/api/train/labels" and method == "POST":
+        body = body if isinstance(body, dict) else {}
+        return train(app.trainer.labels, body.get("labels"), body.get("failed"), body.get("usage"))
+    if path == "/ui/api/train/finish" and method == "POST":
+        train(app.trainer.finish)
+        return app.trainer.status()
+    if path == "/ui/api/train/use" and method == "POST":
+        train(app.use_trained_model, code=409)
+        return {"ok": True}
+    if path == "/ui/api/train/discard" and method == "POST":
+        app.trainer.reset()
         return {"ok": True}
     if path == "/ui/api/preview" and method == "POST":
         return preview(app, body)

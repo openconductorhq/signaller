@@ -4,13 +4,13 @@ const TOOL = 'mcp__signaller__signaller_lever'
 const LEVER = JSON.stringify({ lever: 'valar', session: 'valar', global: 'rules', modes: ['rules', 'valar', 'anthropic'] })
 
 // one stub router per test: everything the hooks need, with the test's own http.fetch
-const stub = ($: any, on: any, http: (e: any) => any, store = new Map<string, unknown>()) => {
+const stub = ($: any, on: any, http: (e: any) => any, store = new Map<string, unknown>(), sidOf = () => 's1') => {
   on('store.get', (_, e) => ({ value: store.get(e.key) }))
   on('store.set', (_, e) => (store.set(e.key, e.value), { value: undefined }))
   on('store.delete', (_, e) => (store.delete(e.key), { value: undefined }))
   on('command.register', () => ({ value: { command: 'signaller' } }))
   on('tool.register', () => ({ value: { tool: TOOL } }))
-  on('session.id', () => ({ value: 's1' }))
+  on('session.id', () => ({ value: sidOf() }))
   on('clock.every', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
   on('http.fetch', (_, e) => http(e))
@@ -300,4 +300,298 @@ test('auto is a mode, not a downstream: one typed step, the phase in the status,
   await $.prompt.submit({ text: 'do /signaller auto window now' })
   expect((await $.tool.call({ tool: TOOL, settings: 'auto window now' })).deny).toContain('Unknown downstream')
   expect(puts.length).toBe(1)
+})
+
+// --- /signaller train: the plugin labels the router's pending prompts with Haiku, then asks ---
+
+const until = async (cond: () => boolean) => { for (let i = 0; i < 1000 && !cond(); i++) await new Promise(r => setTimeout(r, 5)) }
+const U = (p: string) => `http://127.0.0.1:8787/ui/api/train${p}`
+
+test('train labels each pending prompt with haiku and posts the labels', async ($: any, on: any) => {
+  const asks: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, (_: any, e: any) => {
+    asks.push(e.questions[0].question)
+    const q = e.questions[0].question
+    const a = q.startsWith('Label') ? 'Label all' : q.startsWith('Use your') ? 'Use it' : 'Keep rules only'
+    return { result: { questions: e.questions, answers: { [e.questions[0].question]: a } } }
+  })
+  const modelCalls: any[] = []
+  let replies = 0
+  on('model.complete', (_: any, e: any) => {
+    modelCalls.push(e)
+    return { value: { isAnswered: true, text: ['Planning.', 'execution'][replies++]!, usage: { input_tokens: 100, output_tokens: 5 } } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const logs: string[] = []
+  on('ui.log', (_: any, e: any) => { logs.push(e.text); return { value: undefined } })
+  const posts: Record<string, any[]> = {}
+  let served = false  // the first next() serves the batch, the second says done
+  await stub($, on, (e: any) => {
+    const url = String(e.url)
+    if (e.init?.method === 'POST') (posts[url] ??= []).push(JSON.parse(String(e.init.body)))
+    if (url.endsWith('/train/plan'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 2, labelled: 0, failed: 0, remaining: 2, usd_est: 0.01, usd_remaining: 0.01, usd_spent: 0, cut: null, cut_applied: false }) } }
+    if (url.endsWith('/train/next'))
+      return { value: { ok: true, status: 200, text: JSON.stringify(served ? { items: [] } : ((served = true), { items: [{ id: 's1:0', text: 'alpha' }, { id: 's1:1', text: 'beta' }] })) } }
+    if (url.endsWith('/train/labels'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 2, labelled: 2, failed: 0, remaining: 0, usd_est: 0.01, usd_remaining: 0, usd_spent: 0.001, cut: null, cut_applied: false }) } }
+    if (url.endsWith('/train/finish') || url.endsWith('/train/use') || url.endsWith('/train/discard'))
+      return { value: { ok: true, status: 200, text: '{}' } }
+    if (url.endsWith('/ui/api/train'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ state: 'done', projects: [], job: null, cap: 5, error: null, result: {
+        rules: { planning_kept: 1, execution_moved: 2 }, model: { planning_kept: 2, execution_moved: 1 },
+        planning: 2, execution: 1, verdict: 'better' } }) } }
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+
+  const r = await $.command.run({ command: 'signaller', args: 'train proj1' })
+  expect(r.text).toBe('labelling 2 prompts…')  // the command returns at once; the loop runs on
+  expect(modelCalls.length + (posts[U('/labels')] ?? []).length).toBe(0)  // nothing yet: labels wait for haiku
+  await until(() => posts[U('/use')]?.length)
+  expect(asks).toEqual(['Label 2 prompts (about $0.010)?', 'Use your model?'])
+  expect(modelCalls.map(c => [c.model, c.maxTokens])).toEqual([['haiku', 5], ['haiku', 5]])
+  expect(modelCalls.every(c => String(c.system).startsWith('signaller-label-v1'))).toBe(true)  // the marker the router routes on
+  expect(modelCalls.every(c => !`${c.system} ${c.prompt}`.includes('/signaller'))).toBe(true)
+  expect(posts[U('/labels')]).toEqual([{ labels: [{ id: 's1:0', label: 'planning' }, { id: 's1:1', label: 'execution' }], failed: [], usage: { input_tokens: 200, output_tokens: 10 } }])
+  expect(Object.keys(posts).some(u => u.endsWith('/train/finish'))).toBe(true)
+  expect(posts[U('/use')]).toEqual([{}])
+  expect(logs).toContain('signaller: Your model keeps 2 of 2 planning turns on Anthropic (rules alone: 1); moves 1 of 1 execution turns.')
+})
+
+test('an unparseable reply is sent as failed, not as a label', async ($: any, on: any) => {
+  const asked: (string[] | undefined)[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, (_: any, e: any) => {
+    asked.push(e.questions[0].options)
+    return { result: { questions: e.questions, answers: { [e.questions[0].question]: e.questions[0].question.startsWith('Label') ? 'Label all' : 'Keep rules only' } } }
+  })
+  on('model.complete', () => ({ value: { isAnswered: true, text: "hmm, it's planning… but also execution", usage: { input_tokens: 10, output_tokens: 4 } } }))
+  on('clock.sleep', () => ({ value: undefined }))
+  const posts: Record<string, any[]> = {}
+  let served = false
+  await stub($, on, (e: any) => {
+    const url = String(e.url)
+    if (e.init?.method === 'POST') (posts[url] ??= []).push(JSON.parse(String(e.init.body)))
+    if (url.endsWith('/train/plan'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 1, labelled: 0, failed: 0, remaining: 1, usd_est: 0.01, usd_remaining: 0.01, usd_spent: 0, cut: null, cut_applied: false }) } }
+    if (url.endsWith('/train/next'))
+      return { value: { ok: true, status: 200, text: JSON.stringify(served ? { items: [] } : ((served = true), { items: [{ id: 's1:0', text: 'alpha' }] })) } }
+    if (url.endsWith('/train/labels'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 1, labelled: 0, failed: 1, remaining: 0, usd_est: 0.01, usd_remaining: 0, usd_spent: 0, cut: null, cut_applied: false }) } }
+    if (url.endsWith('/train/finish') || url.endsWith('/train/discard'))
+      return { value: { ok: true, status: 200, text: '{}' } }
+    if (url.endsWith('/ui/api/train'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ state: 'done', projects: [], job: null, cap: 5, error: null, result: {
+        rules: { planning_kept: 0, execution_moved: 1 }, model: { planning_kept: 0, execution_moved: 1 },
+        planning: 2, execution: 1, verdict: 'too few' } }) } }
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+  const r = await $.command.run({ command: 'signaller', args: 'train proj1' })
+  expect(r.text).toBe('labelling 1 prompts…')
+  await until(() => posts[U('/discard')]?.length)
+  expect(posts[U('/labels')]).toEqual([{ labels: [], failed: ['s1:0'], usage: { input_tokens: 10, output_tokens: 4 } }])
+  const labels = (os: string[] | undefined) => (os ?? []).map(o => String(typeof o === 'string' ? o : o.label))
+  expect(labels(asked[1])).toContain('Keep rules only')  // "too few" offers no Use it, like the card
+  expect(labels(asked[1])).not.toContain('Use it')
+})
+
+test('a second train command while the loop runs does not start another', async ($: any, on: any) => {
+  const asks: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, (_: any, e: any) => {
+    asks.push(e.questions[0].question)
+    const a = e.questions[0].question.startsWith('Label') ? 'Label all' : 'Keep rules only'
+    return { result: { questions: e.questions, answers: { [e.questions[0].question]: a } } }
+  })
+  const modelCalls: any[] = []
+  let release: () => void = () => {}
+  const gate = new Promise<void>(r => { release = r })
+  on('model.complete', async (_: any, e: any) => {
+    modelCalls.push(e)
+    await gate  // hold the first loop mid-labelling, so the second command lands while it runs
+    return { value: { isAnswered: true, text: 'planning', usage: { input_tokens: 1, output_tokens: 1 } } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  const posts: Record<string, any[]> = {}
+  let served = false
+  await stub($, on, (e: any) => {
+    const url = String(e.url)
+    if (e.init?.method === 'POST') (posts[url] ??= []).push(JSON.parse(String(e.init.body)))
+    if (url.endsWith('/train/plan'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 1, labelled: 0, failed: 0, remaining: 1, usd_est: 0.01, usd_remaining: 0.01, usd_spent: 0, cut: null, cut_applied: false }) } }
+    if (url.endsWith('/train/next'))
+      return { value: { ok: true, status: 200, text: JSON.stringify(served ? { items: [] } : ((served = true), { items: [{ id: 's1:0', text: 'alpha' }] })) } }
+    if (url.endsWith('/train/labels'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 1, labelled: 1, failed: 0, remaining: 0, usd_est: 0.01, usd_remaining: 0, usd_spent: 0, cut: null, cut_applied: false }) } }
+    if (url.endsWith('/train/finish') || url.endsWith('/train/discard'))
+      return { value: { ok: true, status: 200, text: '{}' } }
+    if (url.endsWith('/ui/api/train'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ state: 'done', projects: [], job: null, cap: 5, error: null, result: {
+        rules: { planning_kept: 0, execution_moved: 1 }, model: { planning_kept: 1, execution_moved: 1 },
+        planning: 1, execution: 1, verdict: 'better' } }) } }
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+
+  const first = await $.command.run({ command: 'signaller', args: 'train proj1' })
+  expect(first.text).toBe('labelling 1 prompts…')
+  const second = await $.command.run({ command: 'signaller', args: 'train proj1' })  // while the first holds
+  expect(second.text).toContain('already labelling')
+  expect(second.text).toContain('1')  // the progress, not a new plan
+  release()
+  await until(() => posts[U('/discard')]?.length)
+  expect(modelCalls.length).toBe(1)  // each item reached haiku once; the second command paid nothing
+  expect(posts[U('/plan')].length).toBe(1)
+  expect(asks.filter(q => q.startsWith('Label')).length).toBe(1)  // the second command asked nothing
+})
+
+test('quoting /signaller train keeps the queue', async ($: any, on: any) => {
+  const puts: string[] = []
+  await stub($, on, (e: any) => {
+    if (e.init?.method === 'PUT') puts.push(JSON.parse(String(e.init.body)).lever)
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+  await $.prompt.submit({ text: 'do /signaller anthropic' })
+  await $.prompt.submit({ text: 'the console said to run /signaller train proj1, whatever that is' })
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toBeUndefined()
+  expect((await $.tool.call({ tool: TOOL, lever: 'anthropic' })).deny).toContain('Not switching')  // used up
+  expect(puts).toEqual(['anthropic'])
+})
+
+test('the band shows in the first 3 auto sessions only, and not after hide', async ($: any, on: any) => {
+  on('ui.render', () => h(Fragment, {}))  // what the engine draws beneath: the band's pass-through
+  on('turn.complete', () => ({ text: 'answer' }))
+  let sid = 's1'
+  const store = new Map<string, unknown>()
+  let trained = false
+  await stub($, on, (e: any) => String(e.url).endsWith('/ui/api/train')
+    ? { value: { ok: true, status: 200, text: JSON.stringify({ state: 'idle', projects: [{ dir: 'proj1', name: 'proj', sessions: 3, prompts: 12, usd: 1.5 }], job: null, result: null, error: null, cap: 5 }) } }
+    : { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'auto', session: 'auto', global: 'rules', modes: ['rules', 'auto', 'anthropic'], trained }) } }, store, () => sid)
+  const BAND = {
+    plugin: 'signaller', surface: 'terminal' as const, component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  }
+  const ui = await $.ui.mount(BAND)
+  const settle = () => new Promise(r => setTimeout(r, 20))
+  const text = async () => JSON.stringify(await ui.drawn())
+
+  await settle()  // the first poll records s1 and shows the band
+  expect(await text()).toContain('auto runs on rules only · /signaller train teaches it your habits (about $1.50) · /signaller train hide')
+  expect(store.get('trainHint')).toEqual({ sessions: ['s1'], hidden: false })
+
+  sid = 's2'; await $.turn.complete({ reason: 'answer' }); await settle()  // two more sessions fill the first 3
+  sid = 's3'; await $.turn.complete({ reason: 'answer' }); await settle()
+  expect(store.get('trainHint')).toEqual({ sessions: ['s1', 's2', 's3'], hidden: false })
+  expect(await text()).toContain('auto runs on rules only')
+
+  sid = 's4'; await $.turn.complete({ reason: 'answer' }); await settle()  // the 4th session: no band
+  expect(store.get('trainHint')).toEqual({ sessions: ['s1', 's2', 's3'], hidden: false })
+  expect(await text()).not.toContain('/signaller train')
+
+  trained = true; sid = 's1'; await $.turn.complete({ reason: 'answer' }); await settle()  // a model in use: no band
+  expect(await text()).not.toContain('/signaller train')
+  trained = false; await $.turn.complete({ reason: 'answer' }); await settle()
+  expect(await text()).toContain('/signaller train hide')
+
+  expect((await $.command.run({ command: 'signaller', args: 'train hide' })).text).toContain('off')
+  expect(store.get('trainHint')).toEqual({ sessions: ['s1', 's2', 's3'], hidden: true })
+  expect(await text()).not.toContain('/signaller train')  // gone at once, and for every session after
+  sid = 's2'; await $.turn.complete({ reason: 'answer' }); await settle()
+  expect(await text()).not.toContain('/signaller train')
+  await ui.unmount()
+})
+
+test('one failed haiku call or a usage-less reply costs its own item, not the batch', async ($: any, on: any) => {
+  on('tool.call', { tool: 'AskUserQuestion' }, (_: any, e: any) => ({ result: { questions: e.questions, answers: { [e.questions[0].question]: e.questions[0].question.startsWith('Label') ? 'Label all' : 'Keep rules only' } } }))
+  let n = 0
+  on('model.complete', async (_: any, e: any) => {
+    if (n++ === 0) throw new Error('haiku is down')  // the first item's call fails outright
+    return { value: { isAnswered: true, text: 'planning' } }  // the second answers, but carries no usage
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const posts: Record<string, any[]> = {}
+  let served = false
+  await stub($, on, (e: any) => {
+    const url = String(e.url)
+    if (e.init?.method === 'POST') (posts[url] ??= []).push(JSON.parse(String(e.init.body)))
+    if (url.endsWith('/train/plan'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 2, labelled: 0, failed: 0, remaining: 2, usd_est: 0.01, usd_remaining: 0.01, usd_spent: 0, cut: null, cut_applied: false }) } }
+    if (url.endsWith('/train/next'))
+      return { value: { ok: true, status: 200, text: JSON.stringify(served ? { items: [] } : ((served = true), { items: [{ id: 's1:0', text: 'alpha' }, { id: 's1:1', text: 'beta' }] })) } }
+    if (url.endsWith('/train/labels'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 2, labelled: 1, failed: 1, remaining: 1, usd_est: 0.01, usd_remaining: 0.005, usd_spent: 0, cut: null, cut_applied: false }) } }
+    if (url.endsWith('/train/finish') || url.endsWith('/train/use') || url.endsWith('/train/discard'))
+      return { value: { ok: true, status: 200, text: '{}' } }
+    if (url.endsWith('/ui/api/train'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ state: 'done', projects: [], job: null, cap: 5, error: null, result: {
+        rules: { planning_kept: 1, execution_moved: 0 }, model: { planning_kept: 1, execution_moved: 0 },
+        planning: 2, execution: 1, verdict: 'better' } }) } }
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+  const r = await $.command.run({ command: 'signaller', args: 'train proj1' })
+  expect(r.text).toBe('labelling 2 prompts…')
+  await until(() => posts[U('/labels')]?.length)
+  expect(posts[U('/labels')]).toEqual([{ labels: [{ id: 's1:1', label: 'planning' }], failed: ['s1:0'], usage: { input_tokens: 0, output_tokens: 0 } }])
+  await until(() => posts[U('/discard')]?.length)
+})
+
+test('the guard covers the cost question; cancel clears it', async ($: any, on: any) => {
+  const nested: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, async (_: any, e: any) => {
+    // while the question waits, a second command must not plan again
+    nested.push(String((await $.command.run({ command: 'signaller', args: 'train proj1' })).text))
+    return { result: { questions: e.questions, answers: { [e.questions[0].question]: 'Cancel' } } }
+  })
+  const posts: Record<string, any[]> = {}
+  await stub($, on, (e: any) => {
+    const url = String(e.url)
+    if (e.init?.method === 'POST') (posts[url] ??= []).push(JSON.parse(String(e.init.body)))
+    if (url.endsWith('/train/plan'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 2, labelled: 0, failed: 0, remaining: 2, usd_est: 0.01, usd_remaining: 0.01, usd_spent: 0, cut: null, cut_applied: false }) } }
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+  const r = await $.command.run({ command: 'signaller', args: 'train proj1' })
+  expect(r.text).toBe('cancelled')
+  expect(nested).toEqual(['a training run is already labelling here: 0 of 2 prompts done; its result question comes at the end'])
+  const r2 = await $.command.run({ command: 'signaller', args: 'train proj1' })  // cancelled: the guard is gone
+  expect(r2.text).toBe('cancelled')
+  expect(posts[U('/plan')].length).toBe(2)
+})
+
+test('the hint cost waits for the scan: a mid-scan GET caches nothing', async ($: any, on: any) => {
+  on('ui.render', () => h(Fragment, {}))  // what the engine draws beneath: the band's pass-through
+  on('turn.complete', () => ({ text: 'answer' }))
+  let usd: number | null = null
+  await stub($, on, (e: any) => String(e.url).endsWith('/ui/api/train')
+    ? { value: { ok: true, status: 200, text: JSON.stringify({ state: 'scanning', projects: [{ dir: 'p', name: 'p', sessions: 1, prompts: null, usd }], job: null, result: null, error: null, cap: 5 }) } }
+    : { value: { ok: true, status: 200, text: JSON.stringify({ lever: 'auto', session: 'auto', global: 'rules', modes: ['rules', 'auto', 'anthropic'], trained: false }) } })
+  const BAND = {
+    plugin: 'signaller', surface: 'terminal' as const, component: 'AbovePrompt' as const,
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  }
+  const ui = await $.ui.mount(BAND)
+  const settle = () => new Promise(r => setTimeout(r, 20))
+  const text = async () => JSON.stringify(await ui.drawn())
+  await settle()
+  expect(await text()).toContain('teaches it your habits')  // mid-scan: the band shows, without a cost
+  expect(await text()).not.toContain('about $')
+  usd = 1.5
+  await $.turn.complete({ reason: "answer" })  // a later poll finds the cost and quotes it
+  await settle()
+  expect(await text()).toContain('(about $1.50)')
+  await ui.unmount()
+})
+
+test('a router answer is an answer, not an unreachable router', async ($: any, on: any) => {
+  await stub($, on, (e: any) => e.init?.method === 'PUT'
+    ? { value: { ok: false, status: 400, text: '{"error":{"message":"name too long"}}' } }
+    : { value: { ok: true, status: 200, text: LEVER } })
+  const r = await $.command.run({ command: 'signaller', args: 'name a name the router refuses' })
+  expect(r.text).toContain('signaller answered 400: {"error":{"message":"name too long"}}')
+  expect(r.text).not.toContain("isn't reachable")
+})
+
+test('a fetch that never gets an answer is the router being down', async ($: any, on: any) => {
+  await stub($, on, () => { throw new Error('ECONNREFUSED') })
+  const r = await $.command.run({ command: 'signaller', args: 'name hello' })
+  expect(r.text).toContain("signaller isn't reachable at")  // a network error, never "signaller answered N"
+  expect(r.text).not.toContain('signaller answered')
 })
