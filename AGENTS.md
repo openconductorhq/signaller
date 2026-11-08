@@ -71,6 +71,10 @@ breaks.
 - **One request prep for every track:** `prepare()` in `signaller.py`
   renames the model, applies Valar's tool fix, swaps credentials and sets the
   window, for the served request and its shadow alike. Change it there, once.
+  The one exception is the labeller's own request (system text starting
+  `signaller-label-v1`, see `autotrain.is_label_request`): it never reaches
+  `prepare()` — straight to Anthropic, reason "auto training", with the
+  client's own headers and its body byte for byte.
 - **Settings lines** (`config.settings`, `overrides.py`) run inside that same
   `prepare()`, after the track is chosen: they change the window and model for
   that downstream, served and shadow alike, ignore the lever, and never touch
@@ -100,10 +104,53 @@ breaks.
   unparseable is kept for `config_from_json` to reject with a reason. An
   unreadable `presets.json` falls back to a fresh "my setup" with a banner,
   never a dead router.
+- **Auto mode:** `autophase.phase` is pure over the request's messages and
+  settings (and an optional scorer): no I/O, no state. The decision is made once
+  per turn in `App.auto_decide`, keyed on `(session, text hash, index)` of
+  `autophase.turn_index` (the latest user message with human text and no
+  tool_result: Claude Code appends a skill's body or an interrupt's prompt to a
+  tool_result message, and that must not start a turn), and read from the
+  history up to and including that message — exactly what the turn's first
+  request saw — so the current turn's own tool calls can't flip it mid-turn;
+  the cache is only a speed-up, and no session means none. It never raises (a
+  failure is `none`, which routes to execution). The turn's `#planning`/`#execution`
+  tags are read from that same opening message's text (`turn_text`), never the
+  latest human text. count_tokens decides but doesn't update `auto_last`, and
+  neither does a main-thread side request without tools (a title generation);
+  main-loop requests carry theirs. Planning ends one way: nothing reopens it,
+  and end events count only after planning opened. `plan_dirs` match as
+  substrings, so keep them narrow (`/.claude/projects/`, not `/.claude/`:
+  worktrees live there). The model (`auto_model.json`) is optional; a bad one gives a banner,
+  not a failure. No datasets, labels or weights go in the repo; `tools/auto_train.py`
+  is the only file that may need scikit-learn, and the router never imports it.
+- **The training job** (`autotrain.Trainer`, one per App) owns the scan, the
+  labelling batches and the fit on a single worker thread, created on the
+  first train call: no request thread
+  ever replays a transcript, and a GET answers while a scan runs. Item ids are
+  `<session>:<idx>`, so the labels in `<config>/training/labels.jsonl`
+  (0700 dir, 0600 file) survive a restart and a re-plan — a re-plan of the
+  same projects and cut choice resumes, keeping the labels whose ids still
+  occur; one with any progress for anything else, or any plan while a fit runs
+  or a result waits, answers 409. `plan` and a discard list the projects
+  again, and a GET rescans when the last listing is over 5 minutes old.
+  The cap is `auto.train_cap` (0.5–1000, default 5) and counts only
+  unlabelled prompts, so a resume never pays twice: the job block reports
+  `remaining`/`usd_remaining` next to `items`/`usd_est`, and its `cut` is
+  `{"items", "usd"}` for the newest-sessions-under-cap option when what's
+  left exceeds it, null when no whole session fits. `finish` hands the fit
+  to the worker and answers at once (state `training`); the plugin and the
+  card poll for `done`/`failed`. `use` installs the model without a restart
+  (`keys.write_json`, then the live `App.auto_model` swap) and drops the
+  unreadable-model banner; it answers 409 when the held-out verdict is
+  "too few" or the fit has no weights.
 - **The body is rewritten only when something changes** (leading tags, a
-  downstream's model name, Valar's tool fixes): `req` is parsed once, edited,
-  and re-serialised once. An untouched Anthropic request goes out byte for
-  byte.
+  downstream's model name, Valar's tool fixes, or a downstream thinking block
+  dropped from an Anthropic-bound request — any lever, the one rewrite
+  `drop_old_thinking` in `prepare()` makes for every mode, from every
+  assistant message, keeping Anthropic's signed thinking): `req` is parsed
+  once, edited, and re-serialised once. An untouched Anthropic request goes out
+  byte for byte — including the marked labelling request, which is never
+  rewritten at all (no strip, no thinking drop).
 - **Prices:** Anthropic rates are per tier in `prices.DEFAULT_ANTHROPIC`. A new
   key there must load from an old `prices.json` (`load()` merges defaults).
   Downstream prices stay at the four `PRICE_KEYS`. Valar is priced from its
@@ -126,7 +173,14 @@ breaks.
   `grep -oE '^[A-Z_]+=' file`.
 - **What is never logged:** request bodies, prompts, headers or keys. A log
   line is `route= reason= model= status= ms= stream= [err=] shadow=` and nothing
-  more.
+  more. A transcript's prompt text leaves the router exactly twice, both on the
+  person's own say-so: `POST /ui/api/train/next` serves it to the labelling
+  plugin, and the labelling request that plugin then sends (system text
+  starting `signaller-label-v1`) goes straight to Anthropic, recorded with no
+  prompt text and no preview, never feeding the classifier, auto state or a
+  doubling shadow. No GET response, log
+  line, config file or the labels file (`training/labels.jsonl` holds ids and
+  labels, never text) ever carries it.
 
 ## Code conventions
 
@@ -177,7 +231,7 @@ node --check ui/app.js                 # the console has no unit tests; at least
 - **The `signaller_lever` tool:** it only switches when the user typed
   `/signaller <mode>`, and each one typed grants one switch, used in the order
   typed (a prompt with any `/signaller` step replaces the queue; one without, or
-  one that only quotes `/signaller run` or `name`, keeps it). The queue lives in
+  one that only quotes `/signaller run`, `name` or `train`, keeps it). The queue lives in
   the plugin's store under the session id, so a reload or restart keeps it.
   Subagents can't switch. The plugin's own refusal text quotes the command, so
   pasting it back grants nothing. Keep that gate.

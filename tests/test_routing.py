@@ -4,10 +4,11 @@ import os
 import unittest
 from dataclasses import replace
 
+from autophase import AutoSettings
 from signaller import load_config
 from overrides import Setting
 from routing import (DEFAULT_CONFIG, MODEL_TIERS, ClassResult, Downstream, Features, Rule, latest_tool_results, strip_lead_tags, is_routed, session_of, config_from_json,
-                     config_to_json, downstream, references, route, tier_of, track_model, track_window, tracks, valid_id)
+                     config_to_json, downstream, exec_track, references, route, tier_of, track_model, track_window, tracks, valid_id)
 from rulelang import parse_cond
 
 
@@ -644,3 +645,64 @@ class ToolStepTest(unittest.TestCase):
     def test_capped(self):
         msgs = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "z", "content": "x" * 5000}]}]
         self.assertEqual(latest_tool_results(msgs), ("tool: " + "x" * 5000)[:600])
+
+
+class AutoTests(unittest.TestCase):
+    cfg = replace(OFF, lever="auto")
+
+    def test_phase_decides(self):
+        f = Features.from_body(body([user(text("anything"))]))
+        d = route(self.cfg, f, boom, lambda _: ("planning", "phase: demo:plan"))
+        self.assertEqual((d.track, d.reason, d.explanation[0]["outcome"]), ("anthropic", "auto:planning", "planning (phase: demo:plan) → anthropic"))
+        d = route(self.cfg, f, boom, lambda _: ("none", "no planning signal"))
+        self.assertEqual((d.track, d.reason, d.explanation[0]["outcome"]), ("valar", "auto:execution", "execution (no planning signal) → valar"))
+        self.assertEqual(route(self.cfg, f, boom).track, "valar")
+
+    def test_tags_and_servertool_win(self):
+        def f(t):
+            return Features.from_body(body([user(text(t))]))
+        self.assertEqual(route(self.cfg, f("#execution go"), boom, lambda _: ("planning", "x")).track, "valar")
+        d = route(self.cfg, f("#planning go"), boom, lambda _: ("execution", "x"))
+        self.assertEqual((d.track, d.reason), ("anthropic", "tag"))
+        self.assertEqual(route(self.cfg, f("#local go"), boom, lambda _: ("planning", "x")).reason, "auto:planning")
+        s = f("q")
+        s.servertool = True
+        self.assertEqual(route(self.cfg, s, boom, lambda _: ("execution", "x")).track, "anthropic")
+
+    def test_auto_tags_read_the_turns_opening_message(self):
+        # text Claude Code appends to a tool result mid-turn is not the turn's prompt: its tags, or lack of
+        # them, must not flip the track the turn was pinned to
+        msgs = [user(text("#execution build it")),
+                assistant([{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}]),
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "ok"},
+                                             {"type": "text", "text": "Base directory for this skill: /r"}]}]
+        f = Features.from_body(body(msgs))
+        d = route(self.cfg, f, boom, lambda _: ("planning", "x"))
+        self.assertEqual((d.track, d.reason, d.auto), ("valar", "tag", ("execution", "tag")))
+
+    def test_settings_round_trip_defaults_and_rejects(self):
+        j = config_to_json(OFF)
+        j.pop("auto")
+        self.assertEqual(config_from_json(j).auto, AutoSettings())
+        j = config_to_json(OFF)
+        j["auto"]["threshold"] = 0.9
+        self.assertEqual(config_from_json(j).auto.threshold, 0.9)
+        fx = json.load(open(os.path.join(os.path.dirname(__file__), "fixtures", "console_v4_auto.json")))
+        self.assertEqual(config_to_json(config_from_json(fx)), fx)
+        for bad in ({"threshold": 2}, {"execution": "nope"}, {"plan_dirs": [""]}, {"plan_dirs": ["x"] * 21}):
+            with self.assertRaises(ValueError):
+                config_from_json({**j, "auto": bad})
+
+    def test_auto_train_cap_roundtrip_and_bounds(self):
+        j = config_to_json(OFF)
+        self.assertEqual(j["auto"]["train_cap"], 5.0)  # the default, written out
+        self.assertEqual(config_from_json({**j, "auto": {k: v for k, v in j["auto"].items() if k != "train_cap"}}).auto.train_cap, 5.0)
+        j["auto"]["train_cap"] = 7.5
+        self.assertEqual(config_from_json(j).auto.train_cap, 7.5)
+        for bad in (0.4, 1001, "x", True, None):
+            with self.assertRaises(ValueError):
+                config_from_json({**j, "auto": {**j["auto"], "train_cap": bad}})
+
+    def test_exec_track_falls_back(self):
+        self.assertEqual(exec_track(replace(OFF, auto=AutoSettings(execution="valar"))), "valar")
+        self.assertEqual(exec_track(replace(OFF, downstreams=())), "anthropic")

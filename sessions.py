@@ -11,25 +11,31 @@ def claude_dir(env):
     return os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or "~/.claude")
 
 
+def head_fields(path):
+    """(cwd, gitBranch) from the first lines that carry them, over the first 50 lines; (None, None) if unreadable."""
+    cwd = branch = None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for _, line in zip(range(50), f):
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(o, dict):
+                    cwd = cwd or o.get("cwd") or None
+                    branch = branch or o.get("gitBranch") or None
+                if cwd and branch:
+                    break
+    except OSError:
+        pass
+    return cwd, branch
+
+
 def find_transcript(claude_dir, sid):
     """(cwd, gitBranch) from the first lines that carry them; (None, None) if absent or unreadable."""
     try:
         for p in glob.glob(os.path.join(glob.escape(claude_dir), "projects", "*", glob.escape(sid) + ".jsonl")):
-            cwd = branch = None
-            try:
-                with open(p, encoding="utf-8", errors="replace") as f:
-                    for _, line in zip(range(50), f):
-                        try:
-                            o = json.loads(line)
-                        except ValueError:
-                            continue
-                        if isinstance(o, dict):
-                            cwd = cwd or o.get("cwd") or None
-                            branch = branch or o.get("gitBranch") or None
-                        if cwd and branch:
-                            break
-            except OSError:
-                continue
+            cwd, branch = head_fields(p)
             if cwd or branch:
                 return cwd, branch
     except Exception:

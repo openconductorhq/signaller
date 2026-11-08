@@ -10,11 +10,12 @@ from dataclasses import asdict, replace
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from keys import write_json
+import autotrain
 from prices import parse_valar
 import overrides
 import presets
-from routing import (MAX_DOWNSTREAMS, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, untagged, config_from_json, config_to_json,
-                     downstream, route, tracks, valid_id)
+from routing import (MAX_DOWNSTREAMS, LEVER_MODES, MODEL_TIERS, WINDOWS, _sid_ok, ClassResult, Rule, untagged, config_from_json,
+                     config_to_json, downstream, exec_track, route, tracks, valid_id)
 from rulelang import RuleError, parse
 
 UI_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "ui")
@@ -246,13 +247,24 @@ def state(app, query=None):
             "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
             "downstreams": {d.id: {"key_set": app.keys.has(d.id, d.url), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
-            "recent_count": len(app.recent),
+            "recent_count": len(app.recent), "auto_model": app.auto_model is not None,
+            "exec_track": exec_track(app.routing),  # where auto sends execution, so the page and the router agree
             # effective levers only (lever_for): a raw entry the active setup can't follow would show a lever the router ignores
             "session_levers": {s: l for s, l in ((s, app.lever_for(s)) for s in app.session_levers) if l},
             "collisions": app.collisions(),
             "preset": app.presets["active"], "presets": rows,
             "active_windows": overrides.active_windows(app.routing.settings, time.localtime().tm_hour),
             "clock": {"tz": time.strftime("%Z"), "hm": time.strftime("%H:%M")}}
+
+
+def train(fn, *a, code=400):
+    """The train endpoints' one shape: a ValueError from the job answers 400, a Conflict 409 (use is 409 too)."""
+    try:
+        return fn(*a)
+    except autotrain.Conflict as e:
+        raise Err(409, str(e))
+    except ValueError as e:
+        raise Err(code, str(e))
 
 
 def api(h, app, method, path, query, body):
@@ -321,7 +333,7 @@ def api(h, app, method, path, query, body):
         sid = body.get("session") if method == "PUT" else (query.get("session") or [None])[0]
         if not _sid_ok(sid):
             raise Err(400, "session must be a Claude Code session id")
-        modes = ["rules", *tracks(app.routing)]
+        modes = [*LEVER_MODES, *tracks(app.routing)]
         if method == "PUT":
             lever = body.get("lever")
             if lever is not None and lever not in modes:
@@ -330,7 +342,9 @@ def api(h, app, method, path, query, body):
         elif method != "GET":
             raise Err(405, "GET or PUT")
         own = app.lever_for(sid)
-        return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes,
+        auto = app.auto_for(sid) if (own or app.routing.lever) == "auto" else None  # the phase auto last chose, while auto is its lever
+        return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes, "auto": auto,
+                "trained": app.auto_model is not None,
                 "name": st.session_name(sid), "notice": app.notices.get(sid), "prompts": dict(app.routing.prompts)}
     m = re.fullmatch(r"/ui/api/sessions/([^/]+)", path)
     if m and method == "DELETE":  # the X on a session chip: its history goes; a live session starts again from zero
@@ -474,6 +488,30 @@ def api(h, app, method, path, query, body):
         if refs:
             raise in_use(m[1], refs)
         forget_models(app, [m[1]])
+        return {"ok": True}
+    if path == "/ui/api/train" and method == "GET":  # the training job: no prompt text ever comes back
+        app.trainer.start_scan()  # the first GET kicks the worker's project scan off; never blocks
+        return app.trainer.status()
+    if path == "/ui/api/train/plan" and method == "POST":
+        body = body if isinstance(body, dict) else {}
+        return train(app.trainer.plan, body.get("projects"), bool(body.get("cut")))
+    if path == "/ui/api/train/next" and method == "POST":  # the one endpoint that serves prompt text
+        body = body if isinstance(body, dict) else {}
+        n = body.get("n", 20)
+        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 50:
+            raise Err(400, "n must be an integer from 1 to 50")
+        return train(app.trainer.next, n)
+    if path == "/ui/api/train/labels" and method == "POST":
+        body = body if isinstance(body, dict) else {}
+        return train(app.trainer.labels, body.get("labels"), body.get("failed"), body.get("usage"))
+    if path == "/ui/api/train/finish" and method == "POST":
+        train(app.trainer.finish)
+        return app.trainer.status()
+    if path == "/ui/api/train/use" and method == "POST":
+        train(app.use_trained_model, code=409)
+        return {"ok": True}
+    if path == "/ui/api/train/discard" and method == "POST":
+        app.trainer.reset()
         return {"ok": True}
     if path == "/ui/api/preview" and method == "POST":
         return preview(app, body)

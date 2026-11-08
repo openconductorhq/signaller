@@ -16,17 +16,21 @@ from dataclasses import dataclass, replace
 from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
+import autophase
+import autotrain
 import console
 import overrides  # after routing: overrides imports routing
 import presets
+from autophase import BoundedDict
 from sessions import SessionDirectory, claude_dir
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
 from doubling import AnswerCapture, Doubler
 from keys import host_of
 from prices import Prices, parse_valar
-from routing import (DEFAULT_CONFIG, has_images, session_of, strip_lead_tags, Downstream, Features, RoutingConfig, config_from_json, config_to_json, downstream, is_routed,
-                     references, route as decide_route, track_model, track_window, tracks)
+from routing import (DEFAULT_CONFIG, LEVER_MODES, has_images, session_of, strip_lead_tags, text_hash, Decision, Downstream, Features, RoutingConfig,
+                     config_from_json, config_to_json, downstream, is_routed, references, route as decide_route,
+                     track_model, track_window, tracks)
 from keys import Keys, write_json
 from store import NullStore, Store, load_console_config, save_console_config
 
@@ -126,7 +130,11 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
     settings lines applied. `req` (when a dict) is edited in place; `changed` says it must be re-serialised."""
     name, base, key, ds = upstream(app, track, routing)
     if not ds:
-        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, False, None
+        # any lever: a downstream's unsigned thinking can't reach Anthropic (it 400s on it) — in auto after a
+        # downstream turn, in rules after a switch back, or mid-turn on the image fallback. Nothing of theirs to
+        # drop → the request goes out byte for byte.
+        dropped = track == "anthropic" and isinstance(req, dict) and autophase.drop_old_thinking(req)
+        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, dropped, None
     out_model = track_model(model, ds)
     hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
     changed = isinstance(req, dict) and (hoisted or out_model != model)
@@ -206,7 +214,8 @@ class App:
         self.session_levers = self._load_levers()  # session id -> lever /signaller chose for that session only
         self.notices = {}  # session id -> {"turn", "text"}: the plugin shows it once (an image fallback)
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
-        self._turn_hours = collections.OrderedDict()  # turn_key -> the hour its turn runs at
+        self._turn_hours = BoundedDict(512)  # turn_key -> the hour its turn runs at
+        # ponytail: 512 live turns, oldest dropped; a turn outliving them re-pins at a later hour boundary
         self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
         self.keys = Keys(config_dir)
         self.migrate_keys()
@@ -215,6 +224,9 @@ class App:
         if pbanner:
             self.banner = " ".join(filter(None, [self.banner, pbanner]))
         self._finish_switch()
+        # ponytail: 1024 turns / 1024 sessions, oldest dropped; an evicted turn is decided again from its history
+        self._auto_lock, self._auto, self.auto_last = threading.Lock(), BoundedDict(1024), BoundedDict(1024)
+        self.auto_model = self._load_auto_model()
         self.classifier = Classifier(self._classifier_upstream)
         try:
             # SIGNALLER_STATS_DIR: SQLite needs a real local disk, not a folder shared from the host (see compose.yaml)
@@ -226,6 +238,7 @@ class App:
         self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
         self.started = time.time()
         self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
+        self.trainer = autotrain.Trainer(config_dir, self.sessions.dir, lambda: self.routing.auto)
         self.prices = Prices(config_dir)
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
 
@@ -341,12 +354,77 @@ class App:
     def hour_of(self, turn_key, hour):
         """The hour a turn runs at: pinned at its first request, so a tool loop crossing an hour boundary doesn't
         switch model mid-turn."""
-        # ponytail: 512 live turns, oldest inserted dropped; a turn outliving them re-pins at a later boundary
-        if turn_key not in self._turn_hours:
-            self._turn_hours[turn_key] = hour
-            if len(self._turn_hours) > 512:
-                self._turn_hours.popitem(last=False)
-        return self._turn_hours[turn_key]
+        return self._turn_hours.setdefault(turn_key, hour)
+
+    def _load_auto_model(self):
+        """The optional content model from the config dir. None when absent; unreadable → None plus a banner."""
+        try:
+            return autophase.Model.load(os.path.join(self.config_dir, "auto_model.json"))
+        except FileNotFoundError:
+            return None
+        except Exception as e:  # the class name only, never the file's text
+            self._bad_auto_banner = "Auto mode's model couldn't be read (%s); auto runs on the phase alone." % type(e).__name__
+            self.banner = " ".join(filter(None, [self.banner, self._bad_auto_banner]))
+            return None
+
+    def auto_decide(self, f: Features, s: "autophase.AutoSettings") -> tuple[str, str]:
+        """(phase, why) for auto, decided once per human turn: keyed on the message that opened it (turn_index), so
+        a tool loop's steps agree even when Claude Code appends text to a tool result. The phase is read from the
+        history up to and including that message — exactly what the turn's first request saw — so the cache is only
+        a speed-up and the current turn's own tool calls can't flip it mid-turn. Never raises. The handler records
+        the main-thread answer (Decision.auto) after route()."""
+        try:
+            i = autophase.turn_index(f.messages)
+            text = autophase.human_text(f.messages[i]) if i >= 0 else ""
+            key = (f.session, text_hash(text), i) if f.session else None
+        except Exception:
+            return "none", "phase error"
+        with self._auto_lock:
+            got = self._auto.get(key) if key else None
+        if got is None:
+            m, failed = self.auto_model, []
+
+            def score(text):
+                try:
+                    return m.score(text)
+                except Exception:
+                    failed.append(True)
+                    raise
+            try:
+                got = autophase.phase(f.messages if i < 0 else f.messages[:i + 1], s, score if m else None)
+            except Exception:
+                got = ("none", "model error") if failed else ("none", "phase error")
+            if key:  # no session: nothing to share a turn with
+                with self._auto_lock:
+                    self._auto[key] = got
+        return got
+
+    def note_auto(self, f: Features, phase: str, why: str) -> None:
+        """What auto last chose for a session's main thread: a subagent or teammate request doesn't overwrite it,
+        and neither does a main-thread side request (a title generation: one message, no tools) — main-loop
+        requests carry their tools, so only those count."""
+        if f.session and f.tools and not f.subagent and not f.teammate:
+            with self._auto_lock:
+                self.auto_last[f.session] = {"phase": phase, "why": why}
+                self.auto_last.move_to_end(f.session)
+
+    def auto_for(self, sid: str) -> dict | None:
+        with self._auto_lock:
+            got = self.auto_last.get(sid)
+            return dict(got) if got else None
+
+    def use_trained_model(self) -> None:
+        """Install the job's fitted model without a restart: auto_model.json written atomically,
+        the live scorer swapped, the training folder (labels included) deleted, and the banner about an
+        unreadable model dropped (this one replaces it). ValueError when nothing finished."""
+        model = self.trainer.use()
+        write_json(os.path.join(self.config_dir, "auto_model.json"), model)
+        self.auto_model = autophase.Model(model["bias"], model["weights"])
+        bad = getattr(self, "_bad_auto_banner", "")
+        if bad and bad in self.banner:
+            self.banner = " ".join(self.banner.replace(bad, "").split())
+            self._bad_auto_banner = ""
+        self.trainer.reset()
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
         """One small entry per session that used /signaller; saved so a restart keeps it."""
@@ -378,7 +456,7 @@ class App:
         lever = self.session_levers.get(sid or "")
         if not lever:  # the common case: no entry, no tracks() scan
             return None
-        return lever if lever == "rules" or lever in tracks(self.routing) else None
+        return lever if lever in LEVER_MODES or lever in tracks(self.routing) else None
 
     def prune_levers(self) -> None:
         """Drop session ids not seen for a week (no sessions row counts as gone too; same rule as overrides.prune).
@@ -590,12 +668,25 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
                 f = Features.from_body(body, req) if is_routed(self.command, self.path) else None
+                msgs = self.path.split("?", 1)[0] == "/v1/messages"  # count_tokens decides but doesn't move auto_last
+                labelling = f is not None and msgs and autotrain.is_label_request(req)
                 if f is not None:
                     f.session, f.hour = any_sid, app.hour_of(f.turn_key, time.localtime(t0).tm_hour)
                     # Claude Code sends an agent id on every request that isn't the main thread's (the team lead's,
                     # in a team); a subagent also has cc_is_subagent=true, so the rest are teammates
                     f.teammate = not f.subagent and bool(self.headers.get("x-claude-code-agent-id"))
-                d = decide_route(routing, f, app.classifier) if f else None
+                    if labelling:
+                        # the labeller's own request: its prompt text never reaches the store, the console or a shadow
+                        f.prompt, f.step = "", None
+                if labelling:
+                    # the marker says who sent it: straight to Anthropic, whatever the lever or the rules say
+                    d = Decision("anthropic", "auto training",
+                                 [{"rule": "Auto training", "outcome": "labelling request → anthropic", "decided": True}])
+                else:
+                    auto = (lambda f: app.auto_decide(f, routing.auto)) if routing.lever == "auto" else None
+                    d = decide_route(routing, f, app.classifier, auto=auto) if f else None
+                    if d and d.auto and msgs:  # auto decided (or a lead tag did): record it for the console, main thread only
+                        app.note_auto(f, *d.auto)
             except Exception as e:
                 self._error(500, "signaller: routing failed")
                 print("%s route=- reason=error status=500 err=%s shadow=-" % (
@@ -613,7 +704,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     pass
             pair, cap, shadow, turn_id = None, None, "-", None
             try:  # a doubling fault must never change the served request
-                turn_id = app.doubler.turn_for(f, route, routing.doubling, sid) if rec and app.doubler else None
+                # a labelling request has no shadow: its text goes to Anthropic and nowhere else
+                turn_id = app.doubler.turn_for(f, route, routing.doubling, sid) if rec and app.doubler and not labelling else None
                 if turn_id:  # shadow starts before the served upstream; it never touches the served path again
                     pair = app.doubler.pending_served(turn_id, rid, route, routing.doubling.shadow[route])
                     shadow = app.doubler.start_shadow(turn_id, rid, f, route, self.command, self.path,
@@ -623,11 +715,17 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 pair, shadow, turn_id = None, "-", None
             orig_body = body  # an image fallback to Anthropic starts again from the request as Claude Code sent it
             stripped = False
-            try:  # routing already read the tags; no upstream needs them
-                stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
-            except Exception:
-                pass
-            name, base, key, ds, headers, out_model, window, changed, override = prepare(app, route, model, req, self.headers.items(), routing, f)
+            if labelling:
+                # untouched in every way: no tag strip, no thinking drop, no settings lines, byte for byte
+                name, base, key, ds = upstream(app, "anthropic")
+                headers = [(k, v) for k, v in self.headers.items() if k.lower() not in HOP]
+                out_model, window, changed, override = model, None, False, None
+            else:
+                try:  # routing already read the tags; no upstream needs them
+                    stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
+                except Exception:
+                    pass
+                name, base, key, ds, headers, out_model, window, changed, override = prepare(app, route, model, req, self.headers.items(), routing, f)
             if stripped or changed:
                 body = json.dumps(req).encode()
             if out_model != model:
@@ -652,8 +750,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         route = "anthropic"
                         req2 = json.loads(orig_body)
                         stripped2 = strip_lead_tags(req2)
-                        name, base, key, ds, headers, out_model, window, _, override = prepare(app, route, model, req2, self.headers.items(), routing, f)
-                        body, shown = json.dumps(req2).encode() if stripped2 else orig_body, model
+                        name, base, key, ds, headers, out_model, window, changed2, override = prepare(app, route, model, req2, self.headers.items(), routing, f)
+                        body, shown = json.dumps(req2).encode() if stripped2 or changed2 else orig_body, model
                         d.explanation.append({"rule": "Fallback", "outcome": f"{fell} can't take images → anthropic", "decided": True})
                         if sid:
                             app.notices[sid] = {"turn": f.turn_key[:16], "text": f"This turn went to Anthropic, not {fell}: "
@@ -729,7 +827,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
                         "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window, "override": override,
                         "cost": cost, "api_cost": api_cost})
-                    f.prompt = None  # recorded; the preview deque keeps only the capped text
+                    f.prompt, f.messages = None, None  # recorded; the preview deque keeps only the capped text, not the history
                     app.recent.append((f, d, rid))
                 shown_reason = '"%s"' % reason if re.search(r"\s", reason) else reason
                 print("%s route=%s reason=%s model=%s status=%d ms=%d stream=%s%s shadow=%s%s" % (

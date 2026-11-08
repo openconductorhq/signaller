@@ -6,7 +6,7 @@ const DS = () => (cfg ? cfg.downstreams : []);
 const dsOf = (t) => DS().find((d) => d.id === t);
 const TRACKS = () => ["anthropic", ...DS().map((d) => d.id)];
 const gone = (t) => t !== "anthropic" && !dsOf(t);
-const NAME = (t) => t === "anthropic" ? "Anthropic" : dsOf(t) ? dsOf(t).name : t;
+const NAME = (t) => t === "anthropic" ? "Anthropic" : t === "auto" ? "Auto" : dsOf(t) ? dsOf(t).name : t;
 const label = (t) => NAME(t) + (gone(t) ? ", removed" : "");
 // Each track's colour reaches CSS as --c on its elements.
 const col = (t) => t === "anthropic" ? "var(--anth)" : dsOf(t) ? dsOf(t).color : "var(--off)";
@@ -218,7 +218,7 @@ function applyState(st) {
   if (t) t.textContent = tallyText();
   // don't clobber a field the user is typing in, or an optimistic edit in flight
   const f = document.activeElement;
-  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f) || $("prm").contains(f));
+  const typing = f && f.matches("input:not([type=checkbox]):not([type=range]),select,textarea") && ($("rbBody").contains(f) || $("strip").contains(f) || $("tracks").contains(f) || $("stt").contains(f) || $("autoBox").contains(f) || $("prm").contains(f));
   if (!saving && !typing) { cfg = st.config; renderConfig(); }  // again after a save: fresh collisions, fresh settings
   renderCollisions();  // every poll: /signaller or the picker can change them without this tab's config JSON changing
   $("presetGo").hidden = !st.preset;
@@ -226,6 +226,7 @@ function applyState(st) {
   renderKeyBanner((st.presets.find((p) => p.active) || {}).missing_keys);
   renderPresets();
   if (cfg) { keepFocus(renderLever); renderYardNums(m, span); }  // a session's lever can change from /signaller at any time
+  if (!$("autoBox").hidden) loadTrain().catch(() => {});  // the training card rides the same poll
 }
 // Downstream POST/DELETE/key PUT change the config on the server: reload it (even after an error or a timeout),
 // so the next config PUT starts from it, and let the touched downstream's models load afresh.
@@ -322,12 +323,15 @@ function renderLever() {
     b.setAttribute("aria-checked", String(on));
     b.tabIndex = on ? 0 : -1;
   }
-  const off = lv !== "rules";
+  const off = lv !== "rules", auto = lv === "auto";
   $("rulebook").classList.toggle("dim", off);
   $("leverNote").hidden = !off;
-  $("leverNote").style.color = off ? col(lv) : "";
-  $("leverNote").textContent = off ? `The lever is sending ${id ? "this session" : "everything"} to ${NAME(lv)}` : "";
-  for (const [t, y] of Object.entries(YARD)) y.trk.classList.toggle("dim", off && t !== lv);
+  $("leverNote").style.color = off && !auto ? col(lv) : "";
+  $("leverNote").textContent = !off ? "" : auto ? `Auto is choosing for ${id ? "this session" : "everything"}: planning to Anthropic, the rest to ${NAME(S.exec_track)}`
+    : `The lever is sending ${id ? "this session" : "everything"} to ${NAME(lv)}`;
+  $("autoSub").textContent = `planning → Anthropic, the rest → ${NAME(S.exec_track)}`;
+  renderAuto(auto || !!(cfg.auto && cfg.auto.execution)); // also with auto.execution set: the box is the only place to clear it, and references() blocks deleting the downstream it names
+  for (const [t, y] of Object.entries(YARD)) y.trk.classList.toggle("dim", off && !auto && t !== lv);
   $("jlabel").textContent = off ? "lever" : "rulebook";
   if (!offTrack(lv)) $("localWarn").hidden = true;
   const sc = $("leverScope");
@@ -335,6 +339,30 @@ function renderLever() {
   else sc.replaceChildren("Lever for ", el("b", {}, fullLabel(id)), own ? " · its own" : ` · following the global lever (${cfg.lever === "rules" ? "Rules" : NAME(cfg.lever)})`,
     own ? " " : "", own ? el("button", { type: "button", class: "linkish", "data-k": "lever:reset", onclick: () => setLever(null) }, "back to global") : "");
 }
+// where auto sends execution comes from the router (state's exec_track): one definition, no client copy
+const parts = (s, sep) => s.split(sep).map((x) => x.trim()).filter(Boolean);
+const csv = (s) => parts(s, ",");
+// the auto fields: element id, config key, how the input text turns into the value
+const AU = [["auPlan", "planning_skills", csv], ["auSkills", "execution_skills", csv], ["auDirs", "plan_dirs", csv],
+  ["auThr", "threshold", (v) => v === "" ? NaN : Number(v)]];
+function renderAuto(show) {
+  $("autoBox").hidden = !show;
+  if (!show) return;
+  const a = cfg.auto, ex = $("auExec");
+  const opts = JSON.stringify(DS().map((d) => [d.id, d.name]));
+  if (ex.dataset.opts !== opts) {  // a poll must not rebuild an open dropdown
+    ex.dataset.opts = opts;
+    ex.replaceChildren(el("option", { value: "" }, "(first downstream)"), ...DS().map((d) => el("option", { value: d.id }, d.name)));
+  }
+  ex.value = a.execution || "";
+  for (const [id, k, parse] of AU)
+    if (document.activeElement !== $(id)) $(id).value = Array.isArray(a[k]) ? a[k].join(", ") : a[k];
+  $("autoModel").textContent = S && S.auto_model ? "Model: loaded" : "Model: none — auto uses the phase alone";
+}
+const saveAuto = (patch) => save({ ...cfg, auto: { ...cfg.auto, ...patch } }, $("autoErr"));
+$("auExec").addEventListener("change", (e) => saveAuto({ execution: e.target.value || null }));
+for (const [id, k, parse] of AU)
+  $(id).addEventListener("change", (e) => saveAuto({ [k]: parse(e.target.value) }));
 const offTrack = (v) => !!dsOf(v);
 function warnOff(v) {
   $("localWarnT").textContent = `Conversations that run on ${NAME(v)} may fail when you switch back. Start a new session afterwards if they do.`;
@@ -376,6 +404,139 @@ $("lever").addEventListener("keydown", (e) => {
   setLever(n.dataset.v);
 });
 $("localWarnX").addEventListener("click", () => { $("localWarn").hidden = true; });
+
+/* ---------- train card: Teach auto how you work ---------- */
+// Mirrors the router's training job (GET /ui/api/train, fetched from the poll while the Auto box shows).
+// The cut option ("Newest sessions only: N prompts, about $y") exists only in the job block, so when the
+// ticked set's estimate is over the cap and there is no job yet, the card plans the ticked set itself —
+// the same metadata pass the command does, nothing labels until it runs. A job that exists is never
+// replaced from here: it may be the command's, possibly already cut, and re-planning would swap it.
+let trainSt = null, trainPick = null, trainSig = "", trainKey = "";
+const sameDirs = (a, b) => a.length === b.length && a.every((d, i) => d === b[i]);
+const trainQuiet = (st) => !st.job && (st.state === "idle" || st.state === "scanning" || st.state === "ready");
+
+async function loadTrain() {
+  const st = await api("GET", "train");
+  trainSt = st;
+  if (!trainPick) trainPick = new Set(st.projects.map((p) => p.dir));  // first sight: everything ticked
+  const ticked = st.projects.filter((p) => trainPick.has(p.dir));
+  const cap = cfg && cfg.auto ? cfg.auto.train_cap : null;
+  const sig = ticked.map((p) => p.dir).join(",") + "|" + cap;
+  if (cap && trainQuiet(st) && ticked.length && ticked.every((p) => p.prompts != null)
+      && ticked.reduce((a, p) => a + p.usd, 0) > cap && sig !== trainSig) {
+    trainSig = sig;  // once per (ticked set, cap): a failed plan isn't retried until the pick or cap changes
+    await api("POST", "train/plan", { projects: ticked.map((p) => p.dir), cut: false }).catch(() => {});
+  }
+  keepFocus(renderTrain);
+}
+
+function renderTrain() {
+  if (!trainSt) return;
+  const st = trainSt, j = st.job;
+  const key = JSON.stringify([st.state, st.error, st.result, j, st.projects, [...trainPick], cfg && cfg.auto.train_cap]);
+  if (key === trainKey) return;  // a poll must not rebuild an open card
+  trainKey = key;
+  if (st.state === "done" && st.result) renderTrainDone(st);
+  else if (st.state === "failed") renderTrainFailed(st);
+  else if (st.state === "training" || (st.state === "labelling" && !(j && !j.labelled && !j.failed && !j.usd_spent)))
+    renderTrainProgress(st);
+  else renderTrainReady(st);
+}
+
+const trainHead = () => [el("h3", {}, "Teach auto how you work")];
+
+function renderTrainReady(st) {
+  const cap = cfg.auto.train_cap, ticked = st.projects.filter((p) => trainPick.has(p.dir));
+  const dirs = ticked.map((p) => p.dir);
+  const scanned = ticked.length > 0 && ticked.every((p) => p.prompts != null);
+  const n = ticked.reduce((a, p) => a + p.prompts, 0), u = ticked.reduce((a, p) => a + p.usd, 0);
+  const cut = scanned && u > cap && st.job && st.job.cut && sameDirs(st.job.projects, dirs) ? st.job.cut : null;
+  const cmd = "/signaller train" + (dirs.length ? " " + dirs.join(" ") : "");
+  const row = (p) => el("label", { class: "trow" },
+    el("input", { type: "checkbox", "data-k": "train:" + p.dir, checked: trainPick.has(p.dir),
+      onchange: (e) => { e.target.checked ? trainPick.add(p.dir) : trainPick.delete(p.dir); renderTrain(); } }),
+    el("b", {}, p.name),
+    el("span", {}, p.prompts == null ? `${plural(p.sessions, "session")} · scanning…`
+      : `${plural(p.sessions, "session")} · ${plural(p.prompts, "prompt")} · ${usd(p.usd)}`));
+  $("trainCard").replaceChildren(...[
+    ...trainHead(),
+    el("p", { class: "hint" }, "Auto plans from fixed rules. Let it learn yours: tick the projects whose sessions it should learn from, then run the command in Claude Code — it labels your prompts with Haiku, asks once about the cost, then trains and shows the result here."),
+    ...(st.projects.length ? st.projects.map(row)
+      : [el("p", { class: "hint" }, "No projects found yet — they appear once you've had Claude Code sessions.")]),
+    el("p", { class: "ttotals" }, scanned ? `${plural(n, "prompt")}, about ${usd(u)} to label` : "Counting prompts…"),
+    cut && el("p", { class: "tcut" }, `Newest sessions only: ${plural(cut.items, "prompt")}, about ${usd(cut.usd)} — the command offers it.`),
+    el("label", { class: "tcap" }, "Label-cost cap ($)", el("input", { type: "number", min: "0.5", max: "1000", step: "0.5",
+      value: cap, "data-k": "train:cap", onchange: (e) => saveAuto({ train_cap: e.target.value === "" ? NaN : Number(e.target.value) }) })),
+    el("p", { class: "tcmd" }, el("code", { id: "trainCmd" }, cmd), el("button", { type: "button", class: "btn", onclick: copyCmd }, "Copy")),
+  ].filter(Boolean));
+}
+
+function copyCmd() {
+  const code = $("trainCmd");
+  const selectAll = () => {  // no clipboard: select the text so a ⌘C still works
+    const r = document.createRange();
+    r.selectNodeContents(code);
+    const s = getSelection();
+    s.removeAllRanges();
+    s.addRange(r);
+  };
+  const done = () => { const b = code.nextElementSibling; if (b) b.textContent = "Copied"; };
+  if (!navigator.clipboard) return selectAll();
+  navigator.clipboard.writeText(code.textContent).then(done, selectAll);
+}
+
+function renderTrainProgress(st) {
+  const j = st.job, pct = j && j.items ? Math.round(100 * j.labelled / j.items) : 0;
+  $("trainCard").replaceChildren(...trainHead(),
+    st.state === "training"
+      ? el("p", { class: "hint" }, "Labelling finished — fitting the model and checking it against the sessions held out…")
+      : el("p", { class: "hint" }, `Labelling your prompts with Haiku: ${j.labelled} of ${j.items} prompts done, about ${usd(j.usd_remaining)} to go.`),
+    el("div", { class: "tbar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(j ? j.items : 0), "aria-valuenow": String(j ? j.labelled : 0) },
+      el("div", { class: "tfill", style: "--w:" + pct + "%" })),
+    j && el("p", { class: "hint" }, `About ${usd(j.usd_spent)} spent so far.`),
+    el("button", { type: "button", class: "btn", onclick: trainAct("discard", {}) }, "Discard"));
+}
+
+// one body for Try again / Use it / Keep rules only / Discard: post, drop the plan signature, reload
+const trainPost = async (path, body) => {
+  try {
+    await api("POST", "train/" + path, body);
+    trainSig = "";
+    await loadTrain();
+  } catch (_) { /* the card shows what the next poll says */ }
+};
+const trainAct = (path, body) => async () => { await trainPost(path, body); };
+
+// the job as it is at click time, not render time: fully labelled (or all failed) goes straight to the fit;
+// anything else re-plans with the job's own projects and its cut choice
+const trainAgain = async () => {
+  const j = trainSt && trainSt.job;
+  if (!j) return;
+  await trainPost(j.remaining === 0 ? "finish" : "plan",
+                  j.remaining === 0 ? {} : { projects: j.projects, cut: j.cut_applied });
+};
+
+function renderTrainFailed(st) {
+  $("trainCard").replaceChildren(...trainHead(),
+    el("p", { class: "err" }, "Training failed: " + (st.error || "unknown error")),
+    el("button", { type: "button", class: "btn", onclick: trainAgain, disabled: !st.job }, "Try again"));
+}
+
+function renderTrainDone(st) {
+  const r = st.result, tooFew = r.verdict === "too few", good = r.verdict === "better";
+  const line = (name, mk, rk, total) => el("div", { class: "tresrow" },
+    el("span", {}, name), el("b", {}, `${mk} of ${total}`), el("span", {}, `${rk} of ${total}`));
+  $("trainCard").replaceChildren(...trainHead(),
+    tooFew ? el("p", { class: "hint" }, "Not enough planning prompts to judge yet")
+      : el("p", { class: "hint" }, good ? "On the sessions held out, your model beats the rules alone:"
+          : "On the sessions held out, your model didn't beat the rules alone:"),
+    el("div", { class: "tres" },
+      el("div", { class: "tresrow treshead" }, el("span", {}), el("span", {}, "your model"), el("span", {}, "rules alone")),
+      line("Planning kept on Anthropic", r.model.planning_kept, r.rules.planning_kept, r.planning),
+      line("Execution moved to the downstream", r.model.execution_moved, r.rules.execution_moved, r.execution)),
+    ...(tooFew ? [] : [el("button", { type: "button", class: "btn" + (good ? " primary" : ""), onclick: trainAct("use", {}) }, "Use it")]),
+    el("button", { type: "button", class: "btn" + (tooFew || !good ? " primary" : ""), onclick: trainAct("discard", {}) }, "Keep rules only"));
+}
 
 /* the yard: Anthropic on top, one line per downstream below it; the first runs straight on (y=125) */
 const YARD = {};  // track → its line, ghost path (for dots), share text and "no key" note
@@ -590,7 +751,7 @@ const DEFAULT_TEXT = {
   tier: ["when tier is opus or tier is fable go anthropic\nwhen tier is sonnet or tier is haiku or tier is other go valar",
     () => ["opus & fable → ", trk("anthropic"), ", sonnet, haiku & anything else → ", trk("valar")]],
 };
-const lines = (text) => text.split("\n").map((s) => s.trim()).filter(Boolean);
+const lines = (text) => parts(text, "\n");
 // "Can send your main session off Anthropic": a line going to a downstream whose condition never looks at tier or subagent.
 const GO_OFF = /\bgo\s+(?!anthropic\s*$)[\w-]+\s*$/i;
 const risky = (r) => r.kind === "dsl" && lines(r.text).some((l) => GO_OFF.test(l) && !/\btier\b|\bsubagent\b|\bteammate\b/i.test(l.replace(GO_OFF, "")));
@@ -1021,7 +1182,7 @@ function imPanel(pv) {
         el("small", {}, bits.filter(Boolean).join(" · ")));
     }) : el("div", { class: "imtrk" }, "Anthropic only"));
   const route = [];
-  if (c.lever && c.lever !== "rules") route.push(el("div", {}, "the lever sends everything → ", ptrk(c.lever)));
+  if (c.lever && c.lever !== "rules") route.push(el("div", {}, c.lever === "auto" ? "auto: planning → Anthropic, the rest → the execution downstream" : ["the lever sends everything → ", ptrk(c.lever)]));
   for (const r of c.rules || []) if (r.enabled) {
     if (r.kind === "classifier") for (const l of (c.classifier && c.classifier.labels) || []) route.push(el("div", {}, l.name, " → ", ptrk(l.track)));
     else for (const l of lines(r.text)) {
@@ -1190,6 +1351,7 @@ const OVERLAP = 50;
 function shortReason(reason, row) {
   if (!reason) return "";
   if (reason === "lever") return "lever";
+  if (reason.startsWith("auto:")) return "auto: " + reason.slice(5);
   if (reason === "default") return "otherwise";
   if (reason.startsWith("about:")) return "about: " + reason.slice(6);
   if (reason.startsWith("rule:")) {
