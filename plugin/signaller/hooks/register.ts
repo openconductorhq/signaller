@@ -96,8 +96,13 @@ const pickDirs = async ($: EngineInterface, ps: TrainProject[]): Promise<string[
   }
   return dirs.length ? dirs : null
 }
+// one loop at a time per session: the router's next() hands the same items to anyone who asks, so a second
+// command while one runs would pay haiku twice over the same prompts. The flag is the loop's latest job block
+// (for the progress answer) and clears when the loop ends, fails or is cancelled.
+let training: TrainJob | null = null
 // one confirm, then the loop runs unattended; the command returns at once with what started
 const startTraining = async ($: EngineInterface, rest: string): Promise<string> => {
+  if (training !== null) return `a training run is already labelling here: ${training.labelled} of ${training.items} prompts done; its result question comes at the end`
   const ps = (await trainGet($)).projects
   let dirs = rest ? rest.split(/\s+/).filter(Boolean) : null
   if (!dirs) {
@@ -112,49 +117,55 @@ const startTraining = async ($: EngineInterface, rest: string): Promise<string> 
   const answer = await ask($, `Label ${job.items} prompts (about ${usd(job.usd_est)})?`, options)
   if (answer !== 'Label all' && !answer.startsWith('Newest only')) return 'cancelled'
   if (answer.startsWith('Newest only')) job = (await trainPost($, '/plan', { projects: dirs, cut: true })) as TrainJob
+  training = job
   trainLoop($).catch(err => $.ui.log(`⚠ signaller: training stopped: ${(err as Error).message}`))
   return `labelling ${job.items} prompts…`
 }
 // batches of 20, 4 at a time, each prompt to haiku on its own; then the router fits and evaluates
 const trainLoop = async ($: EngineInterface): Promise<void> => {
-  for (;;) {
-    const { items } = (await trainPost($, '/next', { n: 20 })) as { items: { id: string; text: string }[] }
-    if (!items?.length) break
-    const labels: { id: string; label: string }[] = [], failed: string[] = []
-    const usage = { input_tokens: 0, output_tokens: 0 }
-    for (let i = 0; i < items.length; i += 4) {
-      const chunk = items.slice(i, i + 4)
-      const got = await Promise.all(chunk.map(async it => {
-        const r = await $.model.complete({ model: 'haiku', system: LABEL_SYSTEM, prompt: it.text, maxTokens: 5 })
-        usage.input_tokens += r.usage.input_tokens
-        usage.output_tokens += r.usage.output_tokens
-        return r.isAnswered ? labelOf(r.text) : null
-      }))
-      got.forEach((l, j) => (l ? labels.push({ id: chunk[j]!.id, label: l }) : failed.push(chunk[j]!.id)))
+  try {
+    for (;;) {
+      const { items } = (await trainPost($, '/next', { n: 20 })) as { items: { id: string; text: string }[] }
+      if (!items?.length) break
+      const labels: { id: string; label: string }[] = [], failed: string[] = []
+      const usage = { input_tokens: 0, output_tokens: 0 }
+      for (let i = 0; i < items.length; i += 4) {
+        const chunk = items.slice(i, i + 4)
+        const got = await Promise.all(chunk.map(async it => {
+          const r = await $.model.complete({ model: 'haiku', system: LABEL_SYSTEM, prompt: it.text, maxTokens: 5 })
+          usage.input_tokens += r.usage.input_tokens
+          usage.output_tokens += r.usage.output_tokens
+          return r.isAnswered ? labelOf(r.text) : null
+        }))
+        got.forEach((l, j) => (l ? labels.push({ id: chunk[j]!.id, label: l }) : failed.push(chunk[j]!.id)))
+      }
+      const job = (await trainPost($, '/labels', { labels, failed, usage })) as TrainJob
+      training = job
+      $.ui.status(`training auto · ${job.labelled}/${job.items}`)
     }
-    const job = (await trainPost($, '/labels', { labels, failed, usage })) as TrainJob
-    $.ui.status(`training auto · ${job.labelled}/${job.items}`)
+    await trainPost($, '/finish', {})
+    let st: TrainStatus
+    for (;;) { // the fit runs on the router's worker; poll until it lands
+      st = await trainGet($)
+      if (st.state === 'done' || st.state === 'failed') break
+      await $.clock.sleep(2000)
+    }
+    $.ui.status(undefined)
+    if (st.state === 'failed') {
+      $.ui.log(`⚠ signaller: training failed: ${st.error ?? 'unknown error'}`)
+      return
+    }
+    const r = st.result
+    $.ui.log(r?.verdict === 'too few'
+      ? 'signaller: not enough planning prompts to judge your habits yet; label more with the same command'
+      : `signaller: Your model keeps ${r!.model.planning_kept} of ${r!.planning} planning turns on Anthropic (rules alone: ${r!.rules.planning_kept}); moves ${r!.model.execution_moved} of ${r!.execution} execution turns.`)
+    const answer = await ask($, 'Use your model?', r?.verdict === 'better' ? ['Use it', 'Keep rules only'] : ['Keep rules only', 'Use it'])
+    if (answer === 'Use it') await trainPost($, '/use', {})
+    else if (answer === 'Keep rules only') await trainPost($, '/discard', {})
+    else $.ui.log('signaller: the console still holds the choice under Teach auto.')
+  } finally {
+    training = null
   }
-  await trainPost($, '/finish', {})
-  let st: TrainStatus
-  for (;;) { // the fit runs on the router's worker; poll until it lands
-    st = await trainGet($)
-    if (st.state === 'done' || st.state === 'failed') break
-    await $.clock.sleep(2000)
-  }
-  $.ui.status(undefined)
-  if (st.state === 'failed') {
-    $.ui.log(`⚠ signaller: training failed: ${st.error ?? 'unknown error'}`)
-    return
-  }
-  const r = st.result
-  $.ui.log(r?.verdict === 'too few'
-    ? 'signaller: not enough planning prompts to judge your habits yet; label more with the same command'
-    : `signaller: Your model keeps ${r!.model.planning_kept} of ${r!.planning} planning turns on Anthropic (rules alone: ${r!.rules.planning_kept}); moves ${r!.model.execution_moved} of ${r!.execution} execution turns.`)
-  const answer = await ask($, 'Use your model?', r?.verdict === 'better' ? ['Use it', 'Keep rules only'] : ['Keep rules only', 'Use it'])
-  if (answer === 'Use it') await trainPost($, '/use', {})
-  else if (answer === 'Keep rules only') await trainPost($, '/discard', {})
-  else $.ui.log('signaller: the console still holds the choice under Teach auto.')
 }
 
 // Claude may switch the lever or change settings only on the person's say-so. The "/signaller <mode>" and

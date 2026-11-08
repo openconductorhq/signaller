@@ -386,6 +386,55 @@ test('an unparseable reply is sent as failed, not as a label', async ($: any, on
   expect(posts[U('/labels')]).toEqual([{ labels: [], failed: ['s1:0'], usage: { input_tokens: 10, output_tokens: 4 } }])
 })
 
+test('a second train command while the loop runs does not start another', async ($: any, on: any) => {
+  const asks: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, (_: any, e: any) => {
+    asks.push(e.questions[0].question)
+    const a = e.questions[0].question.startsWith('Label') ? 'Label all' : 'Keep rules only'
+    return { result: { questions: e.questions, answers: { [e.questions[0].question]: a } } }
+  })
+  const modelCalls: any[] = []
+  let release: () => void = () => {}
+  const gate = new Promise<void>(r => { release = r })
+  on('model.complete', async (_: any, e: any) => {
+    modelCalls.push(e)
+    await gate  // hold the first loop mid-labelling, so the second command lands while it runs
+    return { value: { isAnswered: true, text: 'planning', usage: { input_tokens: 1, output_tokens: 1 } } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  on('ui.log', () => ({ value: undefined }))
+  const posts: Record<string, any[]> = {}
+  let served = false
+  await stub($, on, (e: any) => {
+    const url = String(e.url)
+    if (e.init?.method === 'POST') (posts[url] ??= []).push(JSON.parse(String(e.init.body)))
+    if (url.endsWith('/train/plan'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 1, labelled: 0, failed: 0, usd_est: 0.01, usd_spent: 0, cut: null }) } }
+    if (url.endsWith('/train/next'))
+      return { value: { ok: true, status: 200, text: JSON.stringify(served ? { items: [] } : ((served = true), { items: [{ id: 's1:0', text: 'alpha' }] })) } }
+    if (url.endsWith('/train/labels'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ projects: ['proj1'], items: 1, labelled: 1, failed: 0, usd_est: 0.01, usd_spent: 0, cut: null }) } }
+    if (url.endsWith('/train/finish') || url.endsWith('/train/discard'))
+      return { value: { ok: true, status: 200, text: '{}' } }
+    if (url.endsWith('/ui/api/train'))
+      return { value: { ok: true, status: 200, text: JSON.stringify({ state: 'done', projects: [], job: null, cap: 5, error: null, result: {
+        rules: { planning_kept: 0, execution_moved: 1 }, model: { planning_kept: 1, execution_moved: 1 },
+        planning: 1, execution: 1, verdict: 'better' } }) } }
+    return { value: { ok: true, status: 200, text: LEVER } }
+  })
+
+  const first = await $.command.run({ command: 'signaller', args: 'train proj1' })
+  expect(first.text).toBe('labelling 1 prompts…')
+  const second = await $.command.run({ command: 'signaller', args: 'train proj1' })  // while the first holds
+  expect(second.text).toContain('already labelling')
+  expect(second.text).toContain('1')  // the progress, not a new plan
+  release()
+  await until(() => posts[U('/discard')]?.length)
+  expect(modelCalls.length).toBe(1)  // each item reached haiku once; the second command paid nothing
+  expect(posts[U('/plan')].length).toBe(1)
+  expect(asks.filter(q => q.startsWith('Label')).length).toBe(1)  // the second command asked nothing
+})
+
 test('quoting /signaller train keeps the queue', async ($: any, on: any) => {
   const puts: string[] = []
   await stub($, on, (e: any) => {
