@@ -10,18 +10,24 @@ const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the cons
 
 type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null; auto?: { phase: string; why: string } | null; prompts?: Record<string, string>; notice?: { turn: string; text: string } | null; trained?: boolean }
 type TrainProject = { dir: string; name: string; sessions: number; prompts: number | null; usd: number | null }
-type TrainJob = { projects: string[]; items: number; labelled: number; failed: number; usd_est: number; usd_spent: number; cut: { items: number; usd: number } | null }
+type TrainJob = { projects: string[]; items: number; labelled: number; failed: number; remaining: number; usd_est: number; usd_remaining: number; usd_spent: number; cut: { items: number; usd: number } | null; cut_applied: boolean }
 type TrainResult = { rules: { planning_kept: number; execution_moved: number }; model: { planning_kept: number; execution_moved: number }; planning: number; execution: number; verdict: string } | null
 type TrainStatus = { state: string; projects: TrainProject[]; job: TrainJob | null; result: TrainResult; error: string | null }
 type Line = { downstream: string; tier: string | null; set: string; value: string }
 type Form = { ds: string; tier: string | null; key: 'window' | 'model'; value: string } | { ds: string; reset: true }
 
-// every router call in one place: the fetch, the ok check and the JSON parse
+// every router call in one place: the fetch, the ok check and the JSON parse. A router answer (!ok) is an
+// Answered error and reads as "signaller answered N: …"; only a fetch that never got an answer means down.
+class Answered extends Error {
+  constructor(readonly status: number, body: string) { super(`signaller answered ${status}: ${body.slice(0, 200)}`) }
+}
+const down = (err: unknown): string =>
+  err instanceof Answered ? err.message : `signaller isn't reachable at ${BASE}: ${(err as Error).message}`
 const call = async ($: EngineInterface, url: string, init?: { method: string; body: unknown }): Promise<any> => {
   const r = await $.http.fetch(url, init
     ? { ...init, headers: HEADERS, body: JSON.stringify(init.body) }
     : { headers: HEADERS })
-  if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
+  if (!r.ok) throw new Answered(r.status, r.text)
   return JSON.parse(r.text)
 }
 
@@ -64,8 +70,9 @@ const usd = (v: number) => `$${!v ? '0' : v < 0.1 ? v.toFixed(3) : v.toFixed(2)}
 const trainGet = async ($: EngineInterface): Promise<TrainStatus> => await call($, TRAIN)
 const trainPost = async ($: EngineInterface, path: string, body: unknown): Promise<unknown> =>
   await call($, `${TRAIN}${path}`, { method: 'POST', body })
-// the person's own definition, verbatim, plus the one-word rule; nothing a model reads ever says "/signaller"
-const LABEL_SYSTEM = "anything which isn't brainstorming, speccing or planning is execution\nAnswer with one word: planning or execution."
+// the person's own definition, verbatim, plus the one-word rule; nothing a model reads ever says "/signaller".
+// The first line is the marker the router routes on: these requests go to Anthropic untouched, whatever the lever.
+const LABEL_SYSTEM = "signaller-label-v1\nanything which isn't brainstorming, speccing or planning is execution\nAnswer with one word: planning or execution."
 // lenient parse: the lowercased reply must hold exactly one of the two words ("Planning." parses; both words,
 // a sentence, or no answer at all is a failure, posted as failed and never stored as a label)
 const labelOf = (text: string): 'planning' | 'execution' | null => {
@@ -112,13 +119,19 @@ const startTraining = async ($: EngineInterface, rest: string): Promise<string> 
   }
   let job = (await trainPost($, '/plan', { projects: dirs, cut: false })) as TrainJob
   if (!job.items) return `no unlabelled prompts in ${dirs.join(', ')}`
-  const options = ['Label all', ...(job.cut ? [`Newest only (about ${usd(job.cut.usd)})`] : []), 'Cancel']
-  const answer = await ask($, `Label ${job.items} prompts (about ${usd(job.usd_est)})?`, options)
-  if (answer !== 'Label all' && !answer.startsWith('Newest only')) return 'cancelled'
-  if (answer.startsWith('Newest only')) job = (await trainPost($, '/plan', { projects: dirs, cut: true })) as TrainJob
+  training = job  // before the cost question: a second command while the person reads it answers with the progress
+  if (job.remaining) {
+    const options = ['Label all', ...(job.cut ? [`Newest only (about ${usd(job.cut.usd)})`] : []), 'Cancel']
+    const answer = await ask($, `Label ${job.remaining} prompts (about ${usd(job.usd_remaining)})?`, options)
+    if (answer !== 'Label all' && !answer.startsWith('Newest only')) { training = null; return 'cancelled' }  // cancel or dismiss
+    if (answer.startsWith('Newest only')) {
+      try { job = (await trainPost($, '/plan', { projects: dirs, cut: true })) as TrainJob }
+      catch (err) { training = null; throw err }
+    }
+  }
   training = job
   trainLoop($).catch(err => $.ui.log(`⚠ signaller: training stopped: ${(err as Error).message}`))
-  return `labelling ${job.items} prompts…`
+  return job.remaining ? `labelling ${job.remaining} prompts…` : 'all these prompts are already labelled — fitting your model…'
 }
 // batches of 20, 4 at a time, each prompt to haiku on its own; then the router fits and evaluates
 const trainLoop = async ($: EngineInterface): Promise<void> => {
@@ -131,10 +144,12 @@ const trainLoop = async ($: EngineInterface): Promise<void> => {
       for (let i = 0; i < items.length; i += 4) {
         const chunk = items.slice(i, i + 4)
         const got = await Promise.all(chunk.map(async it => {
-          const r = await $.model.complete({ model: 'haiku', system: LABEL_SYSTEM, prompt: it.text, maxTokens: 5 })
-          usage.input_tokens += r.usage.input_tokens
-          usage.output_tokens += r.usage.output_tokens
-          return r.isAnswered ? labelOf(r.text) : null
+          try {
+            const r = await $.model.complete({ model: 'haiku', system: LABEL_SYSTEM, prompt: it.text, maxTokens: 5 })
+            usage.input_tokens += r.usage?.input_tokens ?? 0  // a reply without usage counts as 0
+            usage.output_tokens += r.usage?.output_tokens ?? 0
+            return r.isAnswered ? labelOf(r.text) : null
+          } catch { return null }  // one failed call is one failed id, never a lost batch
         }))
         got.forEach((l, j) => (l ? labels.push({ id: chunk[j]!.id, label: l }) : failed.push(chunk[j]!.id)))
       }
@@ -157,7 +172,8 @@ const trainLoop = async ($: EngineInterface): Promise<void> => {
     $.ui.log(r?.verdict === 'too few'
       ? 'signaller: not enough planning prompts to judge your habits yet; label more with the same command'
       : `signaller: Your model keeps ${r!.model.planning_kept} of ${r!.planning} planning turns on Anthropic (rules alone: ${r!.rules.planning_kept}); moves ${r!.model.execution_moved} of ${r!.execution} execution turns.`)
-    const answer = await ask($, 'Use your model?', r?.verdict === 'better' ? ['Use it', 'Keep rules only'] : ['Keep rules only', 'Use it'])
+    // like the card: "too few" offers no Use it at all — the router's /use would refuse it anyway
+    const answer = await ask($, 'Use your model?', r?.verdict === 'too few' ? ['Keep rules only'] : ['Use it', 'Keep rules only'])
     if (answer === 'Use it') await trainPost($, '/use', {})
     else if (answer === 'Keep rules only') await trainPost($, '/discard', {})
     else $.ui.log('signaller: the console still holds the choice under Teach auto.')
@@ -237,7 +253,7 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
     return { ok: true, text: [...lines, ...back.collisions.map(x => x.text)].join('\n') }
   } catch (err) {
     if (typed !== undefined) await giveBack($, `set ${c}`)
-    return { ok: false, text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
+    return { ok: false, text: down(err) }
   }
 }
 
@@ -249,7 +265,7 @@ const switchTo = async ($: EngineInterface, want: string): Promise<{ ok: boolean
     return { ok: true, text: label(l) }
   } catch (err) {
     show($)
-    return { ok: false, text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
+    return { ok: false, text: down(err) }
   }
 }
 
@@ -296,7 +312,11 @@ const trainHint = async ($: EngineInterface, l: Lever) => {
   }
   const show = (await hintState($)).show
   if (hintUsd === null) {
-    try { hintUsd = (await trainGet($)).projects.reduce((a, p) => a + (p.usd ?? 0), 0) } catch { /* down or still scanning: the band shows without the cost */ }
+    try {
+      const pr = (await trainGet($)).projects
+      // mid-scan rows have no usd yet: caching their 0 would freeze an under-quote; a later poll tries again
+      if (pr.every(p => p.usd !== null)) hintUsd = pr.reduce((a, p) => a + (p.usd ?? 0), 0)
+    } catch { /* down: the band shows without the cost */ }
   }
   const text = show
     ? `auto runs on rules only · /signaller train teaches it your habits${hintUsd ? ` (about ${usd(hintUsd)})` : ''} · /signaller train hide`
@@ -400,7 +420,7 @@ export const register: Register = on => {
         if (l) show($, l) // the status line picks the new name up now, not at the next turn
         return { text: n ? `this session is "${n}" in the console` : 'session name cleared' }
       } catch (err) {
-        return { text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
+        return { text: down(err) }
       }
     }
     const run = /^run(?:\s+(\S+))?$/i.exec(args) // before the settings form: a downstream named "run" can't be set from here
@@ -409,7 +429,7 @@ export const register: Register = on => {
       try {
         ps = (await lever($)).prompts ?? {}
       } catch (err) {
-        return { text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
+        return { text: down(err) }
       }
       const name = run[1]?.toLowerCase()
       if (!name || !Object.hasOwn(ps, name)) {
@@ -431,7 +451,7 @@ export const register: Register = on => {
         }
         return { text: await startTraining($, rest) }
       } catch (err) {
-        return { text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
+        return { text: down(err) }
       }
     }
     const f = parseForm(args)
