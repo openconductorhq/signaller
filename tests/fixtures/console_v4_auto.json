@@ -104,6 +104,7 @@
     "plan_dirs": [
       "notes/"
     ],
-    "threshold": 0.9
+    "threshold": 0.9,
+    "train_cap": 5.0
   }
 }

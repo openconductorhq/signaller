@@ -20,6 +20,7 @@ class AutoSettings:
     execution_skills: tuple = ("superpowers:subagent-driven-development", "superpowers:executing-plans")
     plan_dirs: tuple = ("docs/superpowers/specs/", "docs/superpowers/plans/", "/.claude/projects/", "/private/tmp/claude-", "/.superpowers/")
     threshold: float = 0.8
+    train_cap: float = 5.0  # auto.train_cap: the labelling cost cut-off, USD
 
 
 class BoundedDict(collections.OrderedDict):

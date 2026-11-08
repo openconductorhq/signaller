@@ -17,6 +17,7 @@ from typing import Iterable, Mapping
 from urllib.parse import urlsplit
 
 import autophase
+import autotrain
 import console
 import overrides  # after routing: overrides imports routing
 import presets
@@ -237,6 +238,7 @@ class App:
         self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
         self.started = time.time()
         self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
+        self.trainer = autotrain.Trainer(config_dir, self.sessions.dir)
         self.prices = Prices(config_dir)
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
 
@@ -409,6 +411,15 @@ class App:
         with self._auto_lock:
             got = self.auto_last.get(sid)
             return dict(got) if got else None
+
+    def use_trained_model(self) -> None:
+        """Install the job's fitted model without a restart: auto_model.json written atomically,
+        the live scorer swapped, the training folder (labels included) deleted. ValueError when
+        nothing finished."""
+        model = self.trainer.use()
+        write_json(os.path.join(self.config_dir, "auto_model.json"), model)
+        self.auto_model = autophase.Model(model["bias"], model["weights"])
+        self.trainer.reset()
 
     def set_session_lever(self, sid: str, lever: str | None) -> None:
         """One small entry per session that used /signaller; saved so a restart keeps it."""

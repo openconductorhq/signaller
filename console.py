@@ -333,6 +333,7 @@ def api(h, app, method, path, query, body):
         own = app.lever_for(sid)
         auto = app.auto_for(sid) if (own or app.routing.lever) == "auto" else None  # the phase auto last chose, while auto is its lever
         return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes, "auto": auto,
+                "trained": app.auto_model is not None,
                 "name": st.session_name(sid), "notice": app.notices.get(sid), "prompts": dict(app.routing.prompts)}
     m = re.fullmatch(r"/ui/api/sessions/([^/]+)", path)
     if m and method == "DELETE":  # the X on a session chip: its history goes; a live session starts again from zero
@@ -476,6 +477,45 @@ def api(h, app, method, path, query, body):
         if refs:
             raise in_use(m[1], refs)
         forget_models(app, [m[1]])
+        return {"ok": True}
+    if path == "/ui/api/train" and method == "GET":  # the training job: no prompt text ever comes back
+        app.trainer.start_scan()  # the first GET kicks the worker's project scan off; never blocks
+        return app.trainer.status(app.routing.auto.train_cap)
+    if path == "/ui/api/train/plan" and method == "POST":
+        body = body if isinstance(body, dict) else {}
+        try:
+            return app.trainer.plan(body.get("projects"), bool(body.get("cut")), app.routing.auto.train_cap)
+        except ValueError as e:
+            raise Err(400, str(e))
+    if path == "/ui/api/train/next" and method == "POST":  # the one endpoint that serves prompt text
+        body = body if isinstance(body, dict) else {}
+        n = body.get("n", 20)
+        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 50:
+            raise Err(400, "n must be an integer from 1 to 50")
+        try:
+            return app.trainer.next(n)
+        except ValueError as e:
+            raise Err(400, str(e))
+    if path == "/ui/api/train/labels" and method == "POST":
+        body = body if isinstance(body, dict) else {}
+        try:
+            return app.trainer.labels(body.get("labels"), body.get("failed"), body.get("usage"))
+        except ValueError as e:
+            raise Err(400, str(e))
+    if path == "/ui/api/train/finish" and method == "POST":
+        try:
+            app.trainer.finish(app.routing.auto)
+        except ValueError as e:
+            raise Err(400, str(e))
+        return app.trainer.status(app.routing.auto.train_cap)
+    if path == "/ui/api/train/use" and method == "POST":
+        try:
+            app.use_trained_model()
+        except ValueError as e:
+            raise Err(409, str(e))
+        return {"ok": True}
+    if path == "/ui/api/train/discard" and method == "POST":
+        app.trainer.reset()
         return {"ok": True}
     if path == "/ui/api/preview" and method == "POST":
         return preview(app, body)

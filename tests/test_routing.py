@@ -693,6 +693,16 @@ class AutoTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 config_from_json({**j, "auto": bad})
 
+    def test_auto_train_cap_roundtrip_and_bounds(self):
+        j = config_to_json(OFF)
+        self.assertEqual(j["auto"]["train_cap"], 5.0)  # the default, written out
+        self.assertEqual(config_from_json({**j, "auto": {k: v for k, v in j["auto"].items() if k != "train_cap"}}).auto.train_cap, 5.0)
+        j["auto"]["train_cap"] = 7.5
+        self.assertEqual(config_from_json(j).auto.train_cap, 7.5)
+        for bad in (0.4, 1001, "x", True, None):
+            with self.assertRaises(ValueError):
+                config_from_json({**j, "auto": {**j["auto"], "train_cap": bad}})
+
     def test_exec_track_falls_back(self):
         self.assertEqual(exec_track(replace(OFF, auto=AutoSettings(execution="valar"))), "valar")
         self.assertEqual(exec_track(replace(OFF, downstreams=())), "anthropic")

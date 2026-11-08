@@ -119,6 +119,16 @@ breaks.
   worktrees live there). The model (`auto_model.json`) is optional; a bad one gives a banner,
   not a failure. No datasets, labels or weights go in the repo; `tools/auto_train.py`
   is the only file that may need scikit-learn, and the router never imports it.
+- **The training job** (`autotrain.Trainer`, one per App) owns the scan, the
+  labelling batches and the fit on a single worker thread: no request thread
+  ever replays a transcript, and a GET answers while a scan runs. Item ids are
+  `<session>:<idx>`, so the labels in `<config>/training/labels.jsonl`
+  (0700 dir, 0600 file) survive a restart and a re-plan — a re-plan keeps the
+  ones whose ids still occur, and `use`/`discard` deletes the folder. The
+  cap is `auto.train_cap` (0.5–1000, default 5); the job block's `cut` is
+  `{"items", "usd"}` for the newest-sessions-under-cap option when the full
+  estimate exceeds it, else null. `use` installs the model without a restart
+  (`keys.write_json`, then the live `App.auto_model` swap).
 - **The body is rewritten only when something changes** (leading tags, a
   downstream's model name, Valar's tool fixes, or a downstream thinking block
   dropped from an Anthropic-bound request — any lever, the one rewrite
@@ -148,7 +158,10 @@ breaks.
   `grep -oE '^[A-Z_]+=' file`.
 - **What is never logged:** request bodies, prompts, headers or keys. A log
   line is `route= reason= model= status= ms= stream= [err=] shadow=` and nothing
-  more.
+  more. A transcript's prompt text has exactly one way out of the router:
+  `POST /ui/api/train/next`, to the labelling plugin. No GET response, log
+  line, config file or the labels file (`training/labels.jsonl` holds ids and
+  labels, never text) ever carries it.
 
 ## Code conventions
 

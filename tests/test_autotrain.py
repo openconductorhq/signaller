@@ -144,3 +144,28 @@ def test_evaluate_counts(tmp_path):
     assert r["model"]["planning_kept"] == 1 and r["model"]["execution_moved"] == 1
     assert r["planning"] == 1 and r["execution"] == 1
     assert r["verdict"] == "too few"  # one planning turn: too few to judge
+
+
+def test_trainer_cut_block(tmp_path):
+    # ruling A: job["cut"] is {"items", "usd"} for the newest-sessions-under-cap option when the
+    # full job would cost more than the cap, else null
+    claude = tmp_path / "claude"
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
+    d = claude / "projects" / "p"
+    d.mkdir(parents=True)
+    for sid, ts in (("old", "2026-11-08T10:00:00Z"), ("new", "2026-11-08T11:00:00Z")):
+        events = []
+        for t in range(3):
+            events += [user("please plan the design of module %d " % t + "x" * 6000, timestamp=ts), asst("m%d" % t)]
+        write_transcript(d, sid, events)
+    tr = autotrain.Trainer(str(cfg), str(claude))
+    newest = [i for i in autotrain.candidates("p", str(d / "new.jsonl"))]
+    job = tr.plan(["p"], False, 0.001)
+    assert job["items"] == 6 and job["usd_est"] > 0.001  # over the cap: the option is shown, not applied
+    assert job["cut"] == {"items": 3, "usd": round(autotrain.estimate_usd(newest), 4)}
+    job = tr.plan(["p"], True, 0.001)
+    assert job["cut"] == {"items": job["items"], "usd": job["usd_est"]}
+    assert job["items"] == 3 and job["usd_est"] <= 0.001
+    got = tr.next(50)
+    assert {x["id"].split(":")[0] for x in got["items"]} == {"new"}
