@@ -52,8 +52,8 @@ def test_candidates_idx_matches_replay(tmp_path):
     p = write_transcript(tmp_path, "s2", events)
     cs = autotrain.candidates("proj", p)
     assert [c.idx for c in cs] == [0, 1, 2] and cs[-1].id == "s2:2"
-    assert autotrain.turn_text(p, 2) == texts[2]
-    assert autotrain.turn_text(p, 9) is None
+    assert autophase.human_text(autotrain.turns_at(p, {2})[2][-1]) == texts[2]
+    assert autotrain.turns_at(p, {9}) == {}
 
 
 def test_projects_names_from_cwd(tmp_path):
@@ -85,7 +85,7 @@ def test_tool_still_runs():
     r = subprocess.run(
         [sys.executable, "-c",
          "import auto_train as t; "
-         "assert t.replay and t.follow_on and t.split and t._events and t._is_human and t.FOLLOW"],
+         "assert t.replay and t.follow_on and t.split and t.events"],
         env={**os.environ, "PYTHONPATH": os.path.join(root, "tools")},
         capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
@@ -159,12 +159,12 @@ def test_trainer_cut_block(tmp_path):
         for t in range(3):
             events += [user("please plan the design of module %d " % t + "x" * 6000, timestamp=ts), asst("m%d" % t)]
         write_transcript(d, sid, events)
-    tr = autotrain.Trainer(str(cfg), str(claude))
+    tr = autotrain.Trainer(str(cfg), str(claude), lambda: autophase.AutoSettings(train_cap=0.001))
     newest = [i for i in autotrain.candidates("p", str(d / "new.jsonl"))]
-    job = tr.plan(["p"], False, 0.001)
+    job = tr.plan(["p"], False)
     assert job["items"] == 6 and job["usd_est"] > 0.001  # over the cap: the option is shown, not applied
     assert job["cut"] == {"items": 3, "usd": round(autotrain.estimate_usd(newest), 4)}
-    job = tr.plan(["p"], True, 0.001)
+    job = tr.plan(["p"], True)
     assert job["cut"] == {"items": job["items"], "usd": job["usd_est"]}
     assert job["items"] == 3 and job["usd_est"] <= 0.001
     got = tr.next(50)

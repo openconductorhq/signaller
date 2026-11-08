@@ -120,7 +120,8 @@ breaks.
   not a failure. No datasets, labels or weights go in the repo; `tools/auto_train.py`
   is the only file that may need scikit-learn, and the router never imports it.
 - **The training job** (`autotrain.Trainer`, one per App) owns the scan, the
-  labelling batches and the fit on a single worker thread: no request thread
+  labelling batches and the fit on a single worker thread, created on the
+  first train call: no request thread
   ever replays a transcript, and a GET answers while a scan runs. Item ids are
   `<session>:<idx>`, so the labels in `<config>/training/labels.jsonl`
   (0700 dir, 0600 file) survive a restart and a re-plan — a re-plan keeps the

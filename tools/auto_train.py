@@ -22,14 +22,14 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import autophase  # noqa: E402
-from autotrain import FOLLOW, _events, _is_human, follow_on, replay, split  # noqa: E402
+from autotrain import events, follow_on, replay, split  # noqa: E402
 from keys import write_json  # noqa: E402
 
 
 def brief(path):
     """([first user message], its text) of a subagent/teammate transcript: the brief, before any reply."""
     msg = {"role": "user", "content": []}
-    for e in _events(path):
+    for e in events(path):
         if e.get("type") == "assistant":
             break
         if e.get("type") == "user" and isinstance(e.get("message"), dict):

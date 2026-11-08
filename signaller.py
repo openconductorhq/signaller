@@ -238,7 +238,7 @@ class App:
         self.recent = collections.deque(maxlen=200)  # (Features, Decision, request_id)
         self.started = time.time()
         self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
-        self.trainer = autotrain.Trainer(config_dir, self.sessions.dir)
+        self.trainer = autotrain.Trainer(config_dir, self.sessions.dir, lambda: self.routing.auto)
         self.prices = Prices(config_dir)
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
 
