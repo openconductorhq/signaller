@@ -212,7 +212,7 @@ node --check ui/app.js                 # the console has no unit tests; at least
 - **The `signaller_lever` tool:** it only switches when the user typed
   `/signaller <mode>`, and each one typed grants one switch, used in the order
   typed (a prompt with any `/signaller` step replaces the queue; one without, or
-  one that only quotes `/signaller run` or `name`, keeps it). The queue lives in
+  one that only quotes `/signaller run`, `name` or `train`, keeps it). The queue lives in
   the plugin's store under the session id, so a reload or restart keeps it.
   Subagents can't switch. The plugin's own refusal text quotes the command, so
   pasting it back grants nothing. Keep that gate.

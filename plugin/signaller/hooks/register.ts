@@ -4,10 +4,15 @@ const BASE = 'http://127.0.0.1:8787'
 const LEVER = `${BASE}/ui/api/lever`
 const NAME = `${BASE}/ui/api/name`
 const SETTINGS = `${BASE}/ui/api/settings`
+const TRAIN = `${BASE}/ui/api/train`
 let MODES = ['rules', 'auto', 'anthropic'] // until the router's list arrives: auto is a mode of the router itself
 const HEADERS = { origin: BASE, 'content-type': 'application/json' } // the console takes writes from its own origin only
 
-type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null; auto?: { phase: string; why: string } | null; prompts?: Record<string, string>; notice?: { turn: string; text: string } | null }
+type Lever = { lever: string; session: string | null; global: string; modes?: string[]; name?: string | null; auto?: { phase: string; why: string } | null; prompts?: Record<string, string>; notice?: { turn: string; text: string } | null; trained?: boolean }
+type TrainProject = { dir: string; name: string; sessions: number; prompts: number | null; usd: number | null }
+type TrainJob = { projects: string[]; items: number; labelled: number; failed: number; usd_est: number; usd_spent: number; cut: { items: number; usd: number } | null }
+type TrainResult = { rules: { planning_kept: number; execution_moved: number }; model: { planning_kept: number; execution_moved: number }; planning: number; execution: number; verdict: string } | null
+type TrainStatus = { state: string; projects: TrainProject[]; job: TrainJob | null; result: TrainResult; error: string | null }
 type Line = { downstream: string; tier: string | null; set: string; value: string }
 type Form = { ds: string; tier: string | null; key: 'window' | 'model'; value: string } | { ds: string; reset: true }
 
@@ -48,6 +53,110 @@ const parseForm = (s: string): Form | null => {
 const canon = (f: Form): string => ('reset' in f ? `${f.ds} reset` : `${f.ds} ${f.tier ?? '*'} ${f.key} ${f.value}`)
 const downstreams = () => MODES.filter(m => m !== 'rules' && m !== 'auto' && m !== 'anthropic')
 
+// --- teaching auto: the router builds and fits, the plugin labels with haiku and shows the result ---
+
+const usd = (v: number) => `$${!v ? '0' : v < 0.1 ? v.toFixed(3) : v.toFixed(2)}`
+const trainGet = async ($: EngineInterface): Promise<TrainStatus> => {
+  const r = await $.http.fetch(TRAIN, { headers: HEADERS })
+  if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
+  return JSON.parse(r.text)
+}
+const trainPost = async ($: EngineInterface, path: string, body: unknown): Promise<unknown> => {
+  const r = await $.http.fetch(`${TRAIN}${path}`, { method: 'POST', headers: HEADERS, body: JSON.stringify(body) })
+  if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
+  return JSON.parse(r.text)
+}
+// the person's own definition, verbatim, plus the one-word rule; nothing a model reads ever says "/signaller"
+const LABEL_SYSTEM = "anything which isn't brainstorming, speccing or planning is execution\nAnswer with one word: planning or execution."
+// lenient parse: the lowercased reply must hold exactly one of the two words ("Planning." parses; both words,
+// a sentence, or no answer at all is a failure, posted as failed and never stored as a label)
+const labelOf = (text: string): 'planning' | 'execution' | null => {
+  const t = text.toLowerCase()
+  const p = t.includes('planning'), e = t.includes('execution')
+  return p === e ? null : p ? 'planning' : 'execution'
+}
+const ask = async ($: EngineInterface, question: string, options: readonly string[], multi?: true): Promise<string> => {
+  try {
+    return await $.ui.ask(question, { options, header: 'train', ...(multi ? { multiSelect: true } : {}) })
+  } catch {
+    return '' // dismissed: as good as cancel
+  }
+}
+// which projects: up to the 4 with the most prompts, multi-select; free text under Other names project dirs
+const pickDirs = async ($: EngineInterface, ps: TrainProject[]): Promise<string[] | null> => {
+  const top = [...ps].sort((a, b) => (b.prompts ?? 0) - (a.prompts ?? 0)).slice(0, 4)
+  const option = (p: TrainProject) => `${p.name} · ${p.prompts} prompts · ${usd(p.usd ?? 0)}`
+  const answer = await ask($, 'Which projects should auto learn from?', top.map(option), true)
+  if (!answer) return null
+  const dirs: string[] = []
+  for (const part of answer.split(/,\s*/)) {
+    const p = top.find(x => option(x) === part)
+    if (p) dirs.push(p.dir)
+    else dirs.push(...part.split(/\s+/).filter(Boolean)) // Other: free text project dirs
+  }
+  return dirs.length ? dirs : null
+}
+// one confirm, then the loop runs unattended; the command returns at once with what started
+const startTraining = async ($: EngineInterface, rest: string): Promise<string> => {
+  const ps = (await trainGet($)).projects
+  let dirs = rest ? rest.split(/\s+/).filter(Boolean) : null
+  if (!dirs) {
+    if (!ps.length) return 'no projects found yet; the console lists them once you have sessions'
+    if (ps.some(p => p.prompts === null)) return 'the router is still scanning your projects — try again in a moment'
+    dirs = await pickDirs($, ps)
+    if (!dirs) return 'no projects picked'
+  }
+  let job = (await trainPost($, '/plan', { projects: dirs, cut: false })) as TrainJob
+  if (!job.items) return `no unlabelled prompts in ${dirs.join(', ')}`
+  const options = ['Label all', ...(job.cut ? [`Newest only (about ${usd(job.cut.usd)})`] : []), 'Cancel']
+  const answer = await ask($, `Label ${job.items} prompts (about ${usd(job.usd_est)})?`, options)
+  if (answer !== 'Label all' && !answer.startsWith('Newest only')) return 'cancelled'
+  if (answer.startsWith('Newest only')) job = (await trainPost($, '/plan', { projects: dirs, cut: true })) as TrainJob
+  trainLoop($).catch(err => $.ui.log(`⚠ signaller: training stopped: ${(err as Error).message}`))
+  return `labelling ${job.items} prompts…`
+}
+// batches of 20, 4 at a time, each prompt to haiku on its own; then the router fits and evaluates
+const trainLoop = async ($: EngineInterface): Promise<void> => {
+  for (;;) {
+    const { items } = (await trainPost($, '/next', { n: 20 })) as { items: { id: string; text: string }[] }
+    if (!items?.length) break
+    const labels: { id: string; label: string }[] = [], failed: string[] = []
+    const usage = { input_tokens: 0, output_tokens: 0 }
+    for (let i = 0; i < items.length; i += 4) {
+      const chunk = items.slice(i, i + 4)
+      const got = await Promise.all(chunk.map(async it => {
+        const r = await $.model.complete({ model: 'haiku', system: LABEL_SYSTEM, prompt: it.text, maxTokens: 5 })
+        usage.input_tokens += r.usage.input_tokens
+        usage.output_tokens += r.usage.output_tokens
+        return r.isAnswered ? labelOf(r.text) : null
+      }))
+      got.forEach((l, j) => (l ? labels.push({ id: chunk[j]!.id, label: l }) : failed.push(chunk[j]!.id)))
+    }
+    const job = (await trainPost($, '/labels', { labels, failed, usage })) as TrainJob
+    $.ui.status(`training auto · ${job.labelled}/${job.items}`)
+  }
+  await trainPost($, '/finish', {})
+  let st: TrainStatus
+  for (;;) { // the fit runs on the router's worker; poll until it lands
+    st = await trainGet($)
+    if (st.state === 'done' || st.state === 'failed') break
+    await $.clock.sleep(2000)
+  }
+  $.ui.status(undefined)
+  if (st.state === 'failed') {
+    $.ui.log(`⚠ signaller: training failed: ${st.error ?? 'unknown error'}`)
+    return
+  }
+  const r = st.result
+  $.ui.log(r?.verdict === 'too few'
+    ? 'signaller: not enough planning prompts to judge your habits yet; label more with the same command'
+    : `signaller: Your model keeps ${r!.model.planning_kept} of ${r!.planning} planning turns on Anthropic (rules alone: ${r!.rules.planning_kept}); moves ${r!.model.execution_moved} of ${r!.execution} execution turns.`)
+  const answer = await ask($, 'Use your model?', r?.verdict === 'better' ? ['Use it', 'Keep rules only'] : ['Keep rules only', 'Use it'])
+  if (answer === 'Use it') await trainPost($, '/use', {})
+  else if (answer === 'Keep rules only') await trainPost($, '/discard', {})
+  else $.ui.log('signaller: the console still holds the choice under Teach auto.')
+}
+
 // Claude may switch the lever or change settings only on the person's say-so. The "/signaller <mode>" and
 // settings forms a prompt carries become the queue of allowed steps, in the order typed: each call must match
 // the next one and uses it up (a plan's "anthropic, rules, anthropic, rules" runs only in that order). A later
@@ -69,9 +178,10 @@ const save = async ($: EngineInterface, q: string[]) => {
   const k = await qkey($)
   await (q.length ? $.store.set(k, q) : $.store.delete(k))
 }
-// "/signaller run …" and "/signaller name …" are commands, not steps: quoting one in a prompt keeps the queue
-// (run/name are exempt unless a word continues: "runner" or "namext" are levers, "run," or "name (above)" aren't)
-const GRANT = /(?:^|\s)\/signaller\s+(?!(?:run|name)(?![a-z0-9_-]))([a-z0-9_-]+)/gi
+// "/signaller run …", "/signaller name …" and "/signaller train …" are commands, not steps: quoting one in a
+// prompt keeps the queue (run/name/train are exempt unless a word continues: "runner" or "trainer" are levers,
+// "run," or "train (above)" aren't)
+const GRANT = /(?:^|\s)\/signaller\s+(?!(?:run|name|train)(?![a-z0-9_-]))([a-z0-9_-]+)/gi
 const GRANT_SETTINGS = new RegExp(`(?:^|\\s)\\/signaller\\s+${TAIL}`, 'gi') // the same form, as typed in a prompt
 // "/signaller <downstream> reset…" with more than the word "reset" there is a settings attempt that grants nothing
 const RESETISH = /(?:^|\s)\/signaller\s+[a-z0-9_-]+(?:\s+(?:fable|opus|sonnet|haiku))?\s+reset[a-z0-9_-]*/gi
@@ -154,7 +264,42 @@ const warn = ($: EngineInterface, l: Lever) => {
   }
   seen = n ? n.turn : null
 }
-const poll = ($: EngineInterface) => { lever($).then(l => (show($, l), warn($, l)), () => show($)) }
+// the band while auto runs on rules alone: at most the first 3 sessions ever seen on auto-untrained, off for
+// everyone once dismissed ("/signaller train hide"), gone the moment a model is in use.
+let hint: string | null = null
+let hintUsd: number | null = null // the rough labelling cost, once a GET has said it; null while unknown
+const HINT_KEY = 'trainHint'
+const hintState = ($: EngineInterface): Promise<{ sessions: string[]; hidden: boolean }> => serial(async () => {
+  const sid = await $.session.id()
+  const v = (await $.store.get(HINT_KEY)) as { sessions?: unknown; hidden?: unknown } | undefined
+  const s = { sessions: Array.isArray(v?.sessions) ? v!.sessions as string[] : [], hidden: v?.hidden === true }
+  if (!s.hidden && s.sessions.length < 3 && !s.sessions.includes(sid)) {
+    s.sessions.push(sid)
+    await $.store.set(HINT_KEY, s)
+  }
+  return s
+})
+const trainHint = async ($: EngineInterface, l: Lever) => {
+  if (l.lever !== 'auto' || l.trained) {
+    if (hint !== null) { hint = null; $.ui.invalidate('ui.render') }
+    return
+  }
+  const s = await hintState($)
+  if (hintUsd === null) {
+    try { hintUsd = (await trainGet($)).projects.reduce((a, p) => a + (p.usd ?? 0), 0) } catch { /* down or still scanning: the band shows without the cost */ }
+  }
+  const text = s.hidden || !s.sessions.includes(await $.session.id()) ? null
+    : `auto runs on rules only · /signaller train teaches it your habits${hintUsd ? ` (about ${usd(hintUsd)})` : ''} · /signaller train hide`
+  if (text !== hint) { hint = text; $.ui.invalidate('ui.render') }
+}
+const hideHint = async ($: EngineInterface) => {
+  await serial(async () => {
+    const v = (await $.store.get(HINT_KEY)) as { sessions?: unknown } | undefined
+    await $.store.set(HINT_KEY, { sessions: Array.isArray(v?.sessions) ? v!.sessions as string[] : [], hidden: true })
+  })
+  if (hint !== null) { hint = null; $.ui.invalidate('ui.render') }
+}
+const poll = ($: EngineInterface) => { lever($).then(l => (show($, l), warn($, l), trainHint($, l).catch(() => undefined)), () => show($)) }
 const show = ($: EngineInterface, l?: Lever) => $.ui.status(l ? label(l) : 'down')
 
 export const register: Register = on => {
@@ -163,8 +308,9 @@ export const register: Register = on => {
       name: 'signaller',
       description:
         "Show or switch this session's signaller mode; reset goes back to the global one; " +
-        '<downstream> [<tier>] window|model <value> sets this session’s settings line, <downstream> reset clears them; name <text> labels it in the console',
-      argumentHint: '[mode|reset|name <text>|<downstream> [tier] window|model <value>]',
+        '<downstream> [<tier>] window|model <value> sets this session’s settings line, <downstream> reset clears them; name <text> labels it in the console; ' +
+        'train [projects|hide] teaches auto your habits (labels your prompts with Haiku, asks once first; hide drops the hint band)',
+      argumentHint: '[mode|reset|name <text>|train [projects|hide]|<downstream> [tier] window|model <value>]',
       immediate: true,
     })
     // the same switch for Claude itself: mcp__signaller__signaller_lever
@@ -227,11 +373,14 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // the pending image fallback above the prompt; a survey owns the band, so yield to one
+  // the pending image fallback above the prompt, or the untrained-auto hint; a survey owns the band, and the
+  // fallback wins when both apply
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => {
-    if (band === null || e.props.hasSurvey) return next(e)
+    if (e.props.hasSurvey) return next(e)
+    const text = band ?? hint
+    if (text === null) return next(e)
     const { Text } = $.ui.resolve(e)
-    return h(Text, { color: 'warning' }, `⚠ signaller: ${band}`)
+    return h(Text, { color: 'warning' }, `⚠ signaller: ${text}`)
   })
 
   on('command.run', { command: 'signaller' }, async ($, e) => {
@@ -263,6 +412,19 @@ export const register: Register = on => {
       // /signaller steps are theirs (a command can't submit a prompt anyway: it holds the turn)
       const { isFilled } = await $.prompt.fill({ text: ps[name]! })
       return { text: isFilled ? `"${name}" is in the prompt box: press Enter to send it` : ps[name]! }
+    }
+    const train = /^train(\s|$)/i.exec(args) // before the settings form, like run
+    if (train) {
+      const rest = args.slice(5).trim()
+      try {
+        if (/^hide(\s|$)/i.test(rest)) {
+          await hideHint($)
+          return { text: 'the training hint is off' }
+        }
+        return { text: await startTraining($, rest) }
+      } catch (err) {
+        return { text: `signaller isn't reachable at ${BASE}: ${(err as Error).message}` }
+      }
     }
     const f = parseForm(args)
     if (f) return { text: (await setSettings($, f)).text }
