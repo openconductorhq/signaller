@@ -1,5 +1,5 @@
 {
   "name": "signaller",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "/signaller switches Signaller between rules, auto, Anthropic and the router's downstreams for this session; /signaller <downstream> [tier] window|model <value> sets this session's settings line, /signaller <downstream> reset clears it; /signaller name labels the session in the console; /signaller run <name> fills the prompt box with a prompt saved in the console; Claude can switch and set both too (signaller_lever tool), gated by the typed commands, in order, main agent only; the status line shows the mode; /signaller train [projects] teaches auto this person's habits (labels their prompts with Haiku, asks once about the cost, then trains and offers the model); /signaller train hide drops the hint band shown while auto runs on rules alone."
 }

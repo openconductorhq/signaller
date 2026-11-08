@@ -16,14 +16,21 @@ type TrainStatus = { state: string; projects: TrainProject[]; job: TrainJob | nu
 type Line = { downstream: string; tier: string | null; set: string; value: string }
 type Form = { ds: string; tier: string | null; key: 'window' | 'model'; value: string } | { ds: string; reset: true }
 
+// every router call in one place: the fetch, the ok check and the JSON parse
+const call = async ($: EngineInterface, url: string, init?: { method: string; body: unknown }): Promise<any> => {
+  const r = await $.http.fetch(url, init
+    ? { ...init, headers: HEADERS, body: JSON.stringify(init.body) }
+    : { headers: HEADERS })
+  if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
+  return JSON.parse(r.text)
+}
+
 // this session's lever: its own if /signaller set one, else the router's global one
 const lever = async ($: EngineInterface, set?: { lever: string | null }): Promise<Lever> => {
   const session = await $.session.id()
-  const r = set
-    ? await $.http.fetch(LEVER, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ session, ...set }) })
-    : await $.http.fetch(`${LEVER}?session=${encodeURIComponent(session)}`)
-  if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
-  const l: Lever = JSON.parse(r.text)
+  const l = await (set
+    ? call($, LEVER, { method: 'PUT', body: { session, ...set } })
+    : call($, `${LEVER}?session=${encodeURIComponent(session)}`)) as Lever
   if (Array.isArray(l.modes) && l.modes.length) MODES = l.modes
   return l
 }
@@ -31,9 +38,7 @@ const lever = async ($: EngineInterface, set?: { lever: string | null }): Promis
 // what the router console calls this session; empty clears it
 const rename = async ($: EngineInterface, name: string): Promise<string | null> => {
   const session = await $.session.id()
-  const r = await $.http.fetch(NAME, { method: 'PUT', headers: HEADERS, body: JSON.stringify({ session, name }) })
-  if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
-  return JSON.parse(r.text).name
+  return (await call($, NAME, { method: 'PUT', body: { session, name } })).name
 }
 
 // a settings form: "<downstream> [<tier>] window|model <value>", or "<downstream> reset". Downstream,
@@ -55,17 +60,10 @@ const downstreams = () => MODES.filter(m => m !== 'rules' && m !== 'auto' && m !
 
 // --- teaching auto: the router builds and fits, the plugin labels with haiku and shows the result ---
 
-const usd = (v: number) => `$${!v ? '0' : v < 0.1 ? v.toFixed(3) : v.toFixed(2)}`
-const trainGet = async ($: EngineInterface): Promise<TrainStatus> => {
-  const r = await $.http.fetch(TRAIN, { headers: HEADERS })
-  if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
-  return JSON.parse(r.text)
-}
-const trainPost = async ($: EngineInterface, path: string, body: unknown): Promise<unknown> => {
-  const r = await $.http.fetch(`${TRAIN}${path}`, { method: 'POST', headers: HEADERS, body: JSON.stringify(body) })
-  if (!r.ok) throw new Error(`the router answered ${r.status}: ${r.text.slice(0, 200)}`)
-  return JSON.parse(r.text)
-}
+const usd = (v: number) => `$${!v ? '0' : v < 0.1 ? v.toFixed(3) : v.toFixed(2)}`  // keep in step with ui/app.js's usd
+const trainGet = async ($: EngineInterface): Promise<TrainStatus> => await call($, TRAIN)
+const trainPost = async ($: EngineInterface, path: string, body: unknown): Promise<unknown> =>
+  await call($, `${TRAIN}${path}`, { method: 'POST', body })
 // the person's own definition, verbatim, plus the one-word rule; nothing a model reads ever says "/signaller"
 const LABEL_SYSTEM = "anything which isn't brainstorming, speccing or planning is execution\nAnswer with one word: planning or execution."
 // lenient parse: the lowercased reply must hold exactly one of the two words ("Planning." parses; both words,
@@ -86,12 +84,13 @@ const ask = async ($: EngineInterface, question: string, options: readonly strin
 const pickDirs = async ($: EngineInterface, ps: TrainProject[]): Promise<string[] | null> => {
   const top = [...ps].sort((a, b) => (b.prompts ?? 0) - (a.prompts ?? 0)).slice(0, 4)
   const option = (p: TrainProject) => `${p.name} · ${p.prompts} prompts · ${usd(p.usd ?? 0)}`
-  const answer = await ask($, 'Which projects should auto learn from?', top.map(option), true)
+  const byOption = new Map(top.map(p => [option(p), p.dir]))  // option label -> dir, not re-rendered per part
+  const answer = await ask($, 'Which projects should auto learn from?', [...byOption.keys()], true)
   if (!answer) return null
   const dirs: string[] = []
   for (const part of answer.split(/,\s*/)) {
-    const p = top.find(x => option(x) === part)
-    if (p) dirs.push(p.dir)
+    const d = byOption.get(part)
+    if (d) dirs.push(d)
     else dirs.push(...part.split(/\s+/).filter(Boolean)) // Other: free text project dirs
   }
   return dirs.length ? dirs : null
@@ -150,7 +149,6 @@ const trainLoop = async ($: EngineInterface): Promise<void> => {
       if (st.state === 'done' || st.state === 'failed') break
       await $.clock.sleep(2000)
     }
-    $.ui.status(undefined)
     if (st.state === 'failed') {
       $.ui.log(`⚠ signaller: training failed: ${st.error ?? 'unknown error'}`)
       return
@@ -165,6 +163,7 @@ const trainLoop = async ($: EngineInterface): Promise<void> => {
     else $.ui.log('signaller: the console still holds the choice under Teach auto.')
   } finally {
     training = null
+    $.ui.status(undefined)  // also on a throw: the "training auto" line never outlives the loop
   }
 }
 
@@ -232,12 +231,7 @@ const setSettings = async ($: EngineInterface, f: Form, typed?: string): Promise
     ? { session, downstream: f.ds, reset: true }
     : { session, downstream: f.ds, tier: f.tier, set: f.key, value: f.value }
   try {
-    const r = await $.http.fetch(SETTINGS, { method: 'PUT', headers: HEADERS, body: JSON.stringify(body) })
-    if (!r.ok) {
-      if (typed !== undefined) await giveBack($, `set ${c}`)
-      return { ok: false, text: `signaller answered ${r.status}: ${r.text.slice(0, 200)}` }
-    }
-    const back = JSON.parse(r.text) as { lines: Line[]; collisions: { text: string }[] }
+    const back = await call($, SETTINGS, { method: 'PUT', body }) as { lines: Line[]; collisions: { text: string }[] }
     if ('reset' in f) return { ok: true, text: `this session's ${f.ds} settings cleared` }
     const lines = back.lines.map(l => `${l.downstream} ${l.set} ${l.value} for this session${l.tier ? ` (${l.tier})` : ''}`)
     return { ok: true, text: [...lines, ...back.collisions.map(x => x.text)].join('\n') }
@@ -280,34 +274,37 @@ const warn = ($: EngineInterface, l: Lever) => {
 let hint: string | null = null
 let hintUsd: number | null = null // the rough labelling cost, once a GET has said it; null while unknown
 const HINT_KEY = 'trainHint'
-const hintState = ($: EngineInterface): Promise<{ sessions: string[]; hidden: boolean }> => serial(async () => {
-  const sid = await $.session.id()
+const readHint = async ($: EngineInterface): Promise<{ sessions: string[]; hidden: boolean }> => {
   const v = (await $.store.get(HINT_KEY)) as { sessions?: unknown; hidden?: unknown } | undefined
-  const s = { sessions: Array.isArray(v?.sessions) ? v!.sessions as string[] : [], hidden: v?.hidden === true }
+  return { sessions: Array.isArray(v?.sessions) ? v!.sessions as string[] : [], hidden: v?.hidden === true }
+}
+const writeHint = ($: EngineInterface, s: { sessions: string[]; hidden: boolean }) => $.store.set(HINT_KEY, s)
+// show: this session counts among the first 3 auto sessions ever seen, and the hint isn't hidden
+const hintState = ($: EngineInterface): Promise<{ show: boolean }> => serial(async () => {
+  const sid = await $.session.id()
+  const s = await readHint($)
   if (!s.hidden && s.sessions.length < 3 && !s.sessions.includes(sid)) {
     s.sessions.push(sid)
-    await $.store.set(HINT_KEY, s)
+    await writeHint($, s)
   }
-  return s
+  return { show: !s.hidden && s.sessions.includes(sid) }
 })
 const trainHint = async ($: EngineInterface, l: Lever) => {
   if (l.lever !== 'auto' || l.trained) {
     if (hint !== null) { hint = null; $.ui.invalidate('ui.render') }
     return
   }
-  const s = await hintState($)
+  const show = (await hintState($)).show
   if (hintUsd === null) {
     try { hintUsd = (await trainGet($)).projects.reduce((a, p) => a + (p.usd ?? 0), 0) } catch { /* down or still scanning: the band shows without the cost */ }
   }
-  const text = s.hidden || !s.sessions.includes(await $.session.id()) ? null
-    : `auto runs on rules only · /signaller train teaches it your habits${hintUsd ? ` (about ${usd(hintUsd)})` : ''} · /signaller train hide`
+  const text = show
+    ? `auto runs on rules only · /signaller train teaches it your habits${hintUsd ? ` (about ${usd(hintUsd)})` : ''} · /signaller train hide`
+    : null
   if (text !== hint) { hint = text; $.ui.invalidate('ui.render') }
 }
 const hideHint = async ($: EngineInterface) => {
-  await serial(async () => {
-    const v = (await $.store.get(HINT_KEY)) as { sessions?: unknown } | undefined
-    await $.store.set(HINT_KEY, { sessions: Array.isArray(v?.sessions) ? v!.sessions as string[] : [], hidden: true })
-  })
+  await serial(async () => { await writeHint($, { ...(await readHint($)), hidden: true }) })
   if (hint !== null) { hint = null; $.ui.invalidate('ui.render') }
 }
 const poll = ($: EngineInterface) => { lever($).then(l => (show($, l), warn($, l), trainHint($, l).catch(() => undefined)), () => show($)) }
