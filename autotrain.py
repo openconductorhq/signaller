@@ -5,6 +5,7 @@ replay and candidate logic without pulling in scikit-learn (which only the tool 
 Reads transcripts from the paths it is given; never touches the live router.
 """
 import json
+import math
 import os
 import random
 import re
@@ -12,9 +13,15 @@ from dataclasses import dataclass
 from typing import Iterator, Optional
 
 import autophase
+import prices
 import routing
 
 LABEL_CHARS = 6000  # text sent per labelling prompt; caps cost
+PROMPT_TOKENS = 300  # around the text: the labelling prompt's own instructions
+OUT_TOKENS = 5  # the label is one word
+FIT_EPOCHS = 200
+FIT_LR = 0.5
+FIT_L2 = 1e-4
 
 FOLLOW = re.compile(r"^\W*(go|go ahead|ok|okay|yes|yep|yeah|y|no|nope|n|sure|approved?|lgtm|do it|proceed|continue|"
                     r"done|looks (good|great|right)|sounds (good|right)|agree|both|[a-d1-9])\b[\s\S]{0,40}$", re.I)
@@ -136,6 +143,92 @@ def turn_text(path: str, idx: int) -> Optional[str]:
         if i == idx:
             return autophase.human_text(msgs[-1])
     return None
+
+
+# --- cost, fit and held-out evaluation ---
+
+def estimate_usd(items: list) -> float:
+    """Haiku cost of labelling these items: chars/4 tokens of text plus the prompt, one short answer each."""
+    r = prices.DEFAULT_ANTHROPIC["haiku"]
+    return sum((i.chars / 4 + PROMPT_TOKENS) * r["in"] + OUT_TOKENS * r["out"] for i in items) / 1e6
+
+
+def cut(items: list, cap_usd: float) -> list:
+    """The newest whole sessions (a session's newest ts) that together fit under the cap; [] if none fit."""
+    by = {}
+    for i in items:
+        by.setdefault(i.session, []).append(i)
+    sessions = sorted(by, key=lambda s: max(i.ts for i in by[s]), reverse=True)
+    out, spent = [], 0.0
+    for s in sessions:
+        c = estimate_usd(by[s])
+        if spent + c > cap_usd:
+            break
+        spent += c
+        out += by[s]
+    return out
+
+
+def fit(rows: list) -> dict:
+    """Stdlib logistic regression over autophase.features: class-balanced, L2, full-batch gradient descent with fixed
+    epochs, so no tuning surface. Returns the dict autophase.Model loads (top 5000 weights by |w|, zeros dropped)."""
+    # ponytail: rows x epochs in pure Python, no numpy — minutes at 10^5 rows; bigger sets belong to the scikit-learn tool
+    n = len(rows)
+    if not n:
+        return {"format": autophase.FORMAT, "bias": 0.0, "weights": {}}
+    n_plan = sum(1 for r in rows if r["label"] == "planning")
+    n_exec = n - n_plan
+    # balanced, as class_weight="balanced" in tools/auto_train.py: a missing class simply gets no weight
+    cw = {"planning": n / (2 * n_plan) if n_plan else 0.0,
+          "execution": n / (2 * n_exec) if n_exec else 0.0}
+    data = [(autophase.features(r["text"]), 1.0 if r["label"] == "planning" else 0.0, cw[r["label"]]) for r in rows]
+    w, bias = {}, 0.0
+    for _ in range(FIT_EPOCHS):
+        gb, g = 0.0, {}
+        for fs, y, c in data:
+            z = bias + sum(w.get(f, 0.0) for f in fs)
+            e = c * ((1 / (1 + math.exp(-max(-60.0, min(60.0, z))))) - y)
+            gb += e
+            for f in fs:
+                g[f] = g.get(f, 0.0) + e
+        bias -= FIT_LR * gb / n
+        for f, v in g.items():
+            w[f] = w.get(f, 0.0) - FIT_LR * (v / n + FIT_L2 * w.get(f, 0.0))
+    keep = sorted(w, key=lambda f: -abs(w[f]))[:5000]
+    return {"format": autophase.FORMAT, "bias": round(bias, 6),
+            "weights": {f: round(w[f], 6) for f in keep if w[f]}}
+
+
+def evaluate(rows: list, paths: dict, model: dict, s: autophase.AutoSettings) -> dict:
+    """Held-out check: replay each session once, decide every labelled turn with the rules alone and with the model,
+    and count planning turns kept and execution turns moved (sent anywhere but planning). Verdict "too few" per the
+    plan's Global Constraints (fewer than 30 planning labels in all, or fewer than 5 in the held-out sessions)."""
+    m = autophase.Model(model["bias"], model["weights"])
+    turns = {}
+    for sess in sorted({r["session"] for r in rows if r["session"] in paths}):
+        turns[sess] = {i: msgs for i, (msgs, _) in enumerate(replay(paths[sess]))}
+    out = {}
+    for who, dec in (("rules", None), ("model", m.score)):
+        kept = moved = 0
+        for r in rows:
+            msgs = turns.get(r["session"], {}).get(r["idx"])
+            if msgs is None:
+                continue
+            d = autophase.phase(msgs, s, dec)[0]
+            if r["label"] == "planning":
+                kept += d == "planning"
+            elif r["label"] == "execution":
+                moved += d != "planning"
+        out[who] = {"planning_kept": kept, "execution_moved": moved}
+    planning = sum(1 for r in rows if r["session"] in paths and r["label"] == "planning")
+    execution = sum(1 for r in rows if r["session"] in paths and r["label"] == "execution")
+    total_plan = sum(1 for r in rows if r["label"] == "planning")
+    gain = out["model"]["planning_kept"] - out["rules"]["planning_kept"]
+    verdict = "too few" if total_plan < 30 or planning < 5 else (
+        "better" if gain > 0
+        and out["rules"]["execution_moved"] - out["model"]["execution_moved"] <= gain else "no better")
+    out.update({"planning": planning, "execution": execution, "verdict": verdict})
+    return out
 
 
 # --- project listing ---
