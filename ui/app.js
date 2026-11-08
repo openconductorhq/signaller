@@ -490,26 +490,36 @@ function renderTrainProgress(st) {
   $("trainCard").replaceChildren(...trainHead(),
     st.state === "training"
       ? el("p", { class: "hint" }, "Labelling finished — fitting the model and checking it against the sessions held out…")
-      : el("p", { class: "hint" }, `Labelling your prompts with Haiku: ${j.labelled} of ${j.items} prompts done.`),
+      : el("p", { class: "hint" }, `Labelling your prompts with Haiku: ${j.labelled} of ${j.items} prompts done, about ${usd(j.usd_remaining)} to go.`),
     el("div", { class: "tbar", role: "progressbar", "aria-valuemin": "0", "aria-valuemax": String(j ? j.items : 0), "aria-valuenow": String(j ? j.labelled : 0) },
       el("div", { class: "tfill", style: "--w:" + pct + "%" })),
-    j && el("p", { class: "hint" }, `About ${usd(j.usd_spent)} spent so far.`));
+    j && el("p", { class: "hint" }, `About ${usd(j.usd_spent)} spent so far.`),
+    el("button", { type: "button", class: "btn", onclick: trainAct("discard", {}) }, "Discard"));
 }
 
-// one body for Try again / Use it / Keep rules only: post, drop the plan signature, reload
-const trainAct = (path, body) => async () => {
+// one body for Try again / Use it / Keep rules only / Discard: post, drop the plan signature, reload
+const trainPost = async (path, body) => {
   try {
     await api("POST", "train/" + path, body);
     trainSig = "";
     await loadTrain();
   } catch (_) { /* the card shows what the next poll says */ }
 };
+const trainAct = (path, body) => async () => { await trainPost(path, body); };
+
+// the job as it is at click time, not render time: fully labelled (or all failed) goes straight to the fit;
+// anything else re-plans with the job's own projects and its cut choice
+const trainAgain = async () => {
+  const j = trainSt && trainSt.job;
+  if (!j) return;
+  await trainPost(j.remaining === 0 ? "finish" : "plan",
+                  j.remaining === 0 ? {} : { projects: j.projects, cut: j.cut_applied });
+};
 
 function renderTrainFailed(st) {
   $("trainCard").replaceChildren(...trainHead(),
     el("p", { class: "err" }, "Training failed: " + (st.error || "unknown error")),
-    el("button", { type: "button", class: "btn", onclick: trainAct("plan", { projects: trainSt.job.projects, cut: false }),
-      disabled: !st.job }, "Try again"));
+    el("button", { type: "button", class: "btn", onclick: trainAgain, disabled: !st.job }, "Try again"));
 }
 
 function renderTrainDone(st) {
