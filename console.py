@@ -10,6 +10,7 @@ from dataclasses import asdict, replace
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from keys import write_json
+import autotrain
 from prices import parse_valar
 import overrides
 import presets
@@ -257,9 +258,11 @@ def state(app, query=None):
 
 
 def train(fn, *a, code=400):
-    """The train endpoints' one shape: a ValueError from the job answers 400 (409 for use)."""
+    """The train endpoints' one shape: a ValueError from the job answers 400, a Conflict 409 (use is 409 too)."""
     try:
         return fn(*a)
+    except autotrain.Conflict as e:
+        raise Err(409, str(e))
     except ValueError as e:
         raise Err(code, str(e))
 

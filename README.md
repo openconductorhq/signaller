@@ -360,12 +360,15 @@ planning or execution? — then fits the scorer on 80% of the sessions and
 checks it on the other 20%: how many of your planning turns it keeps on
 Anthropic, against the phase rules alone. **Use it** installs the model
 without a restart (it writes `auto_model.json` and the router picks it up at
-once); **Keep rules only** drops it.
+once; it's offered only when the held-out check had enough planning turns to
+judge); **Keep rules only** drops it.
 
 - **Cost:** a few tenths of a cent per prompt at Haiku's rates. The job stops
-  offering everything when the estimate passes the cut-off — the `train cap`
-  field in the card (`auto.train_cap`, default $5) — and offers the newest
-  sessions under it instead. What you spent so far shows while it runs.
+  offering everything when the estimate of what's still unlabelled passes the
+  cut-off — the `train cap`
+  field in the card (`auto.train_cap`, default $5`) — and offers the newest
+  sessions under it instead (prompts already labelled never count toward it).
+  What you spent so far shows while it runs.
 - **Where labels live:** `<config>/training/labels.jsonl` (prompt ids and
   their labels, never the text; the folder is 0700 and the file 0600). A
   restart, a re-plan or a router crash resumes from them instead of paying
@@ -374,7 +377,11 @@ once); **Keep rules only** drops it.
 - **Privacy:** the labelling sends each prompt's text to Haiku and nowhere
   else. It is never written to the labels file, the config, a log line or any
   other API answer; `POST /ui/api/train/next` (loopback, like every
-  console write) is the only endpoint that serves it. In Docker the
+  console write) is the only endpoint that serves it. The labelling request
+  itself is marked (its system text starts with `signaller-label-v1`), so the
+  router sends it to Anthropic untouched — whatever the lever or the rules
+  say — and records it with no prompt text and no preview; the classifier,
+  auto state and the doubling shadow never see it. In Docker the
   `~/.claude/projects` mount is now read for prompt text too, not only for
   session labels — it stays read-only.
 

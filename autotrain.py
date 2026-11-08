@@ -12,6 +12,7 @@ import random
 import re
 import shutil
 import threading
+import time
 from collections import Counter
 from dataclasses import dataclass
 
@@ -29,6 +30,21 @@ FIT_L2 = 1e-4
 
 FOLLOW = re.compile(r"^\W*(go|go ahead|ok|okay|yes|yep|yeah|y|no|nope|n|sure|approved?|lgtm|do it|proceed|continue|"
                     r"done|looks (good|great|right)|sounds (good|right)|agree|both|[a-d1-9])\b[\s\S]{0,40}$", re.I)
+
+LABEL_MARKER = "signaller-label-v1"  # the first line of the labeller's system prompt; the router routes on it
+
+
+class Conflict(ValueError):
+    """A plan that would step on a running job; the API answers 409 with it."""
+
+
+def is_label_request(req) -> bool:
+    """True for the labeller's own /v1/messages request: its system text starts with the marker line, so
+    the router sends it to Anthropic untouched and stores none of its text."""
+    s = req.get("system") if isinstance(req, dict) else None
+    if isinstance(s, list):
+        s = "".join(b.get("text", "") for b in s if isinstance(b, dict))
+    return isinstance(s, str) and s.startswith(LABEL_MARKER)
 
 
 def follow_on(text: str) -> bool:
@@ -129,7 +145,9 @@ class Item:
 
 def candidates(project: str, path: str) -> list:
     """Main-thread human turns of one transcript worth labelling: not follow-ons, not leading #tags, not a typed command.
-    idx is the turn's position in replay (all turns, so eval can find it again)."""
+    idx is the turn's position in replay (all turns, so eval can find it again).
+    ponytail: replay builds the whole messages list in memory, so a GB-sized transcript costs its size; a
+    streaming design (deciding from human events alone) is the ceiling-raiser if real ones ever hit it."""
     out = []
     session = os.path.basename(path)[:-6] if os.path.basename(path).endswith(".jsonl") else os.path.basename(path)
     for idx, (msgs, ev) in enumerate(replay(path)):
@@ -222,21 +240,20 @@ def evaluate(rows: list, paths: dict, model: dict, s: autophase.AutoSettings) ->
         if r["session"] in paths:
             want.setdefault(r["session"], set()).add(r["idx"])
     turns = {sess: turns_at(paths[sess], idxs) for sess, idxs in want.items()}
+    # a held-out row whose transcript vanished or whose turn is gone was never decided: it counts nowhere
+    scored = [r for r in rows if r["idx"] in turns.get(r["session"], {})]
     out = {}
     for who, dec in (("rules", None), ("model", m.score)):
         kept = moved = 0
-        for r in rows:
-            msgs = turns.get(r["session"], {}).get(r["idx"])
-            if msgs is None:
-                continue
-            d = autophase.phase(msgs, s, dec)[0]
+        for r in scored:
+            d = autophase.phase(turns[r["session"]][r["idx"]], s, dec)[0]
             if r["label"] == "planning":
                 kept += d == "planning"
             elif r["label"] == "execution":
                 moved += d != "planning"
         out[who] = {"planning_kept": kept, "execution_moved": moved}
-    counts = Counter(r["label"] for r in rows if r["session"] in paths)  # one pass over the label counts
-    total_plan = sum(1 for r in rows if r["label"] == "planning")
+    counts = Counter(r["label"] for r in scored)  # one pass over the label counts
+    total_plan = sum(1 for r in rows if r["label"] == "planning")  # the "in all" rule counts every label
     gain = out["model"]["planning_kept"] - out["rules"]["planning_kept"]
     verdict = "too few" if total_plan < 30 or counts["planning"] < 5 else (
         "better" if gain > 0
@@ -297,8 +314,9 @@ class Trainer:
         self.lock = threading.Lock()
         self.state, self.job = "idle", None
         self.result, self.error, self.model = None, None, None
-        self.projects = None  # the project rows, built once on first sight (listdir/stat/head reads, no replay)
+        self.projects = None  # the project rows (listdir/stat/head reads, no replay), rebuilt by plan/reset and a stale GET
         self._scanned = False
+        self._rows_at = 0.0  # when the rows were last built; a GET rescans when this is over 5 minutes old
         # (path, mtime, size) -> items; worker thread only; bounded, a live transcript keeps making keys
         self._cache = autophase.BoundedDict(4096)
         self._pool = None  # the one worker thread, on the first train call: nobody trains, no thread
@@ -325,27 +343,39 @@ class Trainer:
         if key not in self._cache:
             try:
                 self._cache[key] = candidates(project, path)
-            except (OSError, ValueError):
+            except Exception:  # one broken transcript is skipped, never a dead scan
                 self._cache[key] = []
         return self._cache[key]
 
-    def _rows(self):
-        """The project rows, built once (the listing's I/O runs outside the lock)."""
-        if self.projects is None:
-            rows = self._project_rows()
+    def _rows(self, force=False):
+        """The project rows (the listing's I/O runs outside the lock); `force` lists the directory again, keeping
+        the counts a scan already paid for, so a project born since the last listing can be planned. A status
+        call that built rows while the worker's scan did keeps the winner's: a losing listing is never swapped in
+        over one that is filling or filled."""
+        if force or self.projects is None:
+            fresh = {p["dir"]: p for p in self._project_rows()}
             with self.lock:
-                self.projects = self.projects or rows
+                if force or self.projects is None:
+                    old = {p["dir"]: p for p in (self.projects or [])}
+                    for d, p in fresh.items():
+                        if d in old:
+                            p["prompts"], p["usd"] = old[d]["prompts"], old[d]["usd"]
+                    self.projects, self._rows_at = list(fresh.values()), time.time()
         return self.projects
 
-    def _scan(self):
+    def _scan(self, force=False):
         try:
-            for row in self._rows():  # the rows fill in one by one: a GET mid-scan shows progress
+            for row in self._rows(force):  # the rows fill in one by one: a GET mid-scan shows progress
                 items = []
                 for f in self._files(row["dir"]):
                     items += self._items_for(os.path.join(self.claude_dir, "projects", row["dir"], f), row["dir"])
                 with self.lock:
                     row["prompts"], row["usd"] = len(items), round(estimate_usd(items), 4)
-            self._scanned = True
+            with self.lock:
+                self._scanned = True
+        except Exception as e:  # a scan that dies is a message in the card, never a stuck "scanning"
+            with self.lock:
+                self.state, self.error = "failed", "%s: %s" % (type(e).__name__, str(e)[:200])
         finally:
             with self.lock:
                 if self.state == "scanning":
@@ -365,12 +395,15 @@ class Trainer:
     # --- the public face, for console.py ---
 
     def start_scan(self) -> None:
-        """The first GET kicks the worker off; never blocks, and never over a job's state."""
+        """A GET kicks the worker off when the rows were never built or the last listing is over 5 minutes old;
+        never blocks, and never over a job's state."""
+        # ponytail: a GET rescans at most every 5 minutes; a directory watcher would notice new projects sooner
         with self.lock:
-            if self._scanned or self.state != "idle":
+            stale = time.time() - self._rows_at > 300
+            if self.job or (self._scanned and not stale) or self.state not in ("idle", "ready", "failed"):
                 return
             self.state = "scanning"
-        self._worker().submit(self._scan)
+        self._worker().submit(self._scan, stale)
 
     def status(self) -> dict:
         projects = self._rows()
@@ -382,23 +415,35 @@ class Trainer:
         if not self.job:
             return None
         j = self.job
+        pend = [j["items"][i] for i in j["items"] if i not in j["labelled"] and i not in j["failed"]]
         return {"projects": j["projects"], "items": len(j["items"]), "labelled": len(j["labelled"]),
-                "failed": len(j["failed"]), "usd_est": j["usd_est"], "usd_spent": j["usd_spent"], "cut": j["cut"]}
+                "failed": len(j["failed"]), "usd_est": j["usd_est"], "usd_spent": j["usd_spent"], "cut": j["cut"],
+                "cut_applied": j["cut_applied"], "remaining": len(pend),
+                "usd_remaining": round(estimate_usd(pend), 4)}
 
     def plan(self, dirs, cut: bool) -> dict:
-        """Start or resume the job for these project dirs (a new plan replaces an unfinished one,
-        keeping the labels on disk whose ids still occur). Returns the job block."""
+        """Start or resume the job for these project dirs (a re-plan of the same projects and cut choice
+        resumes, keeping the labels on disk whose ids still occur; one with progress for anything else,
+        or any plan while a fit runs or a result waits, answers Conflict). Returns the job block."""
         if not isinstance(dirs, list) or not dirs or not all(isinstance(d, str) and d for d in dirs):
             raise ValueError("projects must be a list of project dirs")
-        unknown = [d for d in dirs if d not in {p["dir"] for p in self._rows()}]
-        if unknown:
-            raise ValueError("no project dir named %s" % unknown[0])
         self._call(self._plan, dirs, bool(cut))
         with self.lock:
             return self._job_block()
 
     def _plan(self, dirs, want_cut):
         cap = self.settings().train_cap
+        with self.lock:  # the worker runs this: no race with a labelling batch or another plan
+            if self.state in ("training", "done"):
+                raise Conflict("a training run is fitting or finished; use or discard it first")
+            j = self.job
+            if self.state == "labelling" and j and (j["labelled"] or j["failed"] or j["usd_spent"]) \
+                    and (set(j["projects"]) != set(dirs) or j["cut_applied"] != bool(want_cut)):
+                raise Conflict("a training run is in progress; discard it first")
+        rows = self._rows(force=True)  # the listing again: a project born since the last scan can be planned
+        unknown = [d for d in dirs if d not in {p["dir"] for p in rows}]
+        if unknown:
+            raise ValueError("no project dir named %s" % unknown[0])
         items, paths = {}, {}
         for d in dirs:
             for f in self._files(d):
@@ -409,21 +454,24 @@ class Trainer:
                     items[it.id] = it
                     paths[it.session] = path
         full = list(items.values())
-        usd_full = estimate_usd(full)
-        option = cut(full, cap) if usd_full > cap else None
-        usd_option = estimate_usd(option) if option is not None else 0.0
-        applied = want_cut and option is not None
-        items = {i.id: i for i in (option if applied else full)}  # items keeps insertion order; no order list
         labels, failed, spent = self._read_labels()
+        # the cap and the cut count only what still needs paying for: a resume keeps its labelled sessions
+        unlab = [i for i in full if i.id not in labels and i.id not in failed]
+        usd_unlab = estimate_usd(unlab)
+        option = cut(unlab, cap) if usd_unlab > cap else None
+        usd_option = estimate_usd(option) if option else 0.0
+        applied = want_cut and bool(option)
+        chosen = [i for i in full if i.id in labels or i.id in failed] + (option if applied else unlab)
+        items = {i.id: i for i in chosen}  # items keeps insertion order; no order list
         with self.lock:
             self.job = {"projects": list(dirs), "items": items, "paths": paths,
                         "labelled": {i: l for i, l in labels.items() if i in items},
                         "failed": {i for i in failed if i in items},
-                        "usd_est": round(usd_option if applied else usd_full, 4), "usd_spent": round(spent, 4),
-                        # ruling A: the newest-sessions-under-cap option when the full job's cost
-                        # exceeds the cap, applied or not, else null
-                        "cut": ({"items": len(option), "usd": round(usd_option, 4)}
-                                if option is not None else None)}
+                        "usd_est": round(usd_option if applied else usd_unlab, 4), "usd_spent": round(spent, 4),
+                        # ruling A: the newest-sessions-under-cap option when the job's remaining cost
+                        # exceeds the cap, applied or not; null when no whole session fits
+                        "cut": ({"items": len(option), "usd": round(usd_option, 4)} if option else None),
+                        "cut_applied": applied}
             self.state, self.result, self.error, self.model = "labelling", None, None, None
 
     def next(self, n: int) -> dict:
@@ -431,22 +479,31 @@ class Trainer:
         return self._call(self._next, n)
 
     def _next(self, n):
-        with self.lock:
-            job = self.job
-            if not job or self.state != "labelling":
-                raise ValueError("no labelling job")
-            items, paths = job["items"], job["paths"]
-            pend = [i for i in items if i not in job["labelled"] and i not in job["failed"]][:n]
-        want, out, bad = {}, [], []
-        for i in pend:  # one replay per transcript serves the whole batch
-            it = items[i]
-            want.setdefault(it.session, []).append(it)
-        for sess, its in want.items():
-            got = turns_at(paths.get(sess, ""), {it.idx for it in its})
-            for it in its:
-                t = autophase.human_text(got[it.idx][-1]) if it.idx in got else None
-                (out if t is not None else bad).append((it, t))
-        self._mark_failed([it.id for it, _ in bad])
+        out, served = [], set()
+        while len(out) < n:  # a transcript that vanished or turned unreadable fails its items; the rest still serve
+            with self.lock:
+                job = self.job
+                if not job or self.state != "labelling":
+                    raise ValueError("no labelling job")
+                items, paths = job["items"], job["paths"]
+                pend = [i for i in items if i not in job["labelled"] and i not in job["failed"]
+                        and i not in served][:n - len(out)]
+            if not pend:
+                break
+            want, bad = {}, []
+            for i in pend:  # one replay per transcript serves the whole batch
+                it = items[i]
+                want.setdefault(it.session, []).append(it)
+            for sess, its in want.items():
+                got = turns_at(paths.get(sess, ""), {it.idx for it in its})
+                for it in its:
+                    t = autophase.human_text(got[it.idx][-1]) if it.idx in got else None
+                    if t is not None:
+                        out.append((it, t))
+                        served.add(it.id)
+                    else:
+                        bad.append(it.id)
+            self._mark_failed(bad)
         return {"items": [{"id": it.id, "text": t[:LABEL_CHARS]} for it, t in out]}
 
     def labels(self, recs, failed, usage) -> dict:
@@ -465,6 +522,10 @@ class Trainer:
                     raise ValueError("unknown label id %r" % (r.get("id") if isinstance(r, dict) else r))
                 if r.get("label") not in ("planning", "execution"):
                     raise ValueError("label must be planning or execution")
+            u = usage if isinstance(usage, dict) else {}
+            if any(type(v) in (int, float) and (not math.isfinite(v) or v < 0)
+                   for k, v in u.items() if k in ("input_tokens", "output_tokens")):
+                raise ValueError("usage token counts must be finite and non-negative")
             usd = self._usage_usd(usage)
             self._append([{"id": r["id"], "label": r["label"]} for r in recs])
             self._fail(failed)
@@ -482,16 +543,20 @@ class Trainer:
         return (tok("input_tokens") * RATE["in"] + tok("output_tokens") * RATE["out"]) / 1e6
 
     def finish(self) -> None:
-        """Fit on the train sessions, evaluate on the held-out ones; done, or failed with the error."""
-        self._call(self._finish)
+        """Hand the fit to the worker and answer at once (state "training"); the plugin and the card poll for
+        the done/failed that lands when the fit ends."""
+        with self.lock:
+            if not self.job or self.state != "labelling":
+                raise ValueError("no labelling job")
+            self.state = "training"
+        self._worker().submit(self._finish)
 
     def _finish(self):
         s = self.settings()
         with self.lock:
             job = self.job
-            if not job or self.state != "labelling":
-                raise ValueError("no labelling job")
-            self.state = "training"
+            if not job:
+                return  # discarded between the request and the worker's turn
             rows = []
             for i, label in list(job["labelled"].items()):
                 it = job["items"][i]
@@ -526,17 +591,23 @@ class Trainer:
         return out
 
     def use(self) -> dict:
-        """The fitted model, for the caller to write as auto_model.json and load. 409-shaped error
-        when nothing finished."""
+        """The fitted model, for the caller to write as auto_model.json and load. 409-shaped error when
+        nothing finished, the held-out check says too few to judge, or the fit has no weights."""
         with self.lock:
             if self.state != "done" or not self.model:
                 raise ValueError("no finished model to use")
+            if (self.result or {}).get("verdict") == "too few":
+                raise ValueError("too few planning prompts to judge; label more first")
+            if not self.model.get("weights"):
+                raise ValueError("the fitted model has no weights")
             return dict(self.model)
 
     def reset(self) -> None:
-        """Install (use) or drop (discard): training/ goes, the job is forgotten."""
+        """Install (use) or drop (discard): training/ goes, the job is forgotten, the project rows are
+        listed again on the next GET."""
         with self.lock:
             self.state, self.job, self.result, self.error, self.model = "idle", None, None, None, None
+            self.projects, self._scanned, self._rows_at = None, False, 0.0
         shutil.rmtree(self.training_dir, ignore_errors=True)
 
     # --- labels.jsonl ---

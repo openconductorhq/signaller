@@ -3,6 +3,10 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
+
+import pytest
 
 import autophase
 import autotrain
@@ -95,6 +99,24 @@ def _item(sess, idx, ts, chars=4000):
     return autotrain.Item(id="%s:%d" % (sess, idx), project="proj", session=sess, idx=idx, ts=ts, chars=chars)
 
 
+def _trainer(tmp_path, cap=5.0):
+    cfg = tmp_path / "cfg"
+    cfg.mkdir(exist_ok=True)
+    return autotrain.Trainer(str(cfg), str(tmp_path / "claude"), lambda: autophase.AutoSettings(train_cap=cap))
+
+
+def _seed(tmp_path, pdir="p", sessions=1, turns=2, pad=""):
+    """sessions transcripts of turns human turns each under <claude>/projects/<pdir>."""
+    d = tmp_path / "claude" / "projects" / pdir
+    d.mkdir(parents=True, exist_ok=True)
+    for s in range(sessions):
+        events = []
+        for t in range(turns):
+            events += [user("please plan the design of module %d %s" % (t, pad)), asst("m%d" % t)]
+        write_transcript(d, "s%d" % s, events)
+    return d
+
+
 def test_estimate_matches_haiku_rate():
     items = [_item("a", 0, "2026-11-08T10:00:00Z"), _item("b", 0, "2026-11-08T10:01:00Z")]
     assert round(autotrain.estimate_usd(items), 6) == round(2 * ((1000 + 300) * 0.10 + 5 * 0.50) / 1e6, 6)
@@ -169,3 +191,150 @@ def test_trainer_cut_block(tmp_path):
     assert job["items"] == 3 and job["usd_est"] <= 0.001
     got = tr.next(50)
     assert {x["id"].split(":")[0] for x in got["items"]} == {"new"}
+
+
+def test_next_keeps_going_past_a_vanished_transcript(tmp_path):
+    d = tmp_path / "claude" / "projects" / "p"
+    d.mkdir(parents=True)
+    for sid, turns in (("a", 25), ("b", 5)):
+        events = []
+        for t in range(turns):
+            events += [user("please plan the design of module %d" % t), asst("m%d" % t)]
+        write_transcript(d, sid, events)
+    tr = _trainer(tmp_path)
+    tr.plan(["p"], False)
+    os.remove(d / "a.jsonl")
+    got = tr.next(20)  # a's items fail, but the batch must still fill from what is left
+    assert sorted(x["id"] for x in got["items"]) == sorted("b:%d" % i for i in range(5))
+    job = tr.status()["job"]
+    assert job["failed"] == 25 and job["remaining"] == 5  # served, not labelled yet
+
+
+def test_plan_sees_a_project_created_after_the_first_scan(tmp_path):
+    _seed(tmp_path, sessions=1)
+    tr = _trainer(tmp_path)
+    tr._scan()
+    assert [p["dir"] for p in tr.status()["projects"]] == ["p"]
+    _seed(tmp_path, pdir="q", sessions=1)
+    job = tr.plan(["q"], False)  # the plan re-lists the projects, so q is plannable without a restart
+    assert job["items"] == 2
+
+
+def test_finish_answers_before_the_fit_ends(tmp_path, monkeypatch):
+    _seed(tmp_path, sessions=1, turns=2)
+    tr = _trainer(tmp_path)
+    tr.plan(["p"], False)
+    ids = [x["id"] for x in tr.next(2)["items"]]
+    tr.labels([{"id": i, "label": "planning" if n % 2 == 0 else "execution"} for n, i in enumerate(ids)],
+              [], {"input_tokens": 1, "output_tokens": 1})
+    gate = threading.Event()
+
+    def slow_fit(rows):
+        gate.wait(5)
+        return {"format": autophase.FORMAT, "bias": 0.0, "weights": {"plan": 0.4}}
+    monkeypatch.setattr(autotrain, "fit", slow_fit)
+    t0 = time.time()
+    tr.finish()
+    assert time.time() - t0 < 1 and tr.status()["state"] == "training"  # answered at once, the fit still runs
+    gate.set()
+    t0 = time.time()
+    while tr.status()["state"] != "done" and time.time() - t0 < 5:
+        time.sleep(0.01)
+    assert tr.status()["state"] == "done"
+
+
+def test_plan_conflicts_with_a_running_job(tmp_path):
+    _seed(tmp_path, sessions=2, turns=1)
+    _seed(tmp_path, pdir="q", sessions=1)
+    tr = _trainer(tmp_path)
+    tr.plan(["p"], False)
+    ids = [x["id"] for x in tr.next(1)["items"]]
+    tr.labels([{"id": ids[0], "label": "planning"}], [], {"input_tokens": 1, "output_tokens": 1})
+    with pytest.raises(autotrain.Conflict):  # progress for different projects, and for a different cut choice
+        tr.plan(["q"], False)
+    with pytest.raises(autotrain.Conflict):
+        tr.plan(["p"], True)
+    job = tr.plan(["p"], False)  # the same projects and cut choice: a resume
+    assert (job["items"], job["labelled"], job["remaining"]) == (2, 1, 1)
+    tr.state = "training"
+    with pytest.raises(autotrain.Conflict):  # while the fit runs, or a result waits: use or discard first
+        tr.plan(["p"], False)
+    tr.state = "done"
+    with pytest.raises(autotrain.Conflict):
+        tr.plan(["p"], False)
+
+
+def test_cut_is_null_when_no_whole_session_fits(tmp_path):
+    _seed(tmp_path, sessions=2, turns=2)
+    tr = _trainer(tmp_path, cap=1e-7)  # below even one session's cost: the option is empty, not a 0-item cut
+    job = tr.plan(["p"], False)
+    assert job["cut"] is None and job["items"] == 4 and job["usd_est"] > 1e-7
+    job = tr.plan(["p"], True)
+    assert job["cut"] is None and job["cut_applied"] is False and job["items"] == 4
+
+
+def test_plan_counts_only_unlabelled_prompts(tmp_path):
+    _seed(tmp_path, sessions=2, turns=2, pad="x" * 6000)
+    tr = _trainer(tmp_path, cap=0.0005)  # over the 4 prompts' cost, under the 2 that still need paying for
+    tr.plan(["p"], False)
+    done = sorted(x["id"] for x in tr.next(2)["items"])
+    tr.labels([{"id": i, "label": "planning"} for i in done], [], {"input_tokens": 1, "output_tokens": 1})
+    job = tr.plan(["p"], False)
+    assert (job["items"], job["labelled"], job["failed"], job["remaining"]) == (4, 2, 0, 2)
+    unlabelled = [i for i in tr.job["items"].values() if i.id not in tr.job["labelled"]]
+    assert job["usd_est"] == round(autotrain.estimate_usd(unlabelled), 4) == job["usd_remaining"]
+    assert job["cut"] is None  # what's left fits: the cap never counts prompts already paid for
+
+
+def test_use_refuses_too_few_and_weightless(tmp_path):
+    tr = _trainer(tmp_path)
+    tr.state, tr.model, tr.result = "done", {"bias": 0.0, "weights": {}}, {"verdict": "too few"}
+    with pytest.raises(ValueError):
+        tr.use()
+    tr.result = {"verdict": "better"}  # no weights: nothing to install
+    with pytest.raises(ValueError):
+        tr.use()
+    tr.model = {"bias": 0.0, "weights": {"plan": 0.4}}
+    assert tr.use() == tr.model
+
+
+def test_scan_skips_a_broken_transcript_and_names_a_broken_scan(tmp_path, monkeypatch):
+    def boom(*a):
+        raise TypeError("bad")
+    _seed(tmp_path, sessions=2)
+    tr = _trainer(tmp_path)
+    monkeypatch.setattr(autotrain, "candidates", boom)
+    tr.state = "scanning"  # as start_scan leaves it
+    tr._scan()
+    st = tr.status()  # the broken transcripts are skipped and counted as nothing, the scan still finishes
+    assert st["state"] == "ready" and st["projects"][0]["prompts"] == 0
+    monkeypatch.undo()
+    tr.reset()
+    monkeypatch.setattr(autotrain, "projects", boom)
+    tr.state = "scanning"
+    tr._scan()
+    # a scan that dies outright is a message, never a stuck "scanning" (status itself can't list now either)
+    assert tr.state == "failed" and "TypeError" in tr.error
+
+
+def test_labels_rejects_bad_usage(tmp_path):
+    _seed(tmp_path, sessions=1, turns=2)
+    tr = _trainer(tmp_path)
+    tr.plan(["p"], False)
+    ids = [x["id"] for x in tr.next(2)["items"]]
+    for usage in ({"input_tokens": -1, "output_tokens": 0},
+                  {"input_tokens": float("nan")},
+                  {"input_tokens": float("inf"), "output_tokens": 2}):
+        with pytest.raises(ValueError):
+            tr.labels([{"id": ids[0], "label": "planning"}], [], usage)
+
+
+def test_evaluate_counts_only_scored_rows(tmp_path):
+    d = _seed(tmp_path, sessions=1, turns=3)
+    rows = [{"session": "train", "idx": i, "label": "planning"} for i in range(30)]
+    rows += [{"session": "gone", "idx": i, "label": "planning"} for i in range(6)]
+    rows += [{"session": "s0", "idx": i, "label": "planning"} for i in range(3)]
+    paths = {"gone": str(tmp_path / "nope.jsonl"), "s0": str(d / "s0.jsonl")}
+    r = autotrain.evaluate(rows, paths, {"bias": 0.0, "weights": {}}, autophase.AutoSettings())
+    # the vanished session's 6 labels were never decided: only the 3 that scored count, so too few to judge
+    assert (r["planning"], r["execution"], r["verdict"]) == (3, 0, "too few")

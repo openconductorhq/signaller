@@ -874,37 +874,43 @@ class TrainTest(Fixture):
         return self.js("POST", "/ui/api/train/plan", {"projects": ["proj"], "cut": False, **patch})
 
     def test_train_flow(self):
-        texts = self.seed()
+        texts = self.seed(sessions=30)  # 60 candidates, half planning: enough for the held-out check to judge
         j = self.wait("ready")  # the first GET starts the scan
         self.assertEqual(j["cap"], 5.0)
         self.assertEqual([(p["dir"], p["name"], p["sessions"], p["prompts"]) for p in j["projects"]],
-                         [("proj", "proj", 3, 6)])
+                         [("proj", "proj", 30, 60)])
         s, job = self.plan()
         self.assertEqual(s, 200)
-        self.assertEqual((job["items"], job["labelled"], job["failed"]), (6, 0, 0))
+        self.assertEqual((job["items"], job["labelled"], job["failed"], job["remaining"]), (60, 0, 0, 60))
         self.assertGreater(job["usd_est"], 0)
         self.assertIsNone(job["cut"])
+        self.assertFalse(job["cut_applied"])
         self.assertEqual(self.train_get()["state"], "labelling")
-        s, got = self.js("POST", "/ui/api/train/next", {"n": 50})
-        self.assertEqual((s, len(got["items"])), (200, 6))
-        self.assertEqual(sorted(x["id"] for x in got["items"]),
-                         sorted("sess%d:%d" % (a, b) for a in range(3) for b in range(2)))
-        self.assertEqual({x["text"] for x in got["items"]}, set(texts))
-        s, job = self.js("POST", "/ui/api/train/labels", {
-            "labels": [{"id": x["id"], "label": "planning" if i % 2 == 0 else "execution"} for i, x in enumerate(got["items"])],
-            "failed": [], "usage": {"input_tokens": 100, "output_tokens": 5}})
-        self.assertEqual((s, job["labelled"], job["failed"]), (200, 6, 0))
+        got = []
+
+        def label(items, start):
+            return self.js("POST", "/ui/api/train/labels", {
+                "labels": [{"id": x["id"], "label": "planning" if (start + i) % 2 == 0 else "execution"}
+                           for i, x in enumerate(items)],
+                "failed": [], "usage": {"input_tokens": 100, "output_tokens": 5}})
+        for _ in range(2):  # n is capped at 50 a batch: two rounds cover all 60
+            s, batch = self.js("POST", "/ui/api/train/next", {"n": 50})
+            got += batch["items"]
+            s, job = label(batch["items"], len(got) - len(batch["items"]))
+        self.assertEqual(len(got), 60)
+        self.assertEqual({x["text"] for x in got}, set(texts))
+        self.assertEqual((s, job["labelled"], job["remaining"]), (200, 60, 0))
         self.assertGreater(job["usd_spent"], 0)
         self.assertEqual(self.js("POST", "/ui/api/train/finish", {})[0], 200)
         j = self.wait("done")
-        self.assertIn(j["result"]["verdict"], ("better", "no better", "too few"))
+        self.assertIn(j["result"]["verdict"], ("better", "no better"))
         self.assertEqual(self.js("POST", "/ui/api/train/use", {})[0], 200)
         self.assertTrue(self.js("GET", "/ui/api/state")[1]["auto_model"])
         self.assertFalse(os.path.exists(os.path.join(self.dir, "training")))
         with open(os.path.join(self.dir, "auto_model.json")) as f:
             self.assertEqual(json.load(f)["format"], "signaller-auto-1")
         self.assertIsNotNone(self.app.auto_model)
-        self.assertEqual(self.train_get()["state"], "idle")
+        self.assertEqual(self.train_get()["state"], "scanning")  # the job is gone; the rows list again after a use
 
     def test_train_get_never_serves_text(self):
         texts = self.seed()
@@ -1004,6 +1010,52 @@ class TrainTest(Fixture):
             json.dump({"format": "signaller-auto-1", "bias": 0.1, "weights": {"fix": 0.2}}, f)
         self.restart()
         self.assertTrue(self.js("GET", "/ui/api/lever?session=s1")[1]["trained"])
+
+    def test_label_request_goes_to_anthropic_untouched_and_unstored(self):
+        self.app.routing = replace(self.app.routing, lever="valar")
+        body = json.dumps({"model": "claude-haiku-5-5", "stream": False,
+                           "system": autotrain.LABEL_MARKER + "\nAnswer with one word: planning or execution.",
+                           "messages": [{"role": "user", "content": "please plan the design of the parser"}]}).encode()
+        self.assertEqual(self.post(body, {**HDRS, "X-Claude-Code-Session-Id": "s1"}), (200, b"{}"))
+        self.assertEqual(self.v.seen, [])  # whatever the lever says, a marked request never leaves Anthropic
+        self.assertEqual(self.a.seen[0][3], body)  # byte for byte: no tag strip, no thinking drop, no rewrite
+        self.assertEqual(self.a.seen[0][2]["Authorization"], HDRS["Authorization"])
+        self.logged(1)
+        self.assertIn('reason="auto training"', self.err.getvalue())
+        self.assertIsNone(self.app.auto_for("s1"))  # never the classifier, never auto state
+        t0 = time.time()
+        while time.time() - t0 < 2 and not self.app.store.request(1):
+            time.sleep(0.01)
+        row = self.app.store.request(1)
+        self.assertEqual((row["track"], row["reason"]), ("anthropic", "auto training"))
+        self.assertIsNone(row["prompt_hash"])  # recorded with no prompt text and no preview; the cost is kept
+        self.assertIsNone(row["prompt"])
+        self.assertEqual(row["preview"], "")
+
+    def test_train_plan_conflict_409(self):
+        self.seed(sessions=2)
+        self.seed(pdir="proj2", sessions=1)
+        self.plan()
+        _, got = self.js("POST", "/ui/api/train/next", {"n": 1})
+        self.js("POST", "/ui/api/train/labels", {"labels": [{"id": got["items"][0]["id"], "label": "planning"}],
+                                                 "failed": [], "usage": {"input_tokens": 1, "output_tokens": 1}})
+        s, j = self.js("POST", "/ui/api/train/plan", {"projects": ["proj2"], "cut": False})
+        self.assertEqual((s, j["error"]), (409, "a training run is in progress; discard it first"))
+        s, job = self.js("POST", "/ui/api/train/plan", {"projects": ["proj"], "cut": False})  # the same: a resume
+        self.assertEqual((s, job["labelled"]), (200, 1))
+
+    def test_use_clears_the_unreadable_model_banner(self):
+        with open(os.path.join(self.dir, "auto_model.json"), "w") as f:
+            f.write("not a model")
+        self.restart()
+        self.assertIn("couldn't be read", self.app.banner)
+        tr = self.app.trainer
+        tr.state = "done"
+        tr.model = {"format": "signaller-auto-1", "bias": 0.0, "weights": {"fix": 0.5}}
+        tr.result = {"verdict": "better"}
+        self.app.use_trained_model()
+        self.assertNotIn("couldn't be read", self.app.banner)  # the installed model replaces the complaint
+        self.assertIsNotNone(self.app.auto_model)
 
 
 class ListModelsRedirectTest(unittest.TestCase):
