@@ -408,13 +408,12 @@ $("localWarnX").addEventListener("click", () => { $("localWarn").hidden = true; 
 /* ---------- train card: Teach auto how you work ---------- */
 // Mirrors the router's training job (GET /ui/api/train, fetched from the poll while the Auto box shows).
 // The cut option ("Newest sessions only: N prompts, about $y") exists only in the job block, so when the
-// ticked set's estimate is over the cap the card plans the ticked set itself — the same metadata pass the
-// command does, nothing labels until it runs. Only while nothing has been labelled: a job in flight is
-// never replaced from here.
+// ticked set's estimate is over the cap and there is no job yet, the card plans the ticked set itself —
+// the same metadata pass the command does, nothing labels until it runs. A job that exists is never
+// replaced from here: it may be the command's, possibly already cut, and re-planning would swap it.
 let trainSt = null, trainPick = null, trainSig = "", trainKey = "";
 const sameDirs = (a, b) => a.length === b.length && a.every((d, i) => d === b[i]);
-const trainQuiet = (st) => st.state === "idle" || st.state === "scanning" || st.state === "ready"
-  || (st.state === "labelling" && st.job && !st.job.labelled && !st.job.failed && !st.job.usd_spent);
+const trainQuiet = (st) => !st.job && (st.state === "idle" || st.state === "scanning" || st.state === "ready");
 
 async function loadTrain() {
   const st = await api("GET", "train");
