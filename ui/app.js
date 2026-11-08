@@ -481,8 +481,8 @@ function copyCmd() {
     s.addRange(r);
   };
   const done = () => { const b = code.nextElementSibling; if (b) b.textContent = "Copied"; };
-  (navigator.clipboard ? navigator.clipboard.writeText(code.textContent).then(done, selectAll) : Promise.reject())
-    .catch(selectAll);
+  if (!navigator.clipboard) return selectAll();
+  navigator.clipboard.writeText(code.textContent).then(done, selectAll);
 }
 
 function renderTrainProgress(st) {
@@ -496,30 +496,26 @@ function renderTrainProgress(st) {
     j && el("p", { class: "hint" }, `About ${usd(j.usd_spent)} spent so far.`));
 }
 
-function renderTrainFailed(st) {
-  $("trainCard").replaceChildren(...trainHead(),
-    el("p", { class: "err" }, "Training failed: " + (st.error || "unknown error")),
-    el("button", { type: "button", class: "btn", onclick: retryTrain, disabled: !st.job }, "Try again"));
-}
-const retryTrain = async () => {
+// one body for Try again / Use it / Keep rules only: post, drop the plan signature, reload
+const trainAct = (path, body) => async () => {
   try {
-    await api("POST", "train/plan", { projects: trainSt.job.projects, cut: false });
+    await api("POST", "train/" + path, body);
     trainSig = "";
     await loadTrain();
   } catch (_) { /* the card shows what the next poll says */ }
 };
 
+function renderTrainFailed(st) {
+  $("trainCard").replaceChildren(...trainHead(),
+    el("p", { class: "err" }, "Training failed: " + (st.error || "unknown error")),
+    el("button", { type: "button", class: "btn", onclick: trainAct("plan", { projects: trainSt.job.projects, cut: false }),
+      disabled: !st.job }, "Try again"));
+}
+
 function renderTrainDone(st) {
   const r = st.result, tooFew = r.verdict === "too few", good = r.verdict === "better";
   const line = (name, mk, rk, total) => el("div", { class: "tresrow" },
     el("span", {}, name), el("b", {}, `${mk} of ${total}`), el("span", {}, `${rk} of ${total}`));
-  const act = (what) => async () => {
-    try {
-      await api("POST", "train/" + what, {});
-      trainSig = "";
-      await loadTrain();
-    } catch (_) { /* the card shows what the next poll says */ }
-  };
   $("trainCard").replaceChildren(...trainHead(),
     tooFew ? el("p", { class: "hint" }, "Not enough planning prompts to judge yet")
       : el("p", { class: "hint" }, good ? "On the sessions held out, your model beats the rules alone:"
@@ -528,8 +524,8 @@ function renderTrainDone(st) {
       el("div", { class: "tresrow treshead" }, el("span", {}), el("span", {}, "your model"), el("span", {}, "rules alone")),
       line("Planning kept on Anthropic", r.model.planning_kept, r.rules.planning_kept, r.planning),
       line("Execution moved to the downstream", r.model.execution_moved, r.rules.execution_moved, r.execution)),
-    ...(tooFew ? [] : [el("button", { type: "button", class: "btn" + (good ? " primary" : ""), onclick: act("use") }, "Use it")]),
-    el("button", { type: "button", class: "btn" + (tooFew || !good ? " primary" : ""), onclick: act("discard") }, "Keep rules only"));
+    ...(tooFew ? [] : [el("button", { type: "button", class: "btn" + (good ? " primary" : ""), onclick: trainAct("use", {}) }, "Use it")]),
+    el("button", { type: "button", class: "btn" + (tooFew || !good ? " primary" : ""), onclick: trainAct("discard", {}) }, "Keep rules only"));
 }
 
 /* the yard: Anthropic on top, one line per downstream below it; the first runs straight on (y=125) */
