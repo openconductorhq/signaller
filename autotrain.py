@@ -209,7 +209,10 @@ def evaluate(rows: list, paths: dict, model: dict, s: autophase.AutoSettings) ->
     m = autophase.Model(model["bias"], model["weights"])
     turns = {}
     for sess in sorted({r["session"] for r in rows if r["session"] in paths}):
-        turns[sess] = {i: msgs for i, (msgs, _) in enumerate(replay(paths[sess]))}
+        try:
+            turns[sess] = {i: msgs for i, (msgs, _) in enumerate(replay(paths[sess]))}
+        except OSError:
+            pass  # a transcript that vanished since labelling: its rows just don't score, as _turn_texts does
     out = {}
     for who, dec in (("rules", None), ("model", m.score)):
         kept = moved = 0

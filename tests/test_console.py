@@ -15,6 +15,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
+import autotrain
 import overrides
 from signaller import App, Config, make_server
 from routing import MODEL_TIERS
@@ -964,6 +965,19 @@ class TrainTest(Fixture):
     def test_train_bad_origin_on_plan(self):
         self.seed()
         self.assertEqual(self.req("POST", "/ui/api/train/plan", {"projects": ["proj"]}, origin=None)[0].status, 403)
+
+    def test_train_held_out_transcript_deleted_still_done(self):
+        self.seed()  # 3 sessions, 2 candidates each
+        self.plan()
+        _, got = self.js("POST", "/ui/api/train/next", {"n": 50})
+        self.js("POST", "/ui/api/train/labels",
+                {"labels": [{"id": x["id"], "label": "planning" if i % 2 == 0 else "execution"}
+                            for i, x in enumerate(got["items"])], "failed": []})
+        _, test = autotrain.split([{"session": "sess%d" % s} for s in range(3)])
+        os.remove(os.path.join(self.claude, "projects", "proj", test[0]["session"] + ".jsonl"))
+        self.assertEqual(self.js("POST", "/ui/api/train/finish", {})[0], 200)
+        j = self.wait("done")  # the vanished held-out transcript is skipped, not a failed job
+        self.assertIn(j["result"]["verdict"], ("better", "no better", "too few"))
 
     def test_train_get_answers_while_scanning(self):
         d = os.path.join(self.claude, "projects", "big")
