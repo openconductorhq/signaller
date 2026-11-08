@@ -16,101 +16,14 @@ session id (seed 0), the same split for train and eval.
 import argparse
 import json
 import os
-import random
 import re
 import sys
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import autophase  # noqa: E402
+from autotrain import FOLLOW, _events, _is_human, follow_on, replay, split  # noqa: E402
 from keys import write_json  # noqa: E402
-
-FOLLOW = re.compile(r"^\W*(go|go ahead|ok|okay|yes|yep|yeah|y|no|nope|n|sure|approved?|lgtm|do it|proceed|continue|"
-                    r"done|looks (good|great|right)|sounds (good|right)|agree|both|[a-d1-9])\b[\s\S]{0,40}$", re.I)
-
-
-def follow_on(text: str) -> bool:
-    w = text.split()
-    return len(w) <= 3 or (len(w) <= 7 and bool(FOLLOW.match(text.strip())))
-
-
-def split(rows: list) -> tuple:
-    ids = sorted({r["session"].split("/")[0] for r in rows})
-    random.Random(0).shuffle(ids)
-    test = set(ids[int(len(ids) * 0.8):])
-    return [r for r in rows if r["session"].split("/")[0] not in test], [r for r in rows if r["session"].split("/")[0] in test]
-
-
-# --- replay: the messages list the router sees, built from a transcript ---
-
-def _events(path):
-    with open(path, errors="replace") as f:
-        for line in f:
-            try:
-                e = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(e, dict):
-                yield e
-
-
-def _is_human(e) -> bool:
-    return not e.get("isMeta") and (e.get("promptSource") in ("typed", "queued") or e.get("turnOrigin") == "human")
-
-
-def replay(path):
-    """Yield (messages, human_event) at each human turn of a main thread. Consecutive user events merge into one message and an
-    assistant message's events (same id) into one, as Claude Code sends them; a compaction keeps only
-    its preserved messages."""
-    msgs, uuids, pending = [], [], None
-
-    def flush(reply=False):
-        nonlocal pending
-        if pending is not None and "<command-name>" in pending["_text"] and not reply:
-            pending = None  # a slash command with no reply of its own (/model, /clear ...) made no request
-        if pending is not None:
-            out = pending
-            pending = None
-            return [(list(msgs), out)]
-        return []
-
-    for e in _events(path):
-        t = e.get("type")
-        if t == "system" and e.get("subtype") == "compact_boundary":
-            keep = set(((e.get("compactMetadata") or {}).get("preservedMessages") or {}).get("uuids") or [])
-            pairs = [(m, u) for m, u in zip(msgs, uuids) if u & keep]
-            msgs, uuids = [p[0] for p in pairs], [p[1] for p in pairs]
-            continue
-        if t not in ("user", "assistant") or not isinstance(e.get("message"), dict):
-            continue
-        if e.get("isSidechain"):
-            continue
-        m, u = e["message"], e.get("uuid")
-        if t == "assistant":
-            yield from flush(reply=True)
-            mid = m.get("id")
-            if msgs and msgs[-1]["role"] == "assistant" and mid and msgs[-1].get("_id") == mid:
-                msgs[-1]["content"] += autophase.blocks(m)
-                uuids[-1].add(u)
-            else:
-                msgs.append({"role": "assistant", "content": autophase.blocks(m), "_id": mid})
-                uuids.append({u})
-            continue
-        blocks = autophase.blocks(m)
-        text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text" and isinstance(b.get("text"), str))
-        if msgs and msgs[-1]["role"] == "user":
-            msgs[-1]["content"] += blocks
-            uuids[-1].add(u)
-        else:
-            msgs.append({"role": "user", "content": blocks})
-            uuids.append({u})
-        if _is_human(e) or ("<command-name>" in text and not e.get("isMeta")):
-            # two human events with no reply between merge into one message (the merge above ran), so the first is
-            # decided with the second's text in it, not on its own history — ponytail: the router sees the same
-            # message Claude Code sends, and rebuilding it otherwise would need the reply events
-            yield from flush()
-            pending = dict(e, _text=text)
-    yield from flush()
 
 
 def brief(path):
