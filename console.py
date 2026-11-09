@@ -312,7 +312,13 @@ def api(h, app, method, path, query, body):
     if path == "/ui/api/departures" and method == "GET":
         q = {k: int(v[0]) for k, v in query.items() if k in ("since", "before")}
         ids, t0, t1 = filt(query)  # the picked span ("whole session": no lower bound) and sessions
-        return st.departures(q.get("since"), q.get("before"), 200, ids, t0, t1)
+        g = lambda k: (query.get(k) or [""])[0]
+        try:
+            lat = float(g("lat")) * 1000 if g("lat") else None
+        except ValueError:
+            raise Err(400, "lat must be a number of seconds")
+        return st.departures(q.get("since"), q.get("before"), 200, ids, t0, t1,
+                             g("track") or None, g("model") or None, g("lat_op") or None, lat)
     if path == "/ui/api/sessions" and method == "GET":
         ids, t0, t1 = filt(query)
         return st.list_sessions(t0 if t0 is not None else st.first_ts(None), t1)

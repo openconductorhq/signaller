@@ -125,6 +125,13 @@
   <section class="board" aria-labelledby="depH">
     <h2 id="depH">Departures</h2>
     <p class="hint"><span id="depFrom">Every request</span>, newest first. Open one to see which rule decided.</p>
+    <div class="depfilt" id="depFilt" role="group" aria-label="Filter departures">
+      <label>Downstream <select id="fTrack"><option value="">any</option></select></label>
+      <label>Anthropic model <select id="fModel"><option value="">any</option><option>fable</option><option>opus</option><option>sonnet</option><option>haiku</option></select></label>
+      <label>Latency <select id="fOp" aria-label="Latency comparison"><option>&gt;</option><option>&lt;</option><option>=</option></select>
+        <input id="fLat" type="number" min="0" step="0.1" placeholder="s" aria-label="Latency in seconds"></label>
+      <button type="button" class="btn" id="fClear" hidden>Clear</button>
+    </div>
     <div id="deps" class="deps"></div>
     <p id="depEmpty" class="hint empty">No requests yet. Point Claude Code at the router and they'll show up here.</p>
     <button type="button" class="btn" id="older" hidden>Load older</button>

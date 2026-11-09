@@ -305,9 +305,19 @@ class Store:
         parts = (["%s IN (%s)" % (col, ",".join("?" * len(ids)))] if ids else []) + (["%s IS NULL" % col] if "unknown" in sessions else [])
         return "(%s)" % " OR ".join(parts) if parts else "0", ids
 
-    def departures(self, since_id=None, before_id=None, limit=200, sessions=None, t0=None, t1=None):
+    def departures(self, since_id=None, before_id=None, limit=200, sessions=None, t0=None, t1=None,
+                   track=None, model=None, lat_op=None, lat_ms=None):
         sc, sa = self._sess(sessions)
         w, a = [sc], sa
+        if track:
+            w.append("track = ?"); a.append(track)
+        if model:  # Anthropic-billed rows only (a downstream renames the model), by the model sent
+            w.append("track = 'anthropic' AND LOWER(model_out) LIKE ?"); a.append("%" + model.lower().replace("%", "").replace("_", "") + "%")
+        if lat_op in ("=", ">", "<") and lat_ms is not None:
+            if lat_op == "=":  # ponytail: "=" means the same to 0.1 s, the precision the row shows
+                w.append("ms BETWEEN ? AND ?"); a += [lat_ms - 50, lat_ms + 50]
+            else:
+                w.append("ms %s ?" % lat_op); a.append(lat_ms)
         if t0 is not None:
             w.append("ts >= ?"); a.append(t0)
         if t1 is not None:

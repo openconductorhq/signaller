@@ -143,6 +143,29 @@ async function forgetSession(x) {
   }
 }
 function setPick(ids) { view.pick = ids; saveView(); renderSess(); if (cfg) renderLever(); viewChanged(true); }
+// Departure filters: sent to the server so paging and the 200-row cap hold under them.
+const depFilter = { track: "", model: "", op: ">", lat: "" };
+const filtQ = () => [depFilter.track && "track=" + encodeURIComponent(depFilter.track), depFilter.model && "model=" + depFilter.model,
+  depFilter.lat !== "" && "lat_op=" + encodeURIComponent(depFilter.op) + "&lat=" + encodeURIComponent(depFilter.lat)];
+function fillTracks() {  // the select follows the setup's tracks; never touches what's being typed
+  const sel = $("fTrack"), tracks = ["anthropic", ...DS().map((d) => d.id)];
+  if (sel.options.length - 1 !== tracks.length) {
+    sel.replaceChildren(el("option", { value: "" }, "any"), ...tracks.map((t) => el("option", { value: t }, label(t))));
+    sel.value = depFilter.track;
+  }
+}
+function renderFilt() {
+  $("fClear").hidden = !(depFilter.track || depFilter.model || depFilter.lat !== "");
+}
+function filtChanged() {
+  depFilter.track = $("fTrack").value; depFilter.model = $("fModel").value; depFilter.op = $("fOp").value; depFilter.lat = $("fLat").value;
+  renderFilt();
+  viewGen++;
+  $("deps").replaceChildren(); lastId = 0; minId = null; firstLoad = true; $("older").hidden = true;
+  busy = false; tick();
+}
+for (const id of ["fTrack", "fModel", "fOp", "fLat"]) $(id).addEventListener("change", filtChanged);
+$("fClear").addEventListener("click", () => { $("fTrack").value = $("fModel").value = $("fLat").value = ""; filtChanged(); });
 // A new pick or span restarts departures (and side by side).
 function viewChanged(pickToo) {
   viewGen++;
@@ -178,7 +201,7 @@ async function tick() {
   const gen = viewGen;
   try {
     const [st, deps] = await Promise.all([api("GET", "state" + qs(sessQ(), spanQ())),
-      api("GET", "departures" + qs(sessQ(), spanQ(), lastId && "since=" + Math.max(0, lastId - OVERLAP)))]);
+      api("GET", "departures" + qs(sessQ(), spanQ(), ...filtQ(), lastId && "since=" + Math.max(0, lastId - OVERLAP)))]);
     if (gen !== viewGen) return;
     $("offline").hidden = true;
     applyState(st);
@@ -197,6 +220,7 @@ async function tick() {
 function applyState(st) {
   S = st;
   cfgRev = st.config_rev;
+  fillTracks();
   if (st.clock) $("sttClock").textContent = "Router time " + st.clock.hm + " (" + st.clock.tz + ")";  // the router's own wall clock, what "hour" means; a wrong zone must be visible
   const n = view.pick.length;  // departures list the span's requests, paged back with "Load older"
   $("depFrom").textContent = `${plural(st.summary.total, "request")}${n ? ` from the ${n === 1 ? "picked session" : n + " picked sessions"}` : ""} · ${spanText()}`;
@@ -1469,7 +1493,7 @@ function addDeps(rows) {
 $("older").addEventListener("click", async () => {
   const g = viewGen;
   try {
-    const rows = await api("GET", "departures" + qs(sessQ(), spanQ(), "before=" + minId));
+    const rows = await api("GET", "departures" + qs(sessQ(), spanQ(), ...filtQ(), "before=" + minId));
     if (g !== viewGen) return;  // the pick changed: these rows belong to the old list
     $("deps").append(...rows.map((r) => { const n = depRow(r); n.classList.add("older"); return n; }));
     if (rows.length) minId = rows[rows.length - 1].id;

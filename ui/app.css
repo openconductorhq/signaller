@@ -350,3 +350,9 @@ ol.prlist>li{padding:10px 4px;border-top:1px solid var(--line)}
 .tresrow{display:grid;grid-template-columns:1fr 110px 110px;gap:8px;padding:4px 0;align-items:baseline}
 .tresrow :nth-child(2),.tresrow :nth-child(3){text-align:right}
 .treshead{color:var(--muted);font-size:12px}
+
+.depfilt { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 6px 0 10px; font-size: 13px; color: var(--muted); }
+.depfilt label { display: inline-flex; align-items: center; gap: 6px; }
+.depfilt select, .depfilt input { border: 1px solid var(--off); background: #fff; border-radius: 6px; padding: 4px 7px; font: 12px var(--mono); color: var(--ink); }
+.depfilt input { width: 5.5em; }
+.depfilt .btn { margin-top: 0; }

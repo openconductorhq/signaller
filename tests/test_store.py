@@ -361,3 +361,19 @@ def test_summary_latency(tmp_path):
     v = m["valar"]["latency"]  # the 502 is left out; medians resist the 125 s outlier
     assert (v["n"], v["ttfb"], v["ms"], v["ttfb_mean"]) == (3, 2000, 6000, 2000)
     assert m["anthropic"]["latency"]["n"] == 1 and m["local"]["latency"] is None
+
+
+def test_departures_filters(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    rows = [("anthropic", "claude-opus-5-5", 900), ("anthropic", "claude-sonnet-5-5", 2000),
+            ("local", "claude-opus-5-5", 2000), ("local", "qwen", 3100)]
+    for i, (t, m, ms) in enumerate(rows):
+        s.record_request(req(s.next_id(), now - i, t, model_in="claude-opus-5-5", model_out=m, ms=ms))
+    s.close()
+    ids = lambda **k: sorted(r["id"] for r in s.departures(**k))
+    assert ids(track="local") == [3, 4]
+    assert ids(model="opus") == [1]  # a downstream's opus-asked request isn't billed by Anthropic
+    assert ids(lat_op=">", lat_ms=1000) == [2, 3, 4]
+    assert ids(lat_op="<", lat_ms=2000) == [1]
+    assert ids(lat_op="=", lat_ms=2000) == [2, 3]
+    assert ids(track="local", lat_op=">", lat_ms=2500) == [4]
