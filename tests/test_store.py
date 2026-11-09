@@ -377,3 +377,11 @@ def test_departures_filters(tmp_path):
     assert ids(lat_op="<", lat_ms=2000) == [1]
     assert ids(lat_op="=", lat_ms=2000) == [2, 3]
     assert ids(track="local", lat_op=">", lat_ms=2500) == [4]
+
+
+def test_departures_errors_only(tmp_path):
+    s, now = Store(str(tmp_path / "s.db")), time.time()
+    for st in (200, 429, 502, 0):
+        s.record_request(req(s.next_id(), now, status=st))
+    s.close()
+    assert sorted(r["id"] for r in s.departures(errors=True)) == [3, 4]

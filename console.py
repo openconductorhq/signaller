@@ -318,7 +318,7 @@ def api(h, app, method, path, query, body):
         except ValueError:
             raise Err(400, "lat must be a number of seconds")
         return st.departures(q.get("since"), q.get("before"), 200, ids, t0, t1,
-                             g("track") or None, g("model") or None, g("lat_op") or None, lat)
+                             g("track") or None, g("model") or None, g("lat_op") or None, lat, g("errors") == "1")
     if path == "/ui/api/sessions" and method == "GET":
         ids, t0, t1 = filt(query)
         return st.list_sessions(t0 if t0 is not None else st.first_ts(None), t1)

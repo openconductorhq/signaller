@@ -306,9 +306,11 @@ class Store:
         return "(%s)" % " OR ".join(parts) if parts else "0", ids
 
     def departures(self, since_id=None, before_id=None, limit=200, sessions=None, t0=None, t1=None,
-                   track=None, model=None, lat_op=None, lat_ms=None):
+                   track=None, model=None, lat_op=None, lat_ms=None, errors=False):
         sc, sa = self._sess(sessions)
         w, a = [sc], sa
+        if errors:  # as stats(): a 5xx or no answer
+            w.append("(status >= 500 OR status = 0)")
         if track:
             w.append("track = ?"); a.append(track)
         if model:  # Anthropic-billed rows only (a downstream renames the model), by the model sent

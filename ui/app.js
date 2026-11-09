@@ -1503,6 +1503,22 @@ $("older").addEventListener("click", async () => {
   }
 });
 
+/* ---------- errors in the last hour ---------- */
+$("errs").addEventListener("click", async () => {
+  const list = $("errList");
+  list.replaceChildren(el("p", { class: "hint" }, "Loading…")); $("errEmpty").hidden = true;
+  $("errDlg").showModal();
+  try {
+    const rows = await api("GET", "departures?errors=1&from=" + (Date.now() / 1000 - 3600));  // every session, not just the picked ones
+    list.replaceChildren(...rows.map(depRow));
+    $("errEmpty").hidden = !!rows.length;
+  } catch (e) {
+    list.replaceChildren(el("p", { class: "err" }, "Couldn't load the errors: " + e.message));
+  }
+});
+$("errClose").addEventListener("click", () => $("errDlg").close());
+$("errDlg").addEventListener("click", (e) => { if (e.target === $("errDlg")) $("errDlg").close(); });  // the backdrop
+
 /* ---------- the yard: one dot per real request ---------- */
 function animate(rows) {
   if (reduceMotion.matches) return;

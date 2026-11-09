@@ -17,7 +17,7 @@
   <header class="top">
     <h1>signaller</h1>
     <button type="button" class="presetgo" id="presetGo" hidden>running <b id="presetName"></b></button>
-    <span class="who"><span id="who">connecting…</span> <span id="errs" class="errs" hidden></span></span>
+    <span class="who"><span id="who">connecting…</span> <button type="button" id="errs" class="errs" title="Review these errors" hidden></button></span>
     <div class="frame" id="lever" role="radiogroup" aria-label="Lever: where requests go">
       <button type="button" class="lever" role="radio" data-v="anthropic" data-t="anthropic" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
       <button type="button" class="lever" role="radio" data-v="rules" aria-checked="false"><b>Rules</b><small>follow the rulebook</small></button>
@@ -121,6 +121,13 @@
       <div class="edbtns"><button type="button" class="btn primary" id="wSave">Save</button><button type="button" class="btn" id="wCancel">Cancel</button></div>
     </div>
   </section>
+
+  <dialog id="errDlg" class="errdlg" aria-labelledby="errH">
+    <div class="errhead"><h2 id="errH">Errors in the last hour</h2><button type="button" class="btn" id="errClose">Close</button></div>
+    <p class="hint">Newest first. Open one to see the rule that sent it, the status, timings and the prompt.</p>
+    <div id="errList" class="deps"></div>
+    <p id="errEmpty" class="hint empty" hidden>No errors in the last hour.</p>
+  </dialog>
 
   <section class="board" aria-labelledby="depH">
     <h2 id="depH">Departures</h2>
