@@ -33,6 +33,7 @@ h3{font-size:20px;margin:0 0 10px;font-weight:600;letter-spacing:.3px}
 .top{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
 .top h1{font-size:30px;margin:0;letter-spacing:.5px;font-weight:700}
 .who{color:var(--muted);font-size:13px}
+.fphint{margin-left:8px;background:none;border:0;padding:0;font:inherit;font-size:12.5px;color:var(--muted);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
 .errs{color:var(--stop);font-weight:600;margin-left:8px;background:none;border:0;padding:0;font:inherit;font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
 .frame{margin-left:auto;display:flex;gap:6px;background:var(--well);padding:6px;border-radius:10px}
 .lever{border:0;border-radius:7px;padding:8px 14px;background:transparent;color:var(--ink);cursor:pointer;text-align:left;transition:background .15s,color .15s}
@@ -362,3 +363,5 @@ ol.prlist>li{padding:10px 4px;border-top:1px solid var(--line)}
 .errhead { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .errhead h2 { margin: 0; }
 .errhead .btn { margin-top: 0; }
+.errdlg code { font-family: var(--mono); font-size: 12px; }
+#fpCmd { white-space: pre-wrap; word-break: break-all; }

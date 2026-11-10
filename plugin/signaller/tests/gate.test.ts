@@ -595,3 +595,12 @@ test('a fetch that never gets an answer is the router being down', async ($: any
   expect(r.text).toContain("signaller isn't reachable at")  // a network error, never "signaller answered N"
   expect(r.text).not.toContain('signaller answered')
 })
+
+test('the lever read tells the router whether Claude Code runs with the first-party flag', async ($, on) => {
+  const urls: string[] = []
+  on('env.get', (_, e) => ({ value: e.name === '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL' ? '1' : undefined }))
+  await stub($, on, (e) => (urls.push(String(e.url)), { value: { ok: true, status: 200, text: LEVER } }))
+  await $.prompt.submit({ text: 'hello' })
+  await $.tool.call({ tool: TOOL })
+  expect(urls.some((u) => u.includes('/ui/api/lever?session=s1&fp=1'))).toBe(true)
+})

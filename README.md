@@ -127,9 +127,16 @@ console shows your history, `docker volume rm claude-router_stats`.
 Add this to `~/.claude/settings.json`:
 
 ```json
-"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"}
+"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787",
+        "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL": "1"}
 ```
 
+- **Why the second line:** with any other base URL Claude Code drops your
+  account's model list (`[servedCatalog] off (not_first_party)` in `--debug`)
+  and shows only the models compiled into it, so a newly released model such
+  as Fable 5.2 is missing from `/model`. The flag tells it the base URL is
+  Anthropic's; signaller passes those calls through. It is undocumented and
+  internal to Claude Code (checked on 2.1.322), so an update may drop it.
 - **Bypass for one session:** `ANTHROPIC_BASE_URL= claude`
 - **Router down:** every Claude Code session fails to connect. Use the bypass,
   or restart the router.

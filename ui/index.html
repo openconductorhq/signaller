@@ -17,7 +17,7 @@
   <header class="top">
     <h1>signaller</h1>
     <button type="button" class="presetgo" id="presetGo" hidden>running <b id="presetName"></b></button>
-    <span class="who"><span id="who">connecting…</span> <button type="button" id="errs" class="errs" title="Review these errors" hidden></button></span>
+    <span class="who"><span id="who">connecting…</span> <button type="button" id="errs" class="errs" title="Review these errors" hidden></button> <button type="button" id="fpHint" class="fphint" title="A shell alias that starts Claude Code through signaller with every model in the picker" hidden>signallercode alias available</button></span>
     <div class="frame" id="lever" role="radiogroup" aria-label="Lever: where requests go">
       <button type="button" class="lever" role="radio" data-v="anthropic" data-t="anthropic" aria-checked="false"><b>Anthropic</b><small>everything, ignore rules</small></button>
       <button type="button" class="lever" role="radio" data-v="rules" aria-checked="false"><b>Rules</b><small>follow the rulebook</small></button>
@@ -121,6 +121,14 @@
       <div class="edbtns"><button type="button" class="btn primary" id="wSave">Save</button><button type="button" class="btn" id="wCancel">Cancel</button></div>
     </div>
   </section>
+
+  <dialog id="fpDlg" class="errdlg" aria-labelledby="fpH">
+    <div class="errhead"><h2 id="fpH">Start Claude Code with <code>signallercode</code></h2><button type="button" class="btn" id="fpClose">Close</button></div>
+    <p class="hint">Through signaller, Claude Code drops your account's model list and shows only the models built into it, so a new model (Fable 5.2) is missing from <code>/model</code>. <code>_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1</code> brings the list back; signaller passes those calls to Anthropic. The router runs in Docker and can't touch your shell, so add the alias yourself: run this once in a terminal, then start sessions with <code>signallercode</code>.</p>
+    <pre class="prompt" id="fpCmd"></pre>
+    <div class="edbtns"><button type="button" class="btn primary" id="fpCopy">Copy</button><span class="hint" id="fpCopied" role="status"></span></div>
+    <p class="hint">For bash, change <code>~/.zshrc</code> to <code>~/.bashrc</code>. This hint goes away once a session started with the flag (and the signaller plugin) talks to the router. The flag is internal to Claude Code, so an update may drop it.</p>
+  </dialog>
 
   <dialog id="errDlg" class="errdlg" aria-labelledby="errH">
     <div class="errhead"><h2 id="errH">Errors in the last hour</h2><button type="button" class="btn" id="errClose">Close</button></div>

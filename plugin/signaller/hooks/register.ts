@@ -31,12 +31,19 @@ const call = async ($: EngineInterface, url: string, init?: { method: string; bo
   return JSON.parse(r.text)
 }
 
-// this session's lever: its own if /signaller set one, else the router's global one
+const fpOn = (v: string | undefined): boolean => !!v && !/^(0|false|no|off)$/i.test(v.trim())
+// "&fp=1|0" for the lever read; nothing when the variable can't be read (the router keeps its last report)
+const fpQ = async ($: EngineInterface): Promise<string> => {
+  try { return `&fp=${fpOn(await $.env.get('_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL')) ? 1 : 0}` } catch { return '' }
+}
+
+// this session's lever: its own if /signaller set one, else the router's global one. The read also tells the
+// router whether this Claude Code runs with the first-party flag (the console's signallercode hint).
 const lever = async ($: EngineInterface, set?: { lever: string | null }): Promise<Lever> => {
   const session = await $.session.id()
   const l = await (set
     ? call($, LEVER, { method: 'PUT', body: { session, ...set } })
-    : call($, `${LEVER}?session=${encodeURIComponent(session)}`)) as Lever
+    : call($, `${LEVER}?session=${encodeURIComponent(session)}${await fpQ($)}`)) as Lever
   if (Array.isArray(l.modes) && l.modes.length) MODES = l.modes
   return l
 }

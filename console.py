@@ -244,7 +244,7 @@ def state(app, query=None):
             for p in app.presets["presets"]]
     return {"config": live, "config_rev": app.rev, "stats": app.store.stats(time.time(), ts),
             "summary": app.store.summary(ids, t0, t1, time.time(), tracks(app.routing)), "banner": app.banner,
-            "uptime_s": int(time.time() - app.started), "listen": "%s:%d" % (c.listen_host, c.listen_port),
+            "uptime_s": int(time.time() - app.started), "first_party": getattr(app, "first_party", None), "listen": "%s:%d" % (c.listen_host, c.listen_port),
             "dropped": app.store.dropped,
             "downstreams": {d.id: {"key_set": app.keys.has(d.id, d.url), "url": urlsplit(d.url).netloc} for d in app.routing.downstreams},
             "recent_count": len(app.recent), "auto_model": app.auto_model is not None,
@@ -347,6 +347,8 @@ def api(h, app, method, path, query, body):
             app.set_session_lever(sid, lever)
         elif method != "GET":
             raise Err(405, "GET or PUT")
+        elif "fp" in query:  # the plugin's report: does this Claude Code run with _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL?
+            app.first_party = query["fp"][0] == "1"
         own = app.lever_for(sid)
         auto = app.auto_for(sid) if (own or app.routing.lever) == "auto" else None  # the phase auto last chose, while auto is its lever
         return {"lever": own or app.routing.lever, "session": own, "global": app.routing.lever, "modes": modes, "auto": auto,

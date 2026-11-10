@@ -212,6 +212,7 @@ class App:
         self._rlock = threading.Lock()
         self.lever_path = os.path.join(config_dir, "session_levers.json")
         self.session_levers = self._load_levers()  # session id -> lever /signaller chose for that session only
+        self.first_party = None  # the latest plugin report: Claude Code runs with the first-party flag (None: no report yet)
         self.notices = {}  # session id -> {"turn", "text"}: the plugin shows it once (an image fallback)
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
         self._turn_hours = BoundedDict(512)  # turn_key -> the hour its turn runs at

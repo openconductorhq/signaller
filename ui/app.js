@@ -229,6 +229,7 @@ function applyState(st) {
   $("banner").textContent = st.banner || "";
   $("who").textContent = `${st.listen} · up ${fmtUp(st.uptime_s)}`;
   $("errs").hidden = !s.errors_last_hour;
+  $("fpHint").hidden = st.first_party === true;  // shown until a session reports the flag through the plugin
   $("errs").textContent = `${s.errors_last_hour} error${s.errors_last_hour === 1 ? "" : "s"} in the last hour`;
   const m = st.summary, span = spanText();
   $("share").textContent = (view.span === "custom" ? "share of " : "share of the ") + span;
@@ -1502,6 +1503,16 @@ $("older").addEventListener("click", async () => {
     if (g === viewGen) $("offline").hidden = false;
   }
 });
+
+/* ---------- the signallercode alias ---------- */
+const fpCmd = () => `echo "alias signallercode='ANTHROPIC_BASE_URL=${location.origin} _CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL=1 claude --dangerously-skip-permissions'" >> ~/.zshrc && source ~/.zshrc`;
+$("fpHint").addEventListener("click", () => { $("fpCmd").textContent = fpCmd(); $("fpCopied").textContent = ""; $("fpDlg").showModal(); });
+$("fpCopy").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(fpCmd()); $("fpCopied").textContent = "Copied."; }
+  catch (_) { $("fpCopied").textContent = "Couldn't copy; select the line above."; }
+});
+$("fpClose").addEventListener("click", () => $("fpDlg").close());
+$("fpDlg").addEventListener("click", (e) => { if (e.target === $("fpDlg")) $("fpDlg").close(); });
 
 /* ---------- errors in the last hour ---------- */
 $("errs").addEventListener("click", async () => {

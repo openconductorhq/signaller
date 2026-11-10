@@ -181,6 +181,15 @@ class ConsoleTest(Fixture):
         r, _ = self.req("GET", "/ui?x=1", origin=None)
         self.assertEqual(r.status, 200)
 
+    def test_plugin_reports_first_party_flag(self):
+        self.assertIsNone(self.js("GET", "/ui/api/state")[1]["first_party"])  # no report yet: the console offers the alias
+        self.js("GET", "/ui/api/lever?session=s1&fp=0")
+        self.assertIs(self.js("GET", "/ui/api/state")[1]["first_party"], False)
+        self.js("GET", "/ui/api/lever?session=s1&fp=1")
+        self.assertIs(self.js("GET", "/ui/api/state")[1]["first_party"], True)
+        self.js("GET", "/ui/api/lever?session=s1")  # an older plugin says nothing: the last report stands
+        self.assertIs(self.js("GET", "/ui/api/state")[1]["first_party"], True)
+
     def test_session_lever_applies_to_that_session_only(self):
         self.assertEqual(self.js("GET", "/ui/api/lever?session=s1")[1], {"lever": "rules", "session": None, "global": "rules",
                                                                          "modes": ["rules", "auto", "anthropic", "valar"], "name": None,
