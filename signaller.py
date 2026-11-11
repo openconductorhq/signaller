@@ -835,7 +835,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             images = route != "anthropic" and has_images(req)
             # the row bills every leg as the downstream sent it (each leg re-sends the conversation); the client
             # stream keeps leg 1's input and cache tokens. One capture per leg, raw bytes
-            leg_caps = []
+            leg_caps, sp = [], None
             adv_ms = [0]  # time spent in advice calls: their own rows carry it, the served row's ms doesn't
             # the columns the served row and its advice rows share
             context = lambda: {"track": route, "step": f.step, "prompt": f.prompt, "turn_id": turn_id, "session_id": sid,
@@ -1004,7 +1004,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 except Exception:
                     res = {}
                 usage = res.get("usage") or {}
-                if len(leg_caps) > 1:  # advised: the row's tokens are every leg's, summed
+                if sp:  # the Splicer may have held leg 1's message_delta back from cap: every leg's tokens, summed
                     usage = sum_usage(leg_caps)
                 if pair:
                     res = res or AnswerCapture.EMPTY

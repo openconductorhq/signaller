@@ -964,6 +964,48 @@ class ProxyTest(unittest.TestCase):
         self.assertGreaterEqual(adv["ms"], 500)
         self.assertLess(served["ms"], 400)  # the advice's time is its own row's, not counted twice
 
+    def test_served_row_bills_leg1_when_the_client_leaves_during_the_advice(self):
+        """No leg 2: the row still has leg 1's held message_delta (9 output tokens), not message_start's 1."""
+        self.advised()
+        self.v.script = [leg("ask", ("advisor", "tu1"), out=9), (*ADVICE, 0.5), leg("done")]
+        body = self.adv_body()
+        with mock.patch.object(signaller, "PING_EVERY", 0.05):
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+            got = b""
+            while b"event: ping" not in got:
+                got += s.recv(4096)
+            s.close()
+            served, _ = self.rows(2)
+        self.assertEqual(len(self.v.seen), 2)
+        self.assertEqual((served["out_tok"], served["in_tok"]), (9, 100))
+
+    def test_advised_answer_without_a_call_bills_as_before(self):
+        self.advised()
+        self.v.script = [leg("hi", out=7)]
+        _, data = self.post(self.adv_body())
+        served = self.rows(1)[0]
+        want = signaller.AnswerCapture("text/event-stream")
+        want.feed(data)
+        self.assertEqual({k: served[k + "_tok"] for k in ("in", "out", "cache_read", "cache_write", "cache_write_1h")},
+                         {k: want.result()["usage"].get(k) for k in ("in", "out", "cache_read", "cache_write", "cache_write_1h")})
+        self.assertEqual((served["in_tok"], served["out_tok"], served["cache_read_tok"]), (100, 7, 50))
+
+    def test_served_row_bills_leg1_when_leg2_fails_to_connect(self):
+        self.advised()
+        self.v.script = [leg("ask", ("advisor", "tu1"), out=9), ADVICE]
+        real, n = signaller.open_upstream, []
+
+        def flaky(*a):  # leg 1 and the advice connect; leg 2 doesn't
+            n.append(1)
+            if len(n) == 3:
+                raise ConnectionRefusedError("refused")
+            return real(*a)
+        with mock.patch.object(signaller, "open_upstream", flaky):
+            self.post(self.adv_body())
+        served, _ = self.rows(2)
+        self.assertEqual((served["out_tok"], served["in_tok"]), (9, 100))
+
     def test_non_streaming_strips(self):
         self.advised()
         self.post(self.adv_body(stream=False))
