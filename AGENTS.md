@@ -144,10 +144,10 @@ breaks.
   unreadable-model banner; it answers 409 when the held-out verdict is
   "too few" or the fit has no weights.
 - **The Advisor** (`advisor.py`, a downstream's `advisor` switch): `prepare()`
-  returns ten values, the last an `AdvisorPlan` (the model and window its calls
-  run on) or None. A streaming `/v1/messages` request to a downstream with the
-  switch on is offered the Advisor as an ordinary tool (`to_client_form`); the
-  served stream then goes through a `Splicer`, which may rewrite it (an advisor
+  returns a `Prepared`, its `plan` an `AdvisorPlan` (the model and window its
+  calls run on, and the advisor model Claude Code asked for) or None. A
+  streaming `/v1/messages` request to a downstream with the switch on is offered
+  the Advisor as an ordinary tool (`to_client_form`); the served stream then goes through a `Splicer`, which may rewrite it (an advisor
   call held back, the advice blocks spliced in, later legs' indices shifted)
   while the advice leaves for the same downstream with the same key. At most
   `MAX_CALLS` per request. Each advice call is its own `requests` row with
