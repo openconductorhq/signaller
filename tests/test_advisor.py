@@ -360,6 +360,41 @@ class SplicerTest(unittest.TestCase):
         self.assertEqual([e.get("index") for e in rest], [5, 5, 5, None, None])
         self.assertEqual(rest[-2]["usage"]["output_tokens"], 11)
 
+    def test_second_advisor_call_alone_is_dropped(self):
+        """Two advisor calls in one message: the first is the splice, the second is dropped (not a client call),
+        so the message isn't mixed and leg 2 runs with its indices right after the advice."""
+        sp = A.Splicer()
+        out = feed_all(sp, sse(mstart(), *text_block(0), *tool_block(1, "advisor", "tu1"),
+                               *tool_block(2, "advisor", "tu2"), mdelta("tool_use"), MSTOP), 4)
+        self.assertEqual(ev_list(out), [mstart(), *text_block(0)])
+        self.assertEqual((sp.call, sp.mixed), ({"id": "tu1"}, False))
+        self.assertEqual([e["index"] for e in ev_list(sp.advice_events("x", "do X", False))], [1, 1, 2, 2])
+        sp.next_leg()
+        out = ev_list(feed_all(sp, sse(mstart(), *text_block(0, "ok"), mdelta("end_turn", 5), MSTOP)))
+        self.assertEqual([e.get("index") for e in out if e["type"].startswith("content_block")], [3, 3, 3])
+
+    def test_second_advisor_call_with_bash_is_dropped(self):
+        """advisor, Bash, advisor, Bash: mixed; rest() holds the two Bash calls only, right after the advice."""
+        sp = A.Splicer()
+        feed_all(sp, sse(mstart(), *tool_block(0, "advisor", "tu1"), *tool_block(1, "Bash", "tb"),
+                         *tool_block(2, "advisor", "tu2"), *tool_block(3, "Bash", "tc"), mdelta("tool_use"), MSTOP))
+        self.assertTrue(sp.mixed)
+        sp.advice_events("x", "do X", False)
+        self.assertEqual(ev_list(sp.rest()), [*tool_block(2, "Bash", "tb"), *tool_block(3, "Bash", "tc"),
+                                              mdelta("tool_use"), MSTOP])
+
+    def test_second_advisor_call_dropped_on_second_leg(self):
+        """The same on leg 2: the shift for the dropped call stacks on leg 1's offset."""
+        sp = A.Splicer()
+        feed_all(sp, sse(*self.LEG1))
+        sp.advice_events("x", "do X", False)
+        sp.next_leg()
+        feed_all(sp, sse(mstart(), *tool_block(0, "advisor", "tu2"), *tool_block(1, "advisor", "tu3"),
+                         *tool_block(2, "Bash", "tb"), mdelta("tool_use", 4), MSTOP))
+        self.assertTrue(sp.mixed)
+        self.assertEqual([e["index"] for e in ev_list(sp.advice_events("y", "do Y", False))], [3, 3, 4, 4])
+        self.assertEqual([e.get("index") for e in ev_list(sp.rest())], [5, 5, 5, None, None])
+
     def test_bash_before_advisor_is_out_and_mixed(self):
         sp = A.Splicer()
         out = feed_all(sp, sse(mstart(), *tool_block(0, "Bash", "tb"), *tool_block(1, "advisor", "tu1"),

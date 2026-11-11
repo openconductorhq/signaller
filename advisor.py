@@ -208,6 +208,7 @@ class Splicer:
         self._blocks, self._json = {}, {}  # leg index -> block before the call / its partial_json pieces
         self._parts = {}                   # leg index -> {text/thinking/signature: delta pieces}, joined in .partial
         self._adv = self._adv_id = None    # the advisor tool_use's leg index and id
+        self._dropped = set()              # leg indices of later advisor tool_use blocks: not run, sent or counted
         self._tools, self._top = 0, -1     # tool_use blocks in the message; highest leg index seen
         self._held = []                    # (bytes as they'd go out, event as parsed or None, leg index or None)
 
@@ -286,7 +287,10 @@ class Splicer:
         if k == "content_block_start":
             cb = ev.get("content_block") or {}
             if cb.get("type") == "tool_use":
-                self._tools += 1
+                if cb.get("name") == "advisor" and self._adv is not None:
+                    self._dropped.add(i)  # only the first advisor call is spliced
+                else:
+                    self._tools += 1
                 if cb.get("name") == "advisor" and self._adv is None:
                     self._adv, self._adv_id = i, str(cb.get("id"))
             if self._adv is None:
@@ -334,13 +338,15 @@ class Splicer:
                 _sse({"type": "content_block_stop", "index": at + 1})]
 
     def rest(self) -> list:
-        """After advice_events on a mixed call: the other held blocks shifted past the advice, then the tail."""
+        """After advice_events on a mixed call: the other held blocks shifted past the advice, then the tail.
+        Later advisor calls are left out too, and the blocks after them close up."""
         out = []
         for b, ev, j in self._held:
             if j is None:
                 out.append(b)
-            elif j != self._adv:
-                out.append(_sse({**ev, "index": j - self._adv - 1 + self.offset}))
+            elif j != self._adv and j not in self._dropped:
+                gone = 1 + sum(1 for d in self._dropped if d < j)  # the advisor call and the dropped ones before j
+                out.append(_sse({**ev, "index": j - gone - self._adv + self.offset}))
         self._held = []
         return out
 
