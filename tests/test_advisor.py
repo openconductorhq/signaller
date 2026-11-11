@@ -201,6 +201,16 @@ class AdvisorTest(unittest.TestCase):
         b = A.continue_request(r, [], "s9", "go", False, True)
         self.assertTrue(any(t.get("name") == "advisor" for t in b["tools"]))
 
+    def test_continue_request_carries_the_id_given(self):
+        """The id passed in (the issued one, from signaller) is on both the tool_use and its tool_result."""
+        sid = A.ISSUED + "tu1"
+        b = A.continue_request(req([txt("a")], tools=[A.TOOL]), [txt("w")], sid, "go", False, False)
+        self.assertEqual(b["messages"][-2]["content"][-1]["id"], sid)
+        self.assertEqual(b["messages"][-1]["content"][0]["tool_use_id"], sid)
+
+    def test_sse_is_public(self):
+        self.assertEqual(A.sse({"type": "ping"}), b'event: ping\ndata: {"type": "ping"}\n\n')
+
     def test_requests_share_but_never_mutate_the_original(self):
         r = req([txt("a")], tools=[{"name": "Bash"}, A.TOOL])
         r["thinking"] = {"type": "enabled"}

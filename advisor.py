@@ -187,7 +187,7 @@ def _in_field(f) -> bool:
     return f == "input_tokens" or str(f).startswith("cache_")
 
 
-def _sse(ev: dict) -> bytes:
+def sse(ev: dict) -> bytes:
     return b"event: %s\ndata: %s\n\n" % (str(ev.get("type")).encode(), json.dumps(ev).encode())
 
 
@@ -277,7 +277,7 @@ class Splicer:
                         else:
                             del new[f]
                 if new != u:
-                    raw = _sse({**ev, "usage": new})
+                    raw = sse({**ev, "usage": new})
             if (ev.get("delta") or {}).get("stop_reason") == "tool_use" and self._adv is not None:
                 self.call, self.mixed = {"id": self._adv_id}, self._tools > 1
             return raw, ev, None
@@ -303,7 +303,7 @@ class Splicer:
             if d.get("type") == "input_json_delta" and isinstance(d.get("partial_json"), str):
                 self._json.setdefault(i, []).append(d["partial_json"])
         if self.offset:
-            raw = _sse({**ev, "index": i + self.offset})
+            raw = sse({**ev, "index": i + self.offset})
         return raw, ev, i
 
     @property
@@ -330,12 +330,12 @@ class Splicer:
         content = ({"type": "advisor_tool_result_error", "error_code": "unavailable"} if error else
                    {"type": "advisor_result", "text": text or "", "stop_reason": "end_turn"})
         self.offset = at + 2
-        return [_sse({"type": "content_block_start", "index": at,
+        return [sse({"type": "content_block_start", "index": at,
                       "content_block": {"type": "server_tool_use", "id": sid, "name": "advisor", "input": {}}}),
-                _sse({"type": "content_block_stop", "index": at}),
-                _sse({"type": "content_block_start", "index": at + 1,
+                sse({"type": "content_block_stop", "index": at}),
+                sse({"type": "content_block_start", "index": at + 1,
                       "content_block": {"type": "advisor_tool_result", "tool_use_id": sid, "content": content}}),
-                _sse({"type": "content_block_stop", "index": at + 1})]
+                sse({"type": "content_block_stop", "index": at + 1})]
 
     def rest(self) -> list:
         """After advice_events on a mixed call: the other held blocks shifted past the advice, then the tail.
@@ -346,7 +346,7 @@ class Splicer:
                 out.append(b)
             elif j != self._adv and j not in self._dropped:
                 gone = 1 + sum(1 for d in self._dropped if d < j)  # the advisor call and the dropped ones before j
-                out.append(_sse({**ev, "index": j - gone - self._adv + self.offset}))
+                out.append(sse({**ev, "index": j - gone - self._adv + self.offset}))
         self._held = []
         return out
 

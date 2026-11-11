@@ -75,7 +75,7 @@ MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_erro
                  b'"message":"signaller: upstream ended mid-stream"}}\n\n')
 ADVICE_CAP = 4 << 20  # bytes read of an advice answer; a longer one fails as unparseable
 PING_EVERY = 10.0  # seconds between SSE pings to Claude Code while an advice call runs (no bytes flow otherwise)
-PING_SSE = advisor._sse({"type": "ping"})
+PING_SSE = advisor.sse({"type": "ping"})
 ISSUED_BYTES = advisor.ISSUED.encode()
 
 
