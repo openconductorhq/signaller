@@ -30,7 +30,8 @@ from keys import host_of
 from prices import Prices, parse_valar
 from routing import (DEFAULT_CONFIG, LEVER_MODES, has_images, session_of, strip_lead_tags, text_hash, Decision, Downstream, Features, RoutingConfig,
                      config_from_json, config_to_json, downstream, is_routed, references, route as decide_route,
-                     is_advisor, track_model, track_window, tracks)
+                     track_model, track_window, tracks)
+from advisor import strip_advisor
 from keys import Keys, write_json
 from store import NullStore, Store, load_console_config, save_console_config
 
@@ -120,28 +121,6 @@ def hoist_inline_tools(req: dict) -> bool:
     if changed:
         req["messages"] = [m for m in req["messages"] if not (isinstance(m, dict) and m.get("content") == [])]
         req["tools"] = rest + list(tools.values())
-    return changed
-
-
-def strip_advisor(req: dict) -> bool:
-    """Every downstream: drop the Advisor tool definition and its calls and results from the history
-    (server_tool_use named advisor, advisor_tool_result): a downstream can't run it and rejects the types.
-    A message the drop leaves empty goes too. True if anything changed."""
-    tools = req.get("tools")
-    changed = False
-    if isinstance(tools, list) and any(isinstance(t, dict) and is_advisor(t) for t in tools):
-        req["tools"] = [t for t in tools if not (isinstance(t, dict) and is_advisor(t))]
-        changed = True
-    adv = lambda b: isinstance(b, dict) and (b.get("type") == "advisor_tool_result"
-                                             or (b.get("type") == "server_tool_use" and b.get("name") == "advisor"))
-    msgs = req.get("messages")
-    for m in msgs if isinstance(msgs, list) else []:
-        c = m.get("content") if isinstance(m, dict) else None
-        if isinstance(c, list) and any(adv(b) for b in c):
-            m["content"], changed = [b for b in c if not adv(b)], True
-    if changed and isinstance(msgs, list):
-        # ponytail: an emptied message is dropped, which can leave two same-role messages side by side
-        req["messages"] = [m for m in msgs if not (isinstance(m, dict) and m.get("content") == [])]
     return changed
 
 
