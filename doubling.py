@@ -204,12 +204,13 @@ class Doubler:
             req = json.loads(body)
             req["stream"] = False
             strip_lead_tags(req)
-            name, base, key, ds, headers, model_out, window, _, _, _ = prepare(app, track, str(req.get("model", "")), req, headers, routing, f)
-            if track != "anthropic" and not key:
-                raise NotConfigured("%s has no key" % name)
+            pr = prepare(app, track, str(req.get("model", "")), req, headers, routing, f)
+            ds, model_out, window = pr.ds, pr.model, pr.window  # read again for the cost below
+            if track != "anthropic" and not pr.key:
+                raise NotConfigured("%s has no key" % pr.name)
             if window:
                 out["window"] = window
-            conn, resp = self.open_upstream(base, method, path, headers, json.dumps(req).encode())
+            conn, resp = self.open_upstream(pr.base, method, path, pr.headers, json.dumps(req).encode())
             out["ttfb_ms"], out["status"] = int((time.time() - t0) * 1000), resp.status
             cap = AnswerCapture(resp.getheader("content-type", ""), resp.getheader("content-encoding", ""))
             cap.feed(resp.read())
