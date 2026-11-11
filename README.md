@@ -245,6 +245,13 @@ A fresh config ships these rules:
 - **Failures:** a downstream with no key, or one that is down, answers 502. It
   never falls back to another track, with one exception: images (below).
 
+**Advisor:** when a turn served by a downstream calls Claude Code's Advisor
+tool, the router runs that advice on the same downstream instead of Anthropic.
+Each advice call shows as its own Departures row, marked `↳ for #<id>` with the
+request that asked, and that request shows `advisor ×N`. Each downstream has an
+Advisor checkbox in the console's Tracks row. Claude Code's
+`CLAUDE_CODE_DISABLE_ADVISOR_TOOL` turns the Advisor off everywhere.
+
 **Images:** when the conversation holds an image and a downstream answers 400
 about it (a text-only model, like Valar's `zai-org/GLM-5.3`: "this model does
 not support image input"), the router sends that same request to Anthropic

@@ -365,3 +365,5 @@ ol.prlist>li{padding:10px 4px;border-top:1px solid var(--line)}
 .errhead .btn { margin-top: 0; }
 .errdlg code { font-family: var(--mono); font-size: 12px; }
 #fpCmd { white-space: pre-wrap; word-break: break-all; }
+.dep .adv{display:block;font-weight:400;color:var(--muted)}
+.tacts .tadv{display:flex;gap:4px;align-items:center}.tacts .tadv input{width:auto}

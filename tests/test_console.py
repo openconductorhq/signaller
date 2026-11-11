@@ -437,6 +437,21 @@ class ConsoleTest(Fixture):
             s, j = self.js("GET", p)
             self.assertEqual((s, j["error"]), (400, "from/to must be numbers or 'session'"))
 
+    def test_departures_carry_parent_id(self):
+        now = time.time()
+        st = self.app.store
+        st.record_request({"id": 910, "ts": now - 5, "track": "valar", "status": 200, "session_id": "adv", "reason": "default", "cost": 0.5})
+        st.record_request({"id": 911, "ts": now - 4, "track": "valar", "status": 200, "session_id": "adv", "reason": "advisor",
+                           "parent_id": 910, "model_in": "claude-opus-5-5", "model_out": "glm", "cost": 0.25})
+        st.close()
+        st.__init__(st.path)
+        rows = {r["id"]: r for r in self.js("GET", "/ui/api/departures?sessions=adv")[1]}
+        self.assertEqual((rows[911]["parent_id"], rows[911]["reason"]), (910, "advisor"))
+        self.assertIsNone(rows[910]["parent_id"])
+        self.assertEqual(self.js("GET", "/ui/api/requests/911")[1]["parent_id"], 910)
+        # each leg's cost is counted once
+        self.assertAlmostEqual(self.js("GET", "/ui/api/state?sessions=adv")[1]["summary"]["tracks"]["valar"]["cost"], 0.75)
+
     def save_night(self):
         self.assertEqual(self.js("POST", "/ui/api/presets", {"name": "night", "tagline": "late shifts"}),
                          (201, {"ok": True}))

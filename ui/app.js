@@ -650,7 +650,9 @@ function trow(d) {
         showErr(pErr, p.error || "");  // shown in place: a re-render would wipe the half-filled fields
         if (!p.error) saveDs(t, { prices: p.prices });
       } })), !d.prices && el("span", {}, "unpriced"), pErr),
-    el("div", { class: "tacts" }, keyIn,
+    el("div", { class: "tacts" },
+      el("label", { class: "tadv", title: "Let the model ask a stronger model for advice (Claude Code's Advisor), run on this downstream" },
+        el("input", { type: "checkbox", checked: !!d.advisor, "data-k": "adv:" + t, onchange: (e) => saveDs(t, { advisor: e.target.checked }) }), " Advisor"), keyIn,
       el("button", { type: "button", class: "mini", "data-k": "ks:" + t, onclick: () => {
         const v = keyIn.value.trim();
         if (v) act(async () => { await dsCall("PUT", `downstreams/${encodeURIComponent(t)}/key`, { key: v }, t); keyIn.value = ""; });
@@ -1376,6 +1378,7 @@ const OVERLAP = 50;
 function shortReason(reason, row) {
   if (!reason) return "";
   if (reason === "lever") return "lever";
+  if (reason === "advisor") return "advisor";
   if (reason.startsWith("auto:")) return "auto: " + reason.slice(5);
   if (reason === "default") return "otherwise";
   if (reason.startsWith("about:")) return "about: " + reason.slice(6);
@@ -1414,12 +1417,24 @@ function depRow(r) {
     el("time", { datetime: new Date(r.ts * 1000).toISOString() }, hms(r.ts)),
     el("span", { class: "sw" + (err ? " x" : ""), style: cv(r.track), role: "img", "aria-label": err ? "error" : label(r.track) }),
     el("span", { class: "what" }, el("span", { class: "stag", "data-sid": r.session_id || "" }, shortLabel(r.session_id)), r.preview || "(no text)"),
-    el("span", { class: "why" + (err ? " x" : "") }, why(r), r.override && ovr(r.override), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄"),
+    el("span", { class: "why" + (err ? " x" : "") }, why(r), r.parent_id && el("span", { class: "adv" }, "↳ for #" + r.parent_id), r.override && ovr(r.override), r.turn_id && el("span", { class: "dbl", title: "Doubled for comparison", "aria-label": ", doubled" }, "⇄"),
       r.ms != null && el("span", { class: "lat", title: `first byte ${fmtMs(r.ttfb_ms)} · total ${fmtMs(r.ms)}` }, "latency: " + fmtMs(r.ms))));
-  const row = el("div", { class: "dep", "data-id": r.id }, head), toggle = () => toggleDep(row, head, r);
+  const row = el("div", { class: "dep", "data-id": r.id, "data-parent": r.parent_id || null }, head), toggle = () => toggleDep(row, head, r);
   head.addEventListener("click", toggle);
   head.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
   return row;
+}
+// "advisor ×N" on a row that called the Advisor: N counts the advice rows loaded in #deps that name it.
+// ponytail: counted from loaded rows, so it is short when some are paged out by "Load older".
+function markAdvisor(id) {
+  const row = $("deps").querySelector(`.dep[data-id="${id}"]`);
+  if (!row) return;
+  const n = $("deps").querySelectorAll(`.dep[data-parent="${id}"]`).length, why = row.querySelector(".why");
+  why.querySelector(".advn")?.remove();
+  if (n) why.append(el("span", { class: "adv advn" }, "advisor ×" + n));
+}
+function markAdvisors(rows) {
+  for (const r of rows) { markAdvisor(r.id); if (r.parent_id) markAdvisor(r.parent_id); }
 }
 async function toggleDep(row, head, r) {
   const open = head.getAttribute("aria-expanded") !== "true";
@@ -1450,7 +1465,7 @@ function explain(d) {
       d.cache_write_tok > 0 && `${tok(d.cache_write_tok)} cache write` + (d.cache_write_1h_tok > 0 ? ` (${tok(d.cache_write_1h_tok)} 1h)` : "")
     ].filter(Boolean).join(" · ")].filter(Boolean).join(" · ")));
   if (d.step) out.push(el("div", { class: "facts" }, "Tool results sent back in this step"), el("pre", { class: "prompt" }, d.step));
-  if (d.prompt) out.push(el("div", { class: "facts" }, d.step ? "The prompt it's working on" : "Prompt"), el("pre", { class: "prompt" }, d.prompt));
+  if (d.prompt) out.push(el("div", { class: "facts" }, d.reason === "advisor" ? "The prompt it was advising on" : d.step ? "The prompt it's working on" : "Prompt"), el("pre", { class: "prompt" }, d.prompt));
   if (d.turn_id) {
     let s = null;
     try { s = d.shadow ? JSON.parse(d.shadow.shadow) : null; } catch (_) { /* unreadable pair */ }
@@ -1489,6 +1504,7 @@ function addDeps(rows) {
     $("older").hidden = false;
   }
   $("depEmpty").hidden = true;
+  markAdvisors(rows);
   if (!wasFirst) animate([...rows].reverse());
 }
 $("older").addEventListener("click", async () => {
@@ -1497,6 +1513,7 @@ $("older").addEventListener("click", async () => {
     const rows = await api("GET", "departures" + qs(sessQ(), spanQ(), ...filtQ(), "before=" + minId));
     if (g !== viewGen) return;  // the pick changed: these rows belong to the old list
     $("deps").append(...rows.map((r) => { const n = depRow(r); n.classList.add("older"); return n; }));
+    markAdvisors(rows);
     if (rows.length) minId = rows[rows.length - 1].id;
     $("older").hidden = rows.length < 200;
   } catch (e) {
