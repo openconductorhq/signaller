@@ -724,7 +724,7 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(b1["tools"][1], advisor.TOOL)
         self.assertEqual((b2["model"], b2["tool_choice"], b2["stream"]), ("VO", {"type": "none"}, False))
         self.assertEqual(b2["messages"][-1]["content"][-1]["text"], advisor.PROMPT)
-        self.assertEqual(self.v.seen[1][1], "/v1/messages")
+        self.assertEqual([x[1] for x in self.v.seen], ["/v1/messages?beta=true"] * 3)  # the advice too: the served path
         sid = advisor.ISSUED + "tu1"  # the id the spliced block and every later request carry
         self.assertEqual(b3["messages"][-2]["content"][-1], {"type": "tool_use", "id": sid, "name": "advisor", "input": {}})
         self.assertEqual(b3["messages"][-1]["content"], [{"type": "tool_result", "tool_use_id": sid, "content": "do X"}])

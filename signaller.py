@@ -856,7 +856,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     ah = [(k, v) for k, v in pr.headers if k.lower() != WINDOW_HEADER.lower()]
                     if plan.window:
                         ah.append((WINDOW_HEADER, plan.window))
-                    c2, r2 = open_upstream(pr.base, "POST", "/v1/messages", ah, json.dumps(body_d).encode())
+                    c2, r2 = open_upstream(pr.base, "POST", self.path, ah, json.dumps(body_d).encode())  # the served path and query
                     st, ttfb1 = r2.status, int((time.time() - t1) * 1000)
                     raw = r2.read(ADVICE_CAP)
                     ac = AnswerCapture(r2.getheader("content-type", ""), r2.getheader("content-encoding", ""))
