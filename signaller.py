@@ -224,6 +224,19 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
     return Prepared(name, base, key, ds, headers, out_model, window, changed, override, plan)
 
 
+def request_row(app: "App", ds, usage: dict, model_in, model_out, window, status, ttfb, ms, **cols) -> dict:
+    """A `requests` row: cols, plus the models, window, status and timings, the usage's token columns and its price
+    (cost on ds; api_cost, what model_in would have cost on Anthropic). Pricing never fails the row: unknown → nulls."""
+    try:
+        cost, api_cost = app.prices.cost(ds, model_out, window, usage), app.prices.api_cost(model_in, usage)
+    except Exception:
+        cost = api_cost = None
+    return {**cols, "model_in": model_in, "model_out": model_out, "window": window, "status": status,
+            "ttfb_ms": ttfb if ttfb is not None else ms, "ms": ms, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
+            "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
+            "cache_write_1h_tok": usage.get("cache_write_1h"), "cost": cost, "api_cost": api_cost}
+
+
 RETRY_DELAYS = (0.5, 1.5, 3)  # seconds before each retry of a connection failure (~5 s of blips covered)
 
 
@@ -805,7 +818,9 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             # stream keeps leg 1's input and cache tokens. One capture per leg, raw bytes
             leg_caps = []
             adv_ms = [0]  # time spent in advice calls: their own rows carry it, the served row's ms doesn't
-            preview = lambda: ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120]
+            # the columns the served row and its advice rows share
+            context = lambda: {"track": route, "step": f.step, "prompt": f.prompt, "turn_id": turn_id, "session_id": sid,
+                               "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120]}
 
             def run_advice(body_d):
                 """One advisor call on the downstream, recorded as its own row: (advice text, failed). Never raises."""
@@ -831,24 +846,12 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     st = 502
                 ms1 = int((time.time() - t1) * 1000)
                 adv_ms[0] += ms1
-                try:
-                    try:
-                        cost1 = app.prices.cost(pr.ds, plan.model, plan.window, usage1)
-                    except Exception:
-                        cost1 = None
-                    try:  # what the advisor model Claude Code named would have cost on Anthropic: the savings
-                        api_cost1 = app.prices.api_cost(plan.asked, usage1)
-                    except Exception:
-                        api_cost1 = None
-                    app.store.record_request({
-                        "id": app.store.next_id(), "ts": t1, "track": route, "reason": "advisor", "parent_id": rid,
-                        "explanation": json.dumps([{"rule": "Advisor", "outcome": "asked by #%s → %s" % (rid, plan.model), "decided": True}]),
-                        "model_in": plan.asked, "model_out": plan.model, "status": st, "ttfb_ms": ttfb1 if ttfb1 is not None else ms1,
-                        "ms": ms1, "stream": 0, "preview": preview(), "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
-                        "session_id": sid, "in_tok": usage1.get("in"), "out_tok": usage1.get("out"),
-                        "cache_read_tok": usage1.get("cache_read"), "cache_write_tok": usage1.get("cache_write"),
-                        "cache_write_1h_tok": usage1.get("cache_write_1h"), "window": plan.window, "override": None,
-                        "cost": cost1, "api_cost": api_cost1})
+                try:  # api_cost: what the advisor model Claude Code named would have cost on Anthropic, the savings
+                    app.store.record_request(request_row(
+                        app, pr.ds, usage1, plan.asked, plan.model, plan.window, st, ttfb1, ms1, **context(),
+                        id=app.store.next_id(), ts=t1, reason="advisor", parent_id=rid, stream=0, override=None,
+                        explanation=json.dumps([{"rule": "Advisor", "outcome": "asked by #%s → %s" % (rid, plan.model),
+                                                 "decided": True}])))
                 except Exception:
                     pass
                 print("%s route=%s reason=advisor model=%s→%s status=%d ms=%d stream=False%s shadow=-" % (
@@ -995,23 +998,14 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 usage = res.get("usage") or {}
                 if len(leg_caps) > 1:  # advised: the row's tokens are every leg's, summed
                     usage = sum_usage(leg_caps)
-                try:  # pricing never fails the request: unknown → nulls
-                    cost, api_cost = app.prices.cost(pr.ds, pr.model, pr.window, usage), app.prices.api_cost(model, usage)
-                except Exception:
-                    cost = api_cost = None
                 if pair:
                     res = res or AnswerCapture.EMPTY
                     pair.finish({**res, "status": status, "ttfb_ms": ttfb, "ms": ms,
                                  "error": err.strip() or res.get("error")})
                 if rec:
-                    app.store.record_request({
-                        "id": rid, "ts": t0, "track": route, "reason": d.reason, "explanation": json.dumps(d.explanation),
-                        "model_in": model, "model_out": pr.model, "status": status, "ttfb_ms": ttfb if ttfb is not None else ms,
-                        "ms": ms, "stream": int(stream), "preview": preview(), "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
-                        "session_id": sid, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
-                        "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
-                        "cache_write_1h_tok": usage.get("cache_write_1h"), "window": pr.window, "override": pr.override,
-                        "cost": cost, "api_cost": api_cost})
+                    app.store.record_request(request_row(
+                        app, pr.ds, usage, model, pr.model, pr.window, status, ttfb, ms, **context(), id=rid, ts=t0,
+                        reason=d.reason, explanation=json.dumps(d.explanation), stream=int(stream), override=pr.override))
                     f.prompt, f.messages = None, None  # recorded; the preview deque keeps only the capped text, not the history
                     app.recent.append((f, d, rid))
                 shown_reason = '"%s"' % reason if re.search(r"\s", reason) else reason

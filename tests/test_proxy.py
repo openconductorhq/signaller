@@ -884,6 +884,15 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(adv["status"], 502)
         self.assertEqual(self.app.store.stats(time.time(), ("anthropic", "valar"))["errors_last_hour"], 1)
 
+    def test_both_rows_built_by_request_row(self):
+        self.advised()
+        self.v.script = [leg(("advisor", "tu1")), ADVICE, leg("done")]
+        with mock.patch.object(signaller, "request_row", wraps=signaller.request_row) as rr:
+            self.post(self.adv_body())
+            served, adv = self.rows(2)
+        self.assertEqual(sorted(c.kwargs["reason"] for c in rr.call_args_list), ["advisor", "lever"])
+        self.assertEqual((served["model_in"], adv["model_in"]), ("claude-sonnet-5-5", "claude-opus-5-5"))
+
     def test_advice_row_has_an_api_cost(self):
         self.advised()
         self.v.script = [leg(("advisor", "tu1")), ADVICE, leg("done")]
