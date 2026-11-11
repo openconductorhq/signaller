@@ -143,10 +143,26 @@ breaks.
   (`keys.write_json`, then the live `App.auto_model` swap) and drops the
   unreadable-model banner; it answers 409 when the held-out verdict is
   "too few" or the fit has no weights.
+- **The Advisor** (`advisor.py`, a downstream's `advisor` switch): `prepare()`
+  returns ten values, the last an `AdvisorPlan` (the model and window its calls
+  run on) or None. A streaming `/v1/messages` request to a downstream with the
+  switch on is offered the Advisor as an ordinary tool (`to_client_form`); the
+  served stream then goes through a `Splicer`, which may rewrite it (an advisor
+  call held back, the advice blocks spliced in, later legs' indices shifted)
+  while the advice leaves for the same downstream with the same key. At most
+  `MAX_CALLS` per request. Each advice call is its own `requests` row with
+  `parent_id`; the served row bills every leg. Shadows, non-streaming requests
+  and a downstream with the switch off strip the Advisor (`strip_advisor`).
+  The advisor blocks the router issues carry ids starting `srvtoolu_sgnl_`
+  (`advisor.ISSUED`); `drop_issued` removes them on the way to Anthropic, where
+  Anthropic's own pairs stay. A Splicer that can't parse the stream passes it
+  on as it came and runs no call.
 - **The body is rewritten only when something changes** (leading tags, a
-  downstream's model name, Valar's tool fixes, or a downstream thinking block
-  dropped from an Anthropic-bound request — any lever, the one rewrite
-  `drop_old_thinking` in `prepare()` makes for every mode, from every
+  downstream's model name, Valar's tool fixes, the Advisor swapped for its
+  client form or stripped on a downstream, router-issued advisor blocks
+  dropped from an Anthropic-bound request (`drop_issued`), or a downstream
+  thinking block dropped from an Anthropic-bound request — any lever, the one
+  rewrite `drop_old_thinking` in `prepare()` makes for every mode, from every
   assistant message, keeping Anthropic's signed thinking): `req` is parsed
   once, edited, and re-serialised once. An untouched Anthropic request goes out
   byte for byte — including the marked labelling request, which is never
@@ -199,8 +215,9 @@ breaks.
   changed elsewhere (a `/signaller` write, a prune) gets 409 and reloads, rather
   than erasing those lines. When testing with curl, send
   `-H 'Origin: http://127.0.0.1:<port>'`.
-- **The config** (`console.json`) is version 4. If you change its shape, add a
-  migration in `routing.config_from_json`, plus a fixture under
+- **The config** (`console.json`) is version 5 (v5 added each downstream's
+  `advisor` switch; a v4 config migrates with it on). If you change its shape,
+  add a migration in `routing.config_from_json`, plus a fixture under
   `tests/fixtures/`.
 - **Tracks:** Anthropic plus `RoutingConfig.downstreams`. Don't hardcode
   "valar" outside the `kind == "valar"` extras and the defaults.

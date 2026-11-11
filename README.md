@@ -248,8 +248,12 @@ A fresh config ships these rules:
 **Advisor:** when a turn served by a downstream calls Claude Code's Advisor
 tool, the router runs that advice on the same downstream instead of Anthropic.
 Each advice call shows as its own Departures row, marked `↳ for #<id>` with the
-request that asked, and that request shows `advisor ×N`. Each downstream has an
-Advisor checkbox in the console's Tracks row. Claude Code's
+request that asked, and that request shows `advisor ×N`. A request makes at
+most 3 advice calls, and only streaming requests get the Advisor (others have
+it removed). The advice calls and the extra legs of the answer are billed on
+the downstream and show in the costs. Each downstream has an Advisor checkbox
+in the console's Tracks row; with it off, the Advisor is removed from that
+downstream's requests rather than served there. Claude Code's
 `CLAUDE_CODE_DISABLE_ADVISOR_TOOL` turns the Advisor off everywhere.
 
 **Images:** when the conversation holds an image and a downstream answers 400
