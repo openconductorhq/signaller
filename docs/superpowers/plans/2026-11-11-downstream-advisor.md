@@ -29,7 +29,7 @@
 
 ## Review Focus
 
-- **The downstream ignores `tool_choice: none`** and answers the advice request with a tool call and no text: treat it as an empty advice, sent as an `advisor_result` with text `"(no advice)"`, never as a crash. Test in Task 3.
+- **The downstream ignores `tool_choice: none`** and answers the advice request with a tool call and no text: treat it as an empty advice, sent as an `advisor_result` with text `"(no advice)"`, never as a crash. Test in Task 2 (`advice_text`) and Task 4.
 - **Leg 1 ends with `max_tokens` while the advisor call's input is still streaming:** a cut-off call isn't run; the held events are flushed as they came. Test in Task 3.
 - **Claude Code cancels mid-advice** (the client socket closes while the advice request runs): no leg 2 is sent, and the advice row is still recorded. Test in Task 4.
 - **A history with an `advisor_tool_result` and no matching `server_tool_use`** (a compacted or edited conversation): the orphan becomes nothing, not an unmatched `tool_result`. Test in Task 2.
@@ -112,8 +112,8 @@ def test_advisor_switch_roundtrips_and_validates(self):
   - `Splicer()`; `.feed(chunk: bytes) -> list[bytes]`: the SSE bytes to send to the client now. Events before an advisor call pass through as they came, except that `message_start` is dropped on any leg after the first and content indices are shifted by `.offset`.
   - After a `content_block_start` of `tool_use` named `advisor`, it holds that event and everything after it, and sets `.call = {"id": str}` once `message_delta` arrives with `stop_reason == "tool_use"` and that block is the only `tool_use` in the message.
   - `.partial: list[dict]`: the assistant content blocks of this leg up to (not including) the call, rebuilt from the deltas (text, thinking with its signature, tool_use with parsed input).
-  - `.mixed: bool`: true when the message also holds another `tool_use`. The splicer then releases everything as it came (the advisor call included) and doesn't set `.call`.
-  - `.flush() -> list[bytes]`: the held events as they came, for a call that isn't run (a `max_tokens` stop, a mixed message, a parse failure).
+  - `.mixed: bool`: true when the same message also holds another `tool_use`. `.call` is still set, and everything from the advisor block on is held, the other blocks' events included (a block that streamed before the advisor call is already out). After `advice_events(...)`, `.rest() -> list[bytes]` returns the held events of the other blocks and the message tail (`message_delta`, `message_stop`), their content indices shifted past the two advice blocks, with the advisor block's own events dropped. The proxy writes `.rest()` and ends the turn with no leg 2 (`stop_reason` stays `tool_use`; the spec's "advisor call next to other tool calls").
+  - `.flush() -> list[bytes]`: the held events as they came, for a call that isn't run (a `max_tokens` stop, a parse failure).
   - `.advice_events(call_id: str, text: str | None, error: bool) -> list[bytes]`: the `content_block_start`/`content_block_stop` pairs for `server_tool_use` and `advisor_tool_result` at the next indices, advancing the offset for the next leg.
   - `.next_leg()`: resets per-leg state, keeping `.offset` and `.out_tokens`.
   - `.out_tokens: int`: output tokens summed over legs; the last leg's `message_delta` is rewritten to carry it.
@@ -124,7 +124,7 @@ def test_advisor_switch_roundtrips_and_validates(self):
   - `test_passes_plain_stream_through`: no advisor call means the output equals the input, chunked at every byte.
   - `test_holds_advisor_call`: text block 0, `tool_use(advisor)` at index 1, `message_delta(stop_reason tool_use)`, `message_stop`. Only block 0's events come out; `.call["id"]` is set; `.partial == [{"type": "text", "text": …}]`.
   - `test_advice_events_and_leg2_indices`: after `advice_events("x", "do X", False)`, `next_leg()`, and a leg 2 of `message_start` + text block at index 0 + `message_delta(output_tokens 5)`: leg 2 has no `message_start`, its text is at index 3 (0 text, 1 server_tool_use, 2 result), and the final delta's `output_tokens` is leg 1's plus 5.
-  - `test_mixed_tool_calls_release_everything`: advisor + Bash in one message means every event comes out in order, `.mixed` is True and `.call` is None.
+  - `test_mixed_tool_calls_keep_the_other_call`: text block 0, advisor `tool_use` at index 1, Bash `tool_use` at index 2, `message_delta(stop_reason tool_use)`, `message_stop`. `.mixed` is True and `.call["id"]` is set. After `advice_events("x", "do X", False)`, `rest()` holds Bash's events at index 3 (0 text, 1 server_tool_use, 2 result, 3 Bash), none of the advisor block's, then the delta and stop.
   - `test_max_tokens_cut_call_is_flushed`: `stop_reason max_tokens` means `.call` is None and `flush()` returns the held events byte for byte.
   - `test_unparseable_event_breaks_to_passthrough`: a `data: {bad` line sets `.broken`, and the rest passes unchanged.
 - [ ] **Step 2: Run them to see them fail.** Run `uvx --quiet pytest -q tests/test_advisor.py -k "passes or holds or advice_events or mixed or max_tokens or unparseable"`. Expected: FAIL.
@@ -135,7 +135,7 @@ def test_advisor_switch_roundtrips_and_validates(self):
 ### Task 4: The proxy runs the call
 
 **Files:**
-- Modify: `signaller.py` (`prepare`, the four `prepare` call sites incl. `doubling.py:207`, `handle_any`'s stream loop)
+- Modify: `signaller.py` (`prepare`, its two call sites in `handle_any`, `handle_any`'s stream loop), `doubling.py` (line 207 unpacks `prepare`'s result: nine names become ten)
 - Modify: `store.py` (`SCHEMA`, `COLS`, `_migrate` types: `parent_id INTEGER`)
 - Test: `tests/test_proxy.py`, `tests/test_store.py`
 
@@ -145,7 +145,7 @@ def test_advisor_switch_roundtrips_and_validates(self):
   - `AdvisorPlan = namedtuple("AdvisorPlan", "model window")` in `signaller.py`.
   - `prepare(app, track, model, req, headers, routing=None, f=None, advise=False)` returns a **10-tuple**, adding `plan: AdvisorPlan | None` last. `advise=True` only from `handle_any` for a streaming `/v1/messages` request. With `advise`, a downstream with `ds.advisor`, and a definition present, it calls `to_client_form` and works out the plan: the model is `track_model(definition["model"], ds)`, then a settings-line `model` for `tier_of(definition model)` via `overrides.resolve`; the window is the served request's final `window`, falling back to `asap` when `app.prices.listed` lists the advisor model without it. Otherwise `strip_advisor`, as today. `doubling.py` passes nothing (shadows strip).
   - Rows: an advice call is `record_request`ed with `reason "advisor"`, `model_in` the definition's model, `model_out` `plan.model`, `window` `plan.window`, `parent_id` the served request's `rid`, its own `next_id()`, `ts`, `ms`, `ttfb_ms`, `status`, usage and `cost` (`app.prices.cost`), and `api_cost` None. It shares the parent's `session_id`, `turn_id`, `preview` and `prompt`, with `explanation` `[{"rule": "Advisor", "outcome": "asked by #<rid> → <plan.model>", "decided": true}]`. A log line goes out per call with `reason=advisor`.
-  - The served row's `out_tok` is the splicer's summed `out_tokens`; its `cost` covers its own legs only.
+  - The `AnswerCapture` is fed the spliced bytes written to the client, not each leg's raw bytes. The served row's `in_tok` and cache tokens are then leg 1's, its `out_tok` the sum over legs, and its `cost` covers its own legs only.
 
 - [ ] **Step 1: Write the failing tests.** In `tests/test_store.py`, `test_parent_id_migrates`: open a database created with the old `requests` columns, then `record_request` a row with `parent_id=3` and read it back. In `tests/test_proxy.py`, give `FakeHandler` a scripted mode: `self.server.script`, a list of `(status, content_type, body_bytes)` answered in order and recording each body. Tests:
   - `test_advisor_call_runs_on_the_downstream`: leg 1 streams text, then `tool_use(advisor)`; the advice answer is JSON `{"content": [{"type": "text", "text": "do X"}], "usage": {...}}`; leg 2 streams text. Assert: three upstream bodies; body 2 has model = Valar's opus model, `tool_choice none` and the last user text = `advisor.PROMPT`; body 3 ends with `tool_use`/`tool_result "do X"`. The client stream holds `server_tool_use` then `advisor_tool_result` with `advisor_result` text `"do X"`, then leg 2's text. `departures()` holds two rows, the advice row with `reason "advisor"` and `parent_id` = the served row's id.
@@ -155,12 +155,13 @@ def test_advisor_switch_roundtrips_and_validates(self):
   - `test_anthropic_request_untouched`: a request routed to Anthropic reaches it byte for byte, with the Advisor definition.
   - `test_client_gone_mid_advice`: the client closes during the advice request. No body 3 is sent, and the advice row is recorded.
   - `test_non_streaming_strips`: a non-streaming downstream request carries no `advisor` tool.
+  - `test_advisor_next_to_another_tool_call`: leg 1 holds text, the advisor call and a Bash `tool_use` in one message. Two upstream bodies only (no leg 2). The client stream holds `server_tool_use`, `advisor_tool_result` (`"do X"`), then the Bash `tool_use` at the shifted index, and ends with `stop_reason tool_use`.
 - [ ] **Step 2: Run them to see them fail.** Run `uvx --quiet pytest -q tests/test_proxy.py tests/test_store.py -k "advisor or advice or cap_of or client_gone or non_streaming or parent"`. Expected: FAIL.
 - [ ] **Step 3: Implement.** In `handle_any`, when `plan` is set, the response is SSE and status 200, the existing write loop feeds chunks through a `Splicer` and writes what it returns. When a leg ends with `.call`:
   1. If `calls == MAX_CALLS`, write `flush()` and stop (unreachable after the cap, since the tool isn't offered then).
   2. Post `advice_request` to the same `base`, path `/v1/messages`, with the same headers and the window header set to `plan.window`, through `open_upstream`, and record its row.
-  3. Write `advice_events`.
-  4. Open leg 2 with `continue_request(..., offer=calls < MAX_CALLS)`, call `next_leg()` and keep looping.
+  3. Write `advice_events`. If `.mixed`, write `.rest()` and finish the stream: no leg 2.
+  4. Otherwise open leg 2 with `continue_request(..., offer=calls < MAX_CALLS)`, call `next_leg()` and keep looping.
 
   Any exception in this branch writes `flush()` if nothing was sent for the call, else `MIDSTREAM_SSE`, and records `err=advisor`. Never let it escape `handle_any`.
 - [ ] **Step 4: Run** `uvx --quiet pytest -q tests`. Expected: all pass.
