@@ -17,13 +17,9 @@ import overrides
 from signaller import App, Config, make_server
 from doubling import AnswerCapture, Doubler, sum_usage
 from routing import DEFAULT_CONFIG, Doubling, Features
-from tests.test_proxy import CLASSIFIER_OFF, HDRS, LEMMI
+from tests.test_proxy import CLASSIFIER_OFF, HDRS, LEMMI, sse
 
 SHADOW = DEFAULT_CONFIG.doubling.shadow
-
-
-def sse(*events):
-    return b"".join(b"event: %s\ndata: %s\n\n" % (e["type"].encode(), json.dumps(e).encode()) for e in events)
 
 
 SSE = sse(
