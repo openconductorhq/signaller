@@ -237,6 +237,25 @@ def request_row(app: "App", ds, usage: dict, model_in, model_out, window, status
             "cache_write_1h_tok": usage.get("cache_write_1h"), "cost": cost, "api_cost": api_cost}
 
 
+def run_pinging(fn, write) -> tuple:
+    """Run fn() on a worker thread, writing PING_SSE through write every PING_EVERY seconds until it returns: pings
+    keep a client's idle watchdog off a stream that has nothing else to send. (fn's result, or None if it raised;
+    gone: a ping write failed, the client went away). The wait goes on after that: fn still finishes, so a row it
+    records is recorded."""
+    got, gone = [], False
+    worker = threading.Thread(target=lambda: got.append(fn()), daemon=True)
+    worker.start()
+    while True:
+        worker.join(PING_EVERY)
+        if not worker.is_alive():
+            return (got[0] if got else None), gone
+        if not gone:
+            try:
+                write(PING_SSE)
+            except OSError:
+                gone = True
+
+
 RETRY_DELAYS = (0.5, 1.5, 3)  # seconds before each retry of a connection failure (~5 s of blips covered)
 
 
@@ -942,23 +961,12 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     calls, sent, stage = calls + 1, False, "advisor"
                     try:
                         partial, call_id = sp.partial, sp.call["id"]
-                        got, gone = [], False
-                        worker = threading.Thread(target=lambda b: got.extend(run_advice(b)), daemon=True,
-                                                  args=(advisor.advice_request(cur, partial, pr.plan.model),))
-                        worker.start()
-                        while True:  # pings keep a client's idle watchdog off the stream while the advice runs
-                            worker.join(PING_EVERY)
-                            if not worker.is_alive():
-                                break
-                            if not gone:
-                                try:
-                                    self.wfile.write(PING_SSE)
-                                    self.wfile.flush()
-                                except OSError:
-                                    gone = True  # wait on: the advice still finishes, so its row is recorded
+                        body_d = advisor.advice_request(cur, partial, pr.plan.model)
+                        got, gone = run_pinging(lambda: run_advice(body_d),
+                                                lambda b: (self.wfile.write(b), self.wfile.flush()))
                         if gone:
                             break
-                        text, failed = got if got else ("advisor unavailable", True)
+                        text, failed = got or ("advisor unavailable", True)
                         evs = sp.advice_events(call_id, text, failed)
                         sent = True
                         send(evs)
