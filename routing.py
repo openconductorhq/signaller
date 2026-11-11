@@ -195,7 +195,9 @@ class Features:
             # a typed tool (web_search_20250305, web_fetch_…, code_execution_…) runs on Anthropic's side;
             # other upstreams 400 on it. Claude Code sends these in their own small requests (WebSearch).
             # The Advisor (advisor_…) rides on every main-loop request since Claude Code 2.1.3xx: it doesn't pin the
-            # turn to Anthropic; prepare() drops it on the way to a downstream (strip_advisor).
+            # turn to Anthropic. On the way to a downstream prepare() offers it as a client tool (a streaming request,
+            # the downstream's advisor switch on: to_client_form) or strips it (non-streaming, a shadow, the switch
+            # off: strip_advisor).
             srv = any(isinstance(t, dict) and t.get("type") not in (None, "custom") and not is_advisor(t)
                       for t in req.get("tools") or [])
             # Claude Code's own check of the whole conversation (auto-mode permissions): keep it on Anthropic too
