@@ -201,6 +201,23 @@ class AdvisorTest(unittest.TestCase):
         b = A.continue_request(r, [], "s9", "go", False, True)
         self.assertTrue(any(t.get("name") == "advisor" for t in b["tools"]))
 
+    def test_requests_share_but_never_mutate_the_original(self):
+        r = req([txt("a")], tools=[{"name": "Bash"}, A.TOOL])
+        r["thinking"] = {"type": "enabled"}
+        before = copy.deepcopy(r)
+        msgs, tools, first = r["messages"], r["tools"], r["messages"][0]
+        for b in (A.advice_request(r, [txt("w")], "m"), A.continue_request(r, [txt("w")], "s9", "go", False, False),
+                  A.continue_request(r, [txt("w")], "s9", "go", False, True)):
+            b["messages"].append("x")
+            b["tools"].append("y")
+            b["thinking"] = None
+            self.assertIsNot(b["messages"], msgs)
+            self.assertIsNot(b["tools"], tools)
+            self.assertIs(b["messages"][0], first)  # shared, not copied
+        self.assertEqual(r, before)
+        self.assertIs(r["messages"], msgs)
+        self.assertIs(r["tools"], tools)
+
     def test_advice_text_empty(self):
         self.assertEqual(A.advice_text({"content": [{"type": "tool_use"}]}), "(no advice)")
         self.assertEqual(A.advice_text({"content": [txt("a"), txt("b")]}), "a\nb")
@@ -209,6 +226,37 @@ class AdvisorTest(unittest.TestCase):
 class SplicerTest(unittest.TestCase):
     LEG1 = [mstart(), *text_block(0, "thinking out loud"), *tool_block(1, "advisor", "tu1"),
             mdelta("tool_use", 7), MSTOP]
+
+    def test_long_run_of_deltas_builds_partial(self):
+        sp = A.Splicer()
+        deltas = [delta(0, {"type": "text_delta", "text": str(n % 10)}) for n in range(500)]
+        feed_all(sp, sse(mstart(), bstart(0, {"type": "text", "text": ""}), *deltas,
+                         bstart(1, {"type": "thinking", "thinking": ""}),
+                         delta(1, {"type": "thinking_delta", "thinking": "hm"}),
+                         delta(1, {"type": "signature_delta", "signature": "sig"}),
+                         *tool_block(2, "advisor", "tu1"), mdelta("tool_use"), MSTOP), 7)
+        self.assertEqual(sp.partial, [{"type": "text", "text": "0123456789" * 50},
+                                      {"type": "thinking", "thinking": "hm", "signature": "sig"}])
+
+    def test_buffer_cap_without_a_boundary_breaks_and_passes_through(self):
+        sp = A.Splicer()
+        chunk = b"x" * (1 << 20)
+        n = A.MAX_BUF // len(chunk)
+        out = []
+        for _ in range(n):
+            out += sp.feed(chunk)
+        self.assertFalse(sp.broken)
+        self.assertEqual(out, [])
+        out += sp.feed(b"y")
+        self.assertTrue(sp.broken)
+        self.assertEqual(b"".join(out), chunk * n + b"y")
+        self.assertEqual(sp.feed(b"z"), [b"z"])
+
+    def test_boundary_split_across_feeds(self):
+        data = b'event: ping\r\ndata: {"type": "ping"}\r\n\r\n' + sse(mstart())
+        sp = A.Splicer()
+        self.assertEqual(b"".join(feed_all(sp, data, 1)), data)
+        self.assertFalse(sp.broken)
 
     def test_passes_plain_stream_through(self):
         data = sse(mstart(), *text_block(0), *tool_block(1, "Bash", "tb", '{"command": "ls"}'),
