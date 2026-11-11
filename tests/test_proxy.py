@@ -13,6 +13,7 @@ from unittest import mock
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import advisor
 import signaller
 import overrides
 from signaller import App, Config, make_server, upstream_headers
@@ -35,6 +36,7 @@ class Fake(ThreadingHTTPServer):
         self.hang = False
         self.no_images = False  # answer a request carrying an image the way a text-only model does
         self.models = b"{}"
+        self.script = None  # [(status, content_type, body[, delay s])], answered in order
         threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
     def handle_error(self, request, client_address):
@@ -64,6 +66,18 @@ class FakeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
         self.server.seen.append((self.command, self.path, self.headers, body))
+        if self.server.script is not None:
+            status, ctype, out, *delay = self.server.script.pop(0) if self.server.script else (500, "application/json", b"{}")
+            time.sleep(delay[0] if delay else 0)
+            self.send_response(status)
+            self.send_header("content-type", ctype)
+            self.send_header("content-length", str(len(out)))
+            self.end_headers()
+            try:
+                self.wfile.write(out)
+            except OSError:
+                pass
+            return
         if self.server.hang:
             time.sleep(0.6)
         if self.server.error or (self.server.no_images and b'"image"' in body):
@@ -108,6 +122,36 @@ def body_for(model, extra=None, stream=False):
     d = {"stream": stream, "model": model, "messages": [{"role": "user", "content": "hi"}]}
     d.update(extra or {})
     return json.dumps(d).encode()
+
+
+def sse(*events):
+    return b"".join(b"event: %s\ndata: %s\n\n" % (e["type"].encode(), json.dumps(e).encode()) for e in events)
+
+
+def events(data):
+    return [json.loads(ln[5:]) for ln in data.decode().split("\n") if ln.startswith("data:")]
+
+
+def leg(*blocks, out=5):
+    """A downstream's streamed answer: a str is a text block, a (name, id) pair a tool_use."""
+    ev = [{"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "content": [], "model": "VO",
+                                                "usage": {"input_tokens": 100, "output_tokens": 1, "cache_read_input_tokens": 50}}}]
+    for i, b in enumerate(blocks):
+        if isinstance(b, str):
+            ev += [{"type": "content_block_start", "index": i, "content_block": {"type": "text", "text": ""}},
+                   {"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": b}}]
+        else:
+            ev += [{"type": "content_block_start", "index": i, "content_block": {"type": "tool_use", "id": b[1], "name": b[0], "input": {}}},
+                   {"type": "content_block_delta", "index": i, "delta": {"type": "input_json_delta", "partial_json": "{}"}}]
+        ev.append({"type": "content_block_stop", "index": i})
+    stop = "tool_use" if any(not isinstance(b, str) for b in blocks) else "end_turn"
+    ev += [{"type": "message_delta", "delta": {"stop_reason": stop}, "usage": {"output_tokens": out}}, {"type": "message_stop"}]
+    return 200, "text/event-stream", sse(*ev)
+
+
+ADVICE = (200, "application/json", json.dumps({"content": [{"type": "text", "text": "do X"}], "usage": {
+    "input_tokens": 300, "output_tokens": 20, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}).encode())
+ADV_DEF = {"type": "advisor_20260301", "name": "advisor", "model": "claude-opus-5-5", "defer_loading": True}
 
 
 HDRS = {"Authorization": "Bearer sk-ant-oat01-X", "anthropic-beta": "claude-code-20250219,oauth-2025-04-20"}
@@ -656,6 +700,130 @@ class ProxyTest(unittest.TestCase):
         self.post(body)
         self.assertEqual(self.a.seen[0][3], body)
 
+
+    def advised(self, advisor=True):
+        ds = replace(self.app.routing.downstreams[0], url=self.v.url, advisor=advisor,
+                     models={"fable": "VO", "opus": "VO", "sonnet": "VS", "haiku": "VH"})
+        self.app.routing = replace(self.app.routing, lever="valar", downstreams=(ds,))
+
+    def adv_body(self, stream=True):
+        return body_for("claude-sonnet-5-5", {"tools": [{"name": "Bash", "input_schema": {"type": "object"}}, ADV_DEF]}, stream)
+
+    def rows(self, n):
+        self.logged(n)
+        self.app.store.close()
+        return sorted(self.app.store.departures(), key=lambda r: r["id"])
+
+    def test_advisor_call_runs_on_the_downstream(self):
+        self.advised()
+        self.v.script = [leg("let me ask", ("advisor", "tu1")), ADVICE, leg("done")]
+        status, data = self.post(self.adv_body(), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(self.v.seen), 3)
+        b1, b2, b3 = (json.loads(x[3]) for x in self.v.seen)
+        self.assertEqual(b1["tools"][1], advisor.TOOL)
+        self.assertEqual((b2["model"], b2["tool_choice"], b2["stream"]), ("VO", {"type": "none"}, False))
+        self.assertEqual(b2["messages"][-1]["content"][-1]["text"], advisor.PROMPT)
+        self.assertEqual(self.v.seen[1][1], "/v1/messages")
+        self.assertEqual(b3["messages"][-2]["content"][-1], {"type": "tool_use", "id": "tu1", "name": "advisor", "input": {}})
+        self.assertEqual(b3["messages"][-1]["content"], [{"type": "tool_result", "tool_use_id": "tu1", "content": "do X"}])
+        ev = events(data)
+        starts = [e["content_block"] for e in ev if e["type"] == "content_block_start"]
+        self.assertEqual([b["type"] for b in starts], ["text", "server_tool_use", "advisor_tool_result", "text"])
+        self.assertEqual(starts[2]["content"]["text"], "do X")
+        self.assertEqual([e["type"] for e in ev].count("message_start"), 1)
+        self.assertIn({"type": "text_delta", "text": "done"}, [e.get("delta") for e in ev])
+        served, adv = self.rows(2)
+        self.assertEqual((adv["reason"], adv["parent_id"], adv["model_in"], adv["model_out"], adv["track"]),
+                         ("advisor", served["id"], "claude-opus-5-5", "VO", "valar"))
+        self.assertEqual((adv["in_tok"], adv["out_tok"], adv["status"], adv["session_id"]), (300, 20, 200, "s1"))
+        self.assertEqual((served["in_tok"], served["out_tok"], served["cache_read_tok"]), (100, 10, 50))
+        self.assertIsNone(served["parent_id"])
+        self.assertIn("reason=advisor", self.err.getvalue())
+
+    def test_advice_model_and_window_follow_settings_lines(self):
+        self.advised()
+        w = {"fable": "standard", "opus": "standard", "sonnet": "standard", "haiku": "standard"}
+        self.app.routing = replace(self.app.routing, downstreams=(replace(self.app.routing.downstreams[0], windows=w),))
+        self.set_settings({"when": "", "downstream": "valar", "tier": "opus", "set": "model", "value": "glm-adv"})
+        self.app.prices.set_listed("valar", {"glm-adv": {"asap": [1.0, 0.5, 2.0]}})
+        self.v.script = [leg(("advisor", "tu1")), ADVICE, leg("done")]
+        self.post(self.adv_body())
+        (_, _, h1, b1), (_, _, h2, b2) = self.v.seen[:2]
+        self.assertEqual((json.loads(b1)["model"], h1.get_all("X-Valar-Completion-Window")), ("VS", ["standard"]))
+        self.assertEqual((json.loads(b2)["model"], h2.get_all("X-Valar-Completion-Window")), ("glm-adv", ["asap"]))
+        self.assertEqual(h2["Authorization"], "Bearer VK")
+
+    def test_advice_failure_continues_without_advice(self):
+        self.advised()
+        self.v.script = [leg(("advisor", "tu1")), (529, "application/json", b'{"type":"error"}'), leg("done")]
+        _, data = self.post(self.adv_body())
+        self.assertEqual(len(self.v.seen), 3)
+        res = [e["content_block"] for e in events(data) if e["type"] == "content_block_start"][1]
+        self.assertEqual(res["content"], {"type": "advisor_tool_result_error", "error_code": "unavailable"})
+        self.assertTrue(json.loads(self.v.seen[2][3])["messages"][-1]["content"][0]["is_error"])
+        _, adv = self.rows(2)
+        self.assertEqual((adv["reason"], adv["status"]), ("advisor", 529))
+
+    def test_cap_of_three_calls(self):
+        self.advised()
+        self.v.script = [leg(("advisor", "a1")), ADVICE, leg(("advisor", "a2")), ADVICE,
+                         leg(("advisor", "a3")), ADVICE, leg("done")]
+        self.post(self.adv_body())
+        self.assertEqual(len(self.v.seen), 7)
+        self.assertIn("advisor", [t["name"] for t in json.loads(self.v.seen[4][3])["tools"]])
+        self.assertNotIn("advisor", [t["name"] for t in json.loads(self.v.seen[6][3])["tools"]])
+
+    def test_advisor_off_strips(self):
+        self.advised(advisor=False)
+        self.v.script = [leg("hi")]
+        self.post(self.adv_body())
+        self.assertEqual(len(self.v.seen), 1)
+        self.assertEqual([t["name"] for t in json.loads(self.v.seen[0][3])["tools"]], ["Bash"])
+
+    def test_anthropic_request_untouched(self):
+        self.advised()
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        self.a.script = [leg("hi")]
+        body = self.adv_body()
+        self.post(body)
+        self.assertEqual(self.a.seen[0][3], body)
+        self.assertEqual(self.v.seen, [])
+
+    def test_client_gone_mid_advice(self):
+        self.advised()
+        self.v.script = [leg("ask", ("advisor", "tu1")), (*ADVICE, 0.5), leg("done")]
+        body = self.adv_body()
+        s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+        got = b""
+        while b"text_delta" not in got:
+            got += s.recv(4096)
+        s.close()
+        served, adv = self.rows(2)
+        self.assertEqual(len(self.v.seen), 2)
+        self.assertEqual((adv["reason"], adv["status"]), ("advisor", 200))
+        self.assertGreaterEqual(adv["ms"], 500)
+        self.assertLess(served["ms"], 400)  # the advice's time is its own row's, not counted twice
+
+    def test_non_streaming_strips(self):
+        self.advised()
+        self.post(self.adv_body(stream=False))
+        self.assertEqual(len(self.v.seen), 1)
+        self.assertEqual([t["name"] for t in json.loads(self.v.seen[0][3])["tools"]], ["Bash"])
+
+    def test_advisor_next_to_another_tool_call(self):
+        self.advised()
+        self.v.script = [leg("both", ("advisor", "tu1"), ("Bash", "tb")), ADVICE]
+        _, data = self.post(self.adv_body())
+        self.assertEqual(len(self.v.seen), 2)
+        ev = events(data)
+        starts = [(e["index"], e["content_block"]) for e in ev if e["type"] == "content_block_start"]
+        self.assertEqual([(i, b["type"]) for i, b in starts],
+                         [(0, "text"), (1, "server_tool_use"), (2, "advisor_tool_result"), (3, "tool_use")])
+        self.assertEqual((starts[2][1]["content"]["text"], starts[3][1]["name"]), ("do X", "Bash"))
+        self.assertEqual([e["delta"]["stop_reason"] for e in ev if e["type"] == "message_delta"], ["tool_use"])
+        self.assertEqual(ev[-1]["type"], "message_stop")
 
     def test_session_lever_survives_restart(self):
         self.app.set_session_lever("s1", "valar")

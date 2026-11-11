@@ -6,6 +6,7 @@ import ipaddress
 import json
 import os
 import re
+import select
 import socket
 import sqlite3
 import struct
@@ -31,7 +32,7 @@ from prices import Prices, parse_valar
 from routing import (DEFAULT_CONFIG, LEVER_MODES, has_images, session_of, strip_lead_tags, text_hash, Decision, Downstream, Features, RoutingConfig,
                      config_from_json, config_to_json, downstream, is_routed, references, route as decide_route,
                      track_model, track_window, tracks)
-from advisor import strip_advisor
+import advisor
 from keys import Keys, write_json
 from store import NullStore, Store, load_console_config, save_console_config
 
@@ -72,6 +73,7 @@ WINDOW_HEADER = "X-Valar-Completion-Window"  # the router owns it: a client's ow
 UPSTREAM_TIMEOUT = 600
 MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
                  b'"message":"signaller: upstream ended mid-stream"}}\n\n')
+ADVICE_CAP = 4 << 20  # bytes read of an advice answer; a longer one fails as unparseable
 
 
 def upstream(app: "App", track: str, routing=None) -> tuple[str, str, str, Downstream | None]:
@@ -124,45 +126,72 @@ def hoist_inline_tools(req: dict) -> bool:
     return changed
 
 
-def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=None):
+AdvisorPlan = collections.namedtuple("AdvisorPlan", "model window")  # how a downstream runs a turn's advisor calls
+
+
+def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=None, advise=False):
     """A request as it leaves for a track, the served one and its shadow alike:
-    (name, base, key, ds, headers, out_model, window, changed, override). On a downstream the model is renamed, Valar's
-    tool fix applied, the client's credentials swapped for the downstream's key, the window set and the matching
-    settings lines applied. `req` (when a dict) is edited in place; `changed` says it must be re-serialised."""
+    (name, base, key, ds, headers, out_model, window, changed, override, plan). On a downstream the model is renamed,
+    Valar's tool fix applied, the client's credentials swapped for the downstream's key, the window set and the
+    matching settings lines applied. The Advisor is stripped, or with `advise` (a streaming /v1/messages request) on a
+    downstream that has it on, offered as a client tool, `plan` saying which model and window run its calls.
+    `req` (when a dict) is edited in place; `changed` says it must be re-serialised."""
     name, base, key, ds = upstream(app, track, routing)
     if not ds:
         # any lever: a downstream's unsigned thinking can't reach Anthropic (it 400s on it) — in auto after a
         # downstream turn, in rules after a switch back, or mid-turn on the image fallback. Nothing of theirs to
         # drop → the request goes out byte for byte.
         dropped = track == "anthropic" and isinstance(req, dict) and autophase.drop_old_thinking(req)
-        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, dropped, None
+        return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, dropped, None, None
     out_model = track_model(model, ds)
     hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
-    stripped = isinstance(req, dict) and strip_advisor(req)
+    adef = advisor.definition(req) if advise and ds.advisor and isinstance(req, dict) else None
+    adv_model = adef.get("model") if adef else None
+    if isinstance(adv_model, str) and adv_model:
+        stripped = advisor.to_client_form(req)
+    else:
+        adv_model, stripped = None, isinstance(req, dict) and advisor.strip_advisor(req)
     changed = isinstance(req, dict) and (hoisted or stripped or out_model != model)
     headers, window = upstream_headers(headers, key), track_window(model, ds)
-    override = None
-    if f is not None and (routing or app.routing).settings:
+    settings = (routing or app.routing).settings
+
+    def lines(m):  # the settings lines for a model on this downstream; {} on a failure, logged
+        if f is None or not settings:
+            return {}
         try:
-            applied = overrides.resolve((routing or app.routing).settings, ds.id, model, lambda n: f.get(n, lambda: "none"))
-            override = overrides.describe(applied)
+            return overrides.resolve(settings, ds.id, m, lambda n: f.get(n, lambda: "none"))
         except Exception as e:
             print("settings failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
-        else:
-            if "model" in applied:
-                out_model, changed = applied["model"][0], True
-            if "window" in applied:
-                window = applied["window"][0]
-    if ds.kind == "valar" and window and (listed := app.prices.listed.get(ds.id, {}).get(out_model)):
+            return {}
+
+    def fit(w, m):
         # a model without the window the router is about to send falls back to Now, the same rule the Tracks
         # row applies; a model Valar hasn't priced (no listed windows) goes out as set
-        if window not in listed:
-            window = "asap"
+        if ds.kind == "valar" and w and (listed := app.prices.listed.get(ds.id, {}).get(m)) and w not in listed:
+            return "asap"
+        return w
+
+    applied = lines(model)
+    try:
+        override = overrides.describe(applied)
+    except Exception as e:
+        print("settings failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+        applied, override = {}, None
+    if "model" in applied:
+        out_model, changed = applied["model"][0], True
+    if "window" in applied:
+        window = applied["window"][0]
+    window = fit(window, out_model)
+    plan = None
+    if adv_model:
+        m = track_model(adv_model, ds)
+        m = lines(adv_model).get("model", (m,))[0]
+        plan = AdvisorPlan(m, fit(window, m))
     if changed:
         req["model"] = out_model
     if window:
         headers.append((WINDOW_HEADER, window))
-    return name, base, key, ds, headers, out_model, window, changed, override
+    return name, base, key, ds, headers, out_model, window, changed, override, plan
 
 
 RETRY_DELAYS = (0.5, 1.5, 3)  # seconds before each retry of a connection failure (~5 s of blips covered)
@@ -627,6 +656,13 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
         def log_message(self, *a):
             pass
 
+        def _client_gone(self) -> bool:
+            """The client hung up (it sent its whole request, so anything readable now is EOF or a reset)."""
+            try:
+                return bool(select.select([self.connection], [], [], 0)[0]) and not self.connection.recv(1, socket.MSG_PEEK)
+            except OSError:
+                return True
+
         def _error(self, status, msg):
             out = json.dumps({"type": "error", "error": {"type": "api_error", "message": msg}}).encode()
             self.send_response(status)
@@ -717,7 +753,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 print("doubling failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
                 pair, shadow, turn_id = None, "-", None
             orig_body = body  # an image fallback to Anthropic starts again from the request as Claude Code sent it
-            stripped = False
+            stripped, plan, adv_in = False, None, None
             if labelling:
                 # untouched in every way: no tag strip, no thinking drop, no settings lines, byte for byte
                 name, base, key, ds = upstream(app, "anthropic")
@@ -728,13 +764,61 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     stripped = bool(f) and isinstance(req, dict) and strip_lead_tags(req)
                 except Exception:
                     pass
-                name, base, key, ds, headers, out_model, window, changed, override = prepare(app, route, model, req, self.headers.items(), routing, f)
+                advise = rec and stream and isinstance(req, dict)  # the Advisor runs only in a streamed main answer
+                adv_in = (advisor.definition(req) or {}).get("model") if advise else None
+                name, base, key, ds, headers, out_model, window, changed, override, plan = prepare(
+                    app, route, model, req, self.headers.items(), routing, f, advise=advise)
             if stripped or changed:
                 body = json.dumps(req).encode()
             if out_model != model:
                 shown = "%s→%s" % (model, out_model)
             status, err, ttfb, conn, first, fell = 0, "", None, None, None, None
             images = route != "anthropic" and has_images(req)
+            adv_ms = [0]  # time spent in advice calls: their own rows carry it, the served row's ms doesn't
+            preview = lambda: ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120]
+
+            def run_advice(body_d):
+                """One advisor call on the downstream, recorded as its own row: (advice text, failed). Never raises."""
+                t1, st, ttfb1, usage1, text, c2 = time.time(), 0, None, {}, None, None
+                try:
+                    ah = [(k, v) for k, v in headers if k.lower() != WINDOW_HEADER.lower()]
+                    if plan.window:
+                        ah.append((WINDOW_HEADER, plan.window))
+                    c2, r2 = open_upstream(base, "POST", "/v1/messages", ah, json.dumps(body_d).encode())
+                    st, ttfb1 = r2.status, int((time.time() - t1) * 1000)
+                    raw = r2.read(ADVICE_CAP)
+                    ac = AnswerCapture(r2.getheader("content-type", ""), r2.getheader("content-encoding", ""))
+                    ac.feed(raw)
+                    usage1 = ac.result().get("usage") or {}
+                    if st == 200:
+                        text = advisor.advice_text(json.loads(raw))
+                except Exception:
+                    st = st or 502
+                finally:
+                    if c2:
+                        c2.close()
+                ms1 = int((time.time() - t1) * 1000)
+                adv_ms[0] += ms1
+                try:
+                    try:
+                        cost1 = app.prices.cost(ds, plan.model, plan.window, usage1)
+                    except Exception:
+                        cost1 = None
+                    app.store.record_request({
+                        "id": app.store.next_id(), "ts": t1, "track": route, "reason": "advisor", "parent_id": rid,
+                        "explanation": json.dumps([{"rule": "Advisor", "outcome": "asked by #%s → %s" % (rid, plan.model), "decided": True}]),
+                        "model_in": adv_in, "model_out": plan.model, "status": st, "ttfb_ms": ttfb1 if ttfb1 is not None else ms1,
+                        "ms": ms1, "stream": 0, "preview": preview(), "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
+                        "session_id": sid, "in_tok": usage1.get("in"), "out_tok": usage1.get("out"),
+                        "cache_read_tok": usage1.get("cache_read"), "cache_write_tok": usage1.get("cache_write"),
+                        "cache_write_1h_tok": usage1.get("cache_write_1h"), "window": plan.window, "override": None,
+                        "cost": cost1, "api_cost": None})
+                except Exception:
+                    pass
+                print("%s route=%s reason=advisor model=%s→%s status=%d ms=%d stream=False%s shadow=-" % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"), route, adv_in, plan.model, st, ms1, "" if text else " err=advisor"),
+                    file=sys.stderr, flush=True)
+                return text or "advisor unavailable", text is None
             try:
                 if route != "anthropic" and not key:  # never fall back to another track
                     status = 502
@@ -753,7 +837,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         route = "anthropic"
                         req2 = json.loads(orig_body)
                         stripped2 = strip_lead_tags(req2)
-                        name, base, key, ds, headers, out_model, window, changed2, override = prepare(app, route, model, req2, self.headers.items(), routing, f)
+                        name, base, key, ds, headers, out_model, window, changed2, override, plan = prepare(app, route, model, req2, self.headers.items(), routing, f)
                         body, shown = json.dumps(req2).encode() if stripped2 or changed2 else orig_body, model
                         d.explanation.append({"rule": "Fallback", "outcome": f"{fell} can't take images → anthropic", "decided": True})
                         if sid:
@@ -771,10 +855,13 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     self._error(502, "signaller: %s %s at %s" % (
                         name, what, base))
                     return
-                status = resp.status
+                status, ctype = resp.status, resp.getheader("content-type", "")
+                # the Advisor offered: the answer goes through a Splicer, which holds back an advisor call to run here
+                # (its length changes: close-delimited, no content-length)
+                sp = advisor.Splicer() if plan and first is None and status == 200 and ctype.startswith("text/event-stream") else None
                 self.send_response(status)
                 for k, v in resp.getheaders():
-                    if k.lower() not in HOP or k.lower() == "content-length":
+                    if k.lower() not in HOP or (k.lower() == "content-length" and not sp):
                         self.send_header(k, v)
                 self.end_headers()
                 if rec:
@@ -783,31 +870,67 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     self.wfile.write(first)
                     if cap:
                         cap.feed(first)
+
+                def send(chunks):
+                    for c in chunks:
+                        self.wfile.write(c)
+                        self.wfile.flush()
+                        if cap:  # only after the bytes are out: the capture sees what the client got
+                            cap.feed(c)
+
+                cur, calls, adv_err = req, 0, ""
                 while first is None:
                     try:
                         chunk = resp.read1(65536)
                     except (OSError, http.client.HTTPException):
                         chunk, err = b"", " err=midstream"
-                    if not chunk:
-                        # a short content-length body ends silently; resp.length is the bytes still owed
-                        if resp.length:
-                            err = " err=midstream"
+                    if chunk:
+                        send(sp.feed(chunk) if sp else [chunk])
+                        continue
+                    # a short content-length body ends silently; resp.length is the bytes still owed
+                    if resp.length:
+                        err = " err=midstream"
+                    if not sp:
                         break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-                    if cap:  # only after the bytes are out
-                        cap.feed(chunk)
+                    send(sp.finish())
+                    if err or sp.call is None or calls == advisor.MAX_CALLS:  # a normal end: release what's held
+                        send(sp.flush())
+                        break
+                    calls, sent = calls + 1, False
+                    try:
+                        partial, call_id = sp.partial, sp.call["id"]
+                        text, failed = run_advice(advisor.advice_request(cur, partial, plan.model))
+                        evs = sp.advice_events(call_id, text, failed)
+                        sent = True
+                        send(evs)
+                        if sp.mixed:  # next to another tool call: Claude Code runs that one, no next leg
+                            send(sp.rest())
+                            break
+                        if self._client_gone():
+                            break
+                        cur = advisor.continue_request(cur, partial, call_id, text, failed, calls < advisor.MAX_CALLS)
+                        sp.next_leg()
+                        conn.close()
+                        conn = None
+                        conn, resp = open_upstream(base, self.command, self.path, headers, json.dumps(cur).encode())
+                        if resp.status != 200 or not resp.getheader("content-type", "").startswith("text/event-stream"):
+                            raise ValueError("leg %d answered %d" % (calls + 1, resp.status))
+                    except Exception:
+                        adv_err = " err=advisor"
+                        send([MIDSTREAM_SSE] if sent else sp.flush())
+                        break
                 if err:  # headers are out, so tell the client the stream is truncated
-                    if resp.getheader("content-type", "").startswith("text/event-stream"):
+                    if ctype.startswith("text/event-stream"):
                         self.wfile.write(MIDSTREAM_SSE)
                     else:  # RST, so the client sees a failure rather than a clean EOF
                         self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                err = err or adv_err
             except OSError:
                 pass  # client went away
             finally:
                 if conn:
                     conn.close()
-                ms = int((time.time() - t0) * 1000)
+                ms = int((time.time() - t0) * 1000) - adv_ms[0]
                 try:  # result() consumes a JSON body: call it once
                     res = cap.result() if cap else {}
                 except Exception:
@@ -825,7 +948,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     app.store.record_request({
                         "id": rid, "ts": t0, "track": route, "reason": d.reason, "explanation": json.dumps(d.explanation),
                         "model_in": model, "model_out": out_model, "status": status, "ttfb_ms": ttfb if ttfb is not None else ms,
-                        "ms": ms, "stream": int(stream), "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120], "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
+                        "ms": ms, "stream": int(stream), "preview": preview(), "step": f.step, "prompt": f.prompt, "turn_id": turn_id,
                         "session_id": sid, "in_tok": usage.get("in"), "out_tok": usage.get("out"),
                         "cache_read_tok": usage.get("cache_read"), "cache_write_tok": usage.get("cache_write"),
                         "cache_write_1h_tok": usage.get("cache_write_1h"), "window": window, "override": override,

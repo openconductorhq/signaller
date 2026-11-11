@@ -204,7 +204,7 @@ class Doubler:
             req = json.loads(body)
             req["stream"] = False
             strip_lead_tags(req)
-            name, base, key, ds, headers, model_out, window, _, _ = prepare(app, track, str(req.get("model", "")), req, headers, routing, f)
+            name, base, key, ds, headers, model_out, window, _, _, _ = prepare(app, track, str(req.get("model", "")), req, headers, routing, f)
             if track != "anthropic" and not key:
                 raise NotConfigured("%s has no key" % name)
             if window:

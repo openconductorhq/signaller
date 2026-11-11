@@ -1114,7 +1114,7 @@ class HoistTolerantTest(unittest.TestCase):
 
 class StripAdvisorTest(unittest.TestCase):
     def test_drops_definition_calls_and_results(self):
-        from signaller import strip_advisor
+        from advisor import strip_advisor
         req = {"tools": [{"name": "Bash"}, {"type": "advisor_20260301", "name": "advisor"}], "messages": [
             {"role": "user", "content": "hi"},
             {"role": "assistant", "content": [{"type": "text", "text": "x"}, {"type": "server_tool_use", "id": "a", "name": "advisor"},

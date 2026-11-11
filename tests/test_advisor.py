@@ -305,6 +305,18 @@ class SplicerTest(unittest.TestCase):
         self.assertEqual(out[-2]["usage"]["output_tokens"], 10)
         self.assertEqual(sp.partial, [{"type": "tool_use", "id": "tb", "name": "Bash", "input": {}}])
 
+    def test_finish_reads_an_unterminated_last_event(self):
+        sp = A.Splicer()
+        data = sse(mstart(), *text_block(0), mdelta("end_turn"), MSTOP)[:-2]  # no closing blank line
+        out = feed_all(sp, data, 5) + sp.finish()
+        self.assertEqual(ev_list(out)[-1], MSTOP)
+        self.assertEqual((sp.finish(), sp.buf), ([], b""))
+        sp = A.Splicer()  # a held call's last event completes the call
+        feed_all(sp, sse(mstart(), *tool_block(0, "advisor", "tu1"), mdelta("tool_use"))[:-2])
+        self.assertIsNone(sp.call)
+        sp.finish()
+        self.assertEqual(sp.call, {"id": "tu1"})
+
     def test_crlf_and_event_lines(self):
         sp = A.Splicer()
         evs = [mstart(), *text_block(0), *tool_block(1, "advisor", "tu1"), mdelta("tool_use"), MSTOP]

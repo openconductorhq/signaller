@@ -293,6 +293,12 @@ class Splicer:
         self._held = []
         return out
 
+    def finish(self) -> list:
+        """At a leg's end: a last event that came without its closing blank line, read as if it had one."""
+        out = self.feed(b"\n\n") if self.buf.strip() else []
+        self.buf = b""
+        return out
+
     def flush(self) -> list:
         """The held events as they'd have gone out, for a call that isn't run."""
         out, self._held = [h[0] for h in self._held], []
