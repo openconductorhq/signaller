@@ -935,6 +935,9 @@ class ProxyTest(unittest.TestCase):
         self.assertIn(b'event: ping\ndata: {"type": "ping"}\n\n', data[:data.index(b"server_tool_use")])
         self.assertEqual(len(self.v.seen), 3)
 
+    def test_ping_bytes(self):
+        self.assertEqual(signaller.PING_SSE, b'event: ping\ndata: {"type": "ping"}\n\n')
+
     def test_client_gone_mid_advice(self):
         self.advised()
         self.v.script = [leg("ask", ("advisor", "tu1")), (*ADVICE, 0.5), leg("done")]
