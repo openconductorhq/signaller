@@ -844,6 +844,49 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(adv["status"], 502)
         self.assertEqual(self.app.store.stats(time.time(), ("anthropic", "valar"))["errors_last_hour"], 1)
 
+    def test_advice_row_has_an_api_cost(self):
+        self.advised()
+        self.v.script = [leg(("advisor", "tu1")), ADVICE, leg("done")]
+        self.post(self.adv_body())
+        _, adv = self.rows(2)
+        want = self.app.prices.api_cost("claude-opus-5-5", {"in": 300, "out": 20, "cache_read": 0, "cache_write": 0})
+        self.assertAlmostEqual(adv["api_cost"], want)
+
+    def assert_leg2_failed(self, data, t0):
+        """Never fail closed: the advice reached the client, then a truncation error; both rows; no hang."""
+        self.assertLess(time.time() - t0, 3)
+        self.assertIn(b"advisor_tool_result", data)
+        self.assertTrue(data.endswith(signaller.MIDSTREAM_SSE))
+        self.assertLess(data.index(b"advisor_tool_result"), data.index(signaller.MIDSTREAM_SSE))
+        served, adv = self.rows(2)
+        self.assertEqual((served["reason"], adv["reason"], adv["status"], adv["parent_id"]),
+                         ("lever", "advisor", 200, served["id"]))
+        self.assertIn(" err=leg2 ", self.err.getvalue())
+
+    def test_leg2_answering_non_200(self):
+        self.advised()
+        self.v.script = [leg("ask", ("advisor", "tu1")), ADVICE, (500, "application/json", b'{"type":"error"}')]
+        t0 = time.time()
+        _, data = self.post(self.adv_body())
+        self.assertEqual(len(self.v.seen), 3)
+        self.assert_leg2_failed(data, t0)
+
+    def test_leg2_failing_to_connect(self):
+        self.advised()
+        self.v.script = [leg("ask", ("advisor", "tu1")), ADVICE]
+        real, n = signaller.open_upstream, []
+
+        def flaky(*a):  # leg 1 and the advice connect; leg 2 doesn't
+            n.append(1)
+            if len(n) == 3:
+                raise ConnectionRefusedError("refused")
+            return real(*a)
+        t0 = time.time()
+        with mock.patch.object(signaller, "open_upstream", flaky):
+            _, data = self.post(self.adv_body())
+        self.assertEqual(len(self.v.seen), 2)
+        self.assert_leg2_failed(data, t0)
+
     def test_pings_while_the_advice_runs(self):
         self.advised()
         self.v.script = [leg("ask", ("advisor", "tu1")), (*ADVICE, 0.3), leg("done")]

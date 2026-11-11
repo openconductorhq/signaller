@@ -814,6 +814,10 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         cost1 = app.prices.cost(ds, plan.model, plan.window, usage1)
                     except Exception:
                         cost1 = None
+                    try:  # what the advisor model Claude Code named would have cost on Anthropic: the savings
+                        api_cost1 = app.prices.api_cost(adv_in, usage1)
+                    except Exception:
+                        api_cost1 = None
                     app.store.record_request({
                         "id": app.store.next_id(), "ts": t1, "track": route, "reason": "advisor", "parent_id": rid,
                         "explanation": json.dumps([{"rule": "Advisor", "outcome": "asked by #%s → %s" % (rid, plan.model), "decided": True}]),
@@ -822,7 +826,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         "session_id": sid, "in_tok": usage1.get("in"), "out_tok": usage1.get("out"),
                         "cache_read_tok": usage1.get("cache_read"), "cache_write_tok": usage1.get("cache_write"),
                         "cache_write_1h_tok": usage1.get("cache_write_1h"), "window": plan.window, "override": None,
-                        "cost": cost1, "api_cost": None})
+                        "cost": cost1, "api_cost": api_cost1})
                 except Exception:
                     pass
                 print("%s route=%s reason=advisor model=%s→%s status=%d ms=%d stream=False%s shadow=-" % (
@@ -910,7 +914,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     if err or sp.broken or sp.call is None or calls == advisor.MAX_CALLS:  # a normal end: release what's held
                         send(sp.flush())
                         break
-                    calls, sent = calls + 1, False
+                    calls, sent, stage = calls + 1, False, "advisor"
                     try:
                         partial, call_id = sp.partial, sp.call["id"]
                         got, gone = [], False
@@ -941,13 +945,13 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         cur = advisor.continue_request(cur, partial, call_id, text, failed, calls < advisor.MAX_CALLS)
                         sp.next_leg()
                         conn.close()
-                        conn = None
+                        conn, stage = None, "leg2"  # a failure from here on is the next leg's, not the advice's
                         conn, resp = open_upstream(base, self.command, self.path, headers, json.dumps(cur).encode())
                         leg_caps.append(AnswerCapture(resp.getheader("content-type", "")))
                         if resp.status != 200 or not resp.getheader("content-type", "").startswith("text/event-stream"):
                             raise ValueError("leg %d answered %d" % (calls + 1, resp.status))
                     except Exception:
-                        adv_err = " err=advisor"
+                        adv_err = " err=" + stage
                         send([MIDSTREAM_SSE] if sent else sp.flush())
                         break
                 if err:  # headers are out, so tell the client the stream is truncated
