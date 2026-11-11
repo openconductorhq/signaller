@@ -748,7 +748,8 @@ claude plugin test plugin/signaller
 | File | Role |
 |------|------|
 | `signaller.py` | the HTTP proxy, the `App` and startup |
-| `routing.py` | config model (v4), request features, rule evaluation and explanations |
+| `routing.py` | config model (v5), request features, rule evaluation and explanations |
+| `advisor.py` | the Advisor on a downstream: request rewrites and the stream splicer, pure |
 | `overrides.py` | settings lines: resolve, collisions, pruning, what's in force now |
 | `rulelang.py` | the `when … go …` parser, pure (no eval) |
 | `classifier.py` | the classifier rule's model call, cached per turn |

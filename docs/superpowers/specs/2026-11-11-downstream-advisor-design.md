@@ -176,3 +176,33 @@ everywhere.
 2. **Calls per request:** at most 3 (the next request resets the count), so
    a model that keeps calling the advisor can't loop. Anthropic caps its own
    server tools the same way (`max_uses`).
+
+## As built
+
+Where the shipped code differs from the text above:
+
+- **Pricing:** advice rows are priced on Anthropic too (`api_cost` set, from
+  the model Claude Code named).
+- **Functions:** there is no `advisor_out`. The pieces are `to_client_form`,
+  `strip_advisor` and `drop_issued`.
+- **Which requests:** only a streaming `/v1/messages` to a downstream with the
+  switch on gets the Advisor. Everything else (non-streaming, shadows, switch
+  off) strips it; it is not "the same loop over JSON bodies".
+- **The switch:** each downstream has an `advisor` switch (config v5, default
+  on).
+- **Pings:** the router writes an SSE ping every `PING_EVERY` while the advice
+  runs, and keeps pinging through leg 2's connect and first read.
+- **Issued ids:** advisor blocks the router issues carry ids starting
+  `srvtoolu_sgnl_`. `drop_issued` removes them on the way to Anthropic;
+  Anthropic's own pairs stay. Leg 2 uses the same issued id, so the pair is what
+  the next request carries.
+- **`turn_id`:** advice rows carry none (this amends section 4). `parent_id`
+  links them; the console treats any row with a `turn_id` as doubled.
+- **Several advisor calls in one message:** only the first is spliced; later
+  ones are dropped.
+- **Billing:** the served row bills every leg's usage. The stream shows Claude
+  Code leg 1's input and cache tokens (read from leg 1's `message_start` and
+  `message_delta`), with output summed.
+- **Path:** the advice call posts to the served request's path and query.
+- **`prepare()`:** returns a `Prepared` NamedTuple (the `AdvisorPlan` last)
+  and takes `raw=`, the original body.

@@ -1,5 +1,7 @@
 # The Advisor on a Downstream: Implementation Plan
 
+> Superseded in places by the "As built" section of the design spec.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A turn served by any downstream gets Claude Code's Advisor, run by signaller on that downstream's model for the Advisor's tier, and each advice call shows as its own row in Departures.
