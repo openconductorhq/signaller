@@ -719,11 +719,19 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             pass
 
         def _client_gone(self) -> bool:
-            """The client hung up (it sent its whole request, so anything readable now is EOF or a reset)."""
+            """The client hung up or its socket errored. A backstop only (the failed ping write is the real detector):
+            any doubt, including select's ValueError on a descriptor of 1024 or more, means not gone."""
             try:
+                # hang-up and error only: on Linux a client that half-closes after its request stays (macOS reports
+                # a half-close as POLLHUP too)
+                if hasattr(select, "poll"):
+                    p = select.poll()
+                    p.register(self.connection, select.POLLHUP | select.POLLERR | select.POLLNVAL)
+                    return bool(p.poll(0))
+                # ponytail: no poll (Windows): a readable EOF also reads as gone, a half-close included
                 return bool(select.select([self.connection], [], [], 0)[0]) and not self.connection.recv(1, socket.MSG_PEEK)
-            except OSError:
-                return True
+            except Exception:
+                return False
 
         def _error(self, status, msg):
             out = json.dumps({"type": "error", "error": {"type": "api_error", "message": msg}}).encode()

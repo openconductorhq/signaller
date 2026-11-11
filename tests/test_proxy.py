@@ -983,6 +983,21 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual((served["out_tok"], adv["status"]), (9, 200))
         self.assertNotIn(" err=", self.err.getvalue())
 
+    def test_client_gone_backstop(self):
+        gone = self.srv.RequestHandlerClass._client_gone
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        h = mock.Mock(connection=a)
+        self.assertFalse(gone(h))
+        b.close()
+        self.assertTrue(gone(h))  # hung up
+        # a descriptor of 1024 or more: select raises ValueError, poll may too; either means "not gone"
+        with mock.patch.object(signaller.select, "poll", side_effect=ValueError, create=True), \
+                mock.patch.object(signaller.select, "select", side_effect=ValueError):
+            self.assertFalse(gone(h))
+        with mock.patch.object(signaller, "select", mock.Mock(spec=["select"], select=mock.Mock(side_effect=ValueError))):
+            self.assertFalse(gone(h))  # no poll: select, guarded
+
     def test_ping_bytes(self):
         self.assertEqual(signaller.PING_SSE, b'event: ping\ndata: {"type": "ping"}\n\n')
 
