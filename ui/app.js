@@ -161,7 +161,7 @@ function filtChanged() {
   depFilter.track = $("fTrack").value; depFilter.model = $("fModel").value; depFilter.op = $("fOp").value; depFilter.lat = $("fLat").value;
   renderFilt();
   viewGen++;
-  $("deps").replaceChildren(); lastId = 0; minId = null; firstLoad = true; $("older").hidden = true;
+  $("deps").replaceChildren(); advN.clear(); lastId = 0; minId = null; firstLoad = true; $("older").hidden = true;
   busy = false; tick();
 }
 for (const id of ["fTrack", "fModel", "fOp", "fLat"]) $(id).addEventListener("change", filtChanged);
@@ -170,7 +170,7 @@ $("fClear").addEventListener("click", () => { $("fTrack").value = $("fModel").va
 function viewChanged(pickToo) {
   viewGen++;
   if (pickToo) {
-    $("deps").replaceChildren();
+    $("deps").replaceChildren(); advN.clear();
     lastId = 0; minId = null; firstLoad = true; $("older").hidden = true;
     turns = []; curTurn = null; turnData = null; turnKey = ""; ticks = 0;
   }
@@ -1371,6 +1371,7 @@ $("edSave").addEventListener("click", async () => {
 
 /* ---------- departures ---------- */
 let lastId = 0, minId = null, firstLoad = true;
+const advN = new Map();  // parent id -> advice rows loaded, for the "advisor ×N" mark
 const LIVE_MAX = 300;
 // ids are taken when a request starts but rows are written when it ends, so a long request can land after
 // later ones: re-ask for the last OVERLAP ids and slot late rows in by id.
@@ -1426,15 +1427,19 @@ function depRow(r) {
 }
 // "advisor ×N" on a row that called the Advisor: N counts the advice rows loaded in #deps that name it.
 // ponytail: counted from loaded rows, so it is short when some are paged out by "Load older".
-function markAdvisor(id) {
-  const row = $("deps").querySelector(`.dep[data-id="${id}"]`);
-  if (!row) return;
-  const n = $("deps").querySelectorAll(`.dep[data-parent="${id}"]`).length, why = row.querySelector(".why");
-  why.querySelector(".advn")?.remove();
-  if (n) why.append(el("span", { class: "adv advn" }, "advisor ×" + n));
-}
 function markAdvisors(rows) {
-  for (const r of rows) { markAdvisor(r.id); if (r.parent_id) markAdvisor(r.parent_id); }
+  const ids = new Set();
+  for (const r of rows) {
+    if (r.parent_id) { advN.set(r.parent_id, (advN.get(r.parent_id) || 0) + 1); ids.add(r.parent_id); }
+    if (advN.has(r.id)) ids.add(r.id);  // the parent arriving after its advice rows
+  }
+  for (const id of ids) {
+    const why = $("deps").querySelector(`.dep[data-id="${id}"] .why`);
+    if (!why) continue;
+    let tag = why.querySelector(".advn");
+    if (!tag) why.append(tag = el("span", { class: "adv advn" }));
+    tag.textContent = "advisor ×" + advN.get(id);
+  }
 }
 async function toggleDep(row, head, r) {
   const open = head.getAttribute("aria-expanded") !== "true";
@@ -1499,7 +1504,11 @@ function addDeps(rows) {
   // ponytail: live rows capped at LIVE_MAX so a long-open tab stays light; once "Load older" was used we keep
   // everything the user asked for (trimming then would leave a gap between live and older rows).
   if (!box.querySelector(".older") && box.children.length > LIVE_MAX) {
-    while (box.children.length > LIVE_MAX) box.lastElementChild.remove();
+    while (box.children.length > LIVE_MAX) {
+      const p = Number(box.lastElementChild.dataset.parent);
+      if (p && advN.has(p)) advN.set(p, advN.get(p) - 1);  // the count is of rows still loaded
+      box.lastElementChild.remove();
+    }
     minId = Number(box.lastElementChild.dataset.id);
     $("older").hidden = false;
   }
