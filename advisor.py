@@ -1,5 +1,7 @@
-"""The Advisor on a downstream: pure request rewrites (no I/O, no state)."""
+"""The Advisor on a downstream: pure request rewrites, and the Splicer that rewrites the answer stream (no I/O)."""
 import copy
+import json
+import re
 
 from routing import is_advisor
 
@@ -138,3 +140,144 @@ def advice_text(body: dict) -> str:
     t = "\n".join(b.get("text", "") for b in body.get("content") or []
                   if isinstance(b, dict) and b.get("type") == "text" and b.get("text"))
     return t.strip() or "(no advice)"
+
+
+_BOUNDARY = re.compile(rb"\r?\n\r?\n")
+
+
+def _sse(ev: dict) -> bytes:
+    return b"event: %s\ndata: %s\n\n" % (str(ev.get("type")).encode(), json.dumps(ev).encode())
+
+
+class Splicer:
+    """Rewrites a downstream's SSE answer for Claude Code around an advisor call. No I/O; feed never raises.
+    A tool_use named advisor is held back with everything after it; advice_events() stands in for it, and the
+    next leg (after next_leg()) has its message_start dropped and its indices shifted by .offset."""
+
+    def __init__(self):
+        self.buf, self.broken, self.offset, self.out_tokens = b"", False, 0, 0
+        self._base, self._first = 0, True  # output tokens of earlier legs; is this the first leg
+        self._reset()
+
+    def _reset(self):
+        self.call, self.mixed = None, False
+        self._blocks, self._json = {}, {}  # leg index -> block before the call / its partial_json pieces
+        self._adv = self._adv_id = None    # the advisor tool_use's leg index and id
+        self._tools, self._top = 0, -1     # tool_use blocks in the message; highest leg index seen
+        self._held = []                    # (bytes as they'd go out, event as parsed or None, leg index or None)
+
+    def next_leg(self):
+        self._base, self._first, self.buf = self.out_tokens, False, b""
+        self._reset()
+
+    def feed(self, chunk: bytes) -> list:
+        if self.broken:
+            return [chunk] if chunk else []
+        out = []
+        try:
+            self.buf += chunk
+            while True:
+                m = _BOUNDARY.search(self.buf)
+                if not m:
+                    break
+                b, ev, idx = self._event(self.buf[:m.end()])
+                self.buf = self.buf[m.end():]
+                if b is None:
+                    continue
+                if self._adv is not None:
+                    self._held.append((b, ev, idx))
+                else:
+                    out.append(b)
+        except Exception:
+            self.broken = True
+            out += [h[0] for h in self._held]
+            if self.buf:
+                out.append(self.buf)
+            self._held, self.buf = [], b""
+        return out
+
+    def _event(self, raw: bytes):
+        """(bytes to send, or None to drop; the event as parsed; its leg index). Raises on bad JSON."""
+        data = [ln[5:] for ln in raw.replace(b"\r", b"").split(b"\n") if ln.startswith(b"data:")]
+        if not data:
+            return raw, None, None
+        ev = json.loads(b"\n".join(data))
+        if not isinstance(ev, dict):
+            return raw, None, None
+        k, i = ev.get("type"), ev.get("index")
+        if k == "message_start":
+            return (raw if self._first else None), ev, None
+        if k == "message_delta":
+            n = (ev.get("usage") or {}).get("output_tokens")
+            if isinstance(n, int):
+                self.out_tokens = self._base + n
+                if self._base:
+                    raw = _sse({**ev, "usage": {**ev["usage"], "output_tokens": self.out_tokens}})
+            if (ev.get("delta") or {}).get("stop_reason") == "tool_use" and self._adv is not None:
+                self.call, self.mixed = {"id": self._adv_id}, self._tools > 1
+            return raw, ev, None
+        if not (isinstance(k, str) and k.startswith("content_block_") and isinstance(i, int)):
+            return raw, ev, None
+        self._top = max(self._top, i)
+        if k == "content_block_start":
+            cb = ev.get("content_block") or {}
+            if cb.get("type") == "tool_use":
+                self._tools += 1
+                if cb.get("name") == "advisor" and self._adv is None:
+                    self._adv, self._adv_id = i, str(cb.get("id"))
+            if self._adv is None:
+                self._blocks[i] = copy.deepcopy(cb)
+        elif k == "content_block_delta" and i in self._blocks and self._adv is None:
+            b, d = self._blocks[i], ev.get("delta") or {}
+            for dt, key in (("text_delta", "text"), ("thinking_delta", "thinking"), ("signature_delta", "signature")):
+                if d.get("type") == dt and isinstance(d.get(key), str):
+                    b[key] = (b.get(key) or "") + d[key]
+            if d.get("type") == "input_json_delta" and isinstance(d.get("partial_json"), str):
+                self._json.setdefault(i, []).append(d["partial_json"])
+        if self.offset:
+            raw = _sse({**ev, "index": i + self.offset})
+        return raw, ev, i
+
+    @property
+    def partial(self) -> list:
+        """This leg's content blocks before the advisor call, rebuilt from the deltas."""
+        out = []
+        for i in sorted(self._blocks):
+            b = copy.deepcopy(self._blocks[i])
+            if b.get("type") == "tool_use" and i in self._json:
+                try:
+                    b["input"] = json.loads("".join(self._json[i]) or "{}")
+                except ValueError:
+                    pass
+            out.append(b)
+        return out
+
+    def advice_events(self, call_id: str, text, error: bool) -> list:
+        """server_tool_use + advisor_tool_result at the next two indices; the next leg's offset moves past them."""
+        at = self.offset + (self._adv if self._adv is not None else self._top + 1)
+        sid = "srvtoolu_" + str(call_id)
+        content = ({"type": "advisor_tool_result_error", "error_code": "unavailable"} if error else
+                   {"type": "advisor_result", "text": text or "", "stop_reason": "end_turn"})
+        self.offset = at + 2
+        return [_sse({"type": "content_block_start", "index": at,
+                      "content_block": {"type": "server_tool_use", "id": sid, "name": "advisor", "input": {}}}),
+                _sse({"type": "content_block_stop", "index": at}),
+                _sse({"type": "content_block_start", "index": at + 1,
+                      "content_block": {"type": "advisor_tool_result", "tool_use_id": sid, "content": content}}),
+                _sse({"type": "content_block_stop", "index": at + 1})]
+
+    def rest(self) -> list:
+        """After advice_events on a mixed call: the other held blocks shifted past the advice, then the tail."""
+        out = []
+        for b, ev, j in self._held:
+            if j is None:
+                out.append(b)
+            elif j != self._adv:
+                out.append(_sse({**ev, "index": j - self._adv - 1 + self.offset}))
+        self._held = []
+        return out
+
+    def flush(self) -> list:
+        """The held events as they'd have gone out, for a call that isn't run."""
+        out, self._held = [h[0] for h in self._held], []
+        return out
