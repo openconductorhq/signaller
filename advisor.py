@@ -193,8 +193,8 @@ class Splicer:
                     self._held.append((b, ev, idx))
                 else:
                     out.append(b)
-        except Exception:
-            self.broken = True
+        except Exception:  # a break: everything passes as it came, and no call is left to run
+            self.broken, self.call, self.mixed = True, None, False
             out += [h[0] for h in self._held]
             if self.buf:
                 out.append(self.buf)
@@ -204,7 +204,7 @@ class Splicer:
     def _event(self, raw: bytes):
         """(bytes to send, or None to drop; the event as parsed; its leg index). Raises on bad JSON."""
         data = [ln[5:] for ln in raw.replace(b"\r", b"").split(b"\n") if ln.startswith(b"data:")]
-        if not data:
+        if not data or b"\n".join(data).strip() == b"[DONE]":  # a comment, or an OpenAI-style end sentinel
             return raw, None, None
         ev = json.loads(b"\n".join(data))
         if not isinstance(ev, dict):

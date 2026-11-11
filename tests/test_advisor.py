@@ -62,6 +62,7 @@ def mdelta(stop, out=7):
 
 
 MSTOP = {"type": "message_stop"}
+MSTOP_SSE = sse(MSTOP)
 
 
 def text_block(i, t="hello"):
@@ -275,6 +276,33 @@ class SplicerTest(unittest.TestCase):
         data = sse(mstart(), *tool_block(0, "advisor", "tu1")) + b"data: {bad\n\n" + sse(MSTOP)
         self.assertEqual(b"".join(feed_all(sp, data, 6)), data)
         self.assertTrue(sp.broken)
+
+    def test_break_after_a_call_clears_it(self):
+        """A parse break once a call is detected: the held events go out as they came, and no call is left to run."""
+        sp = A.Splicer()
+        data = sse(*self.LEG1) + b"data: {bad\n\n"
+        self.assertEqual(b"".join(feed_all(sp, data)), data)
+        self.assertTrue(sp.broken)
+        self.assertEqual((sp.call, sp.mixed), (None, False))
+
+    def test_done_sentinel_is_held_and_stays_last(self):
+        """An OpenAI-style `data: [DONE]` isn't a break: held with the call, released after the tail."""
+        sp = A.Splicer()
+        done = b"data: [DONE]\n\n"
+        out = feed_all(sp, sse(*self.LEG1) + done, 4)
+        self.assertFalse(sp.broken)
+        self.assertEqual(sp.call, {"id": "tu1"})
+        self.assertEqual(b"".join(out), sse(mstart(), *text_block(0, "thinking out loud")))
+        self.assertTrue(b"".join(sp.flush()).endswith(done))
+        sp = A.Splicer()  # mixed: rest() ends with the sentinel
+        feed_all(sp, sse(mstart(), *tool_block(0, "advisor", "tu1"), *tool_block(1, "Bash", "tb"),
+                         mdelta("tool_use"), MSTOP) + done)
+        sp.advice_events("x", "do X", False)
+        self.assertTrue(b"".join(sp.rest()).endswith(MSTOP_SSE + done))
+        sp = A.Splicer()  # no call: passes straight through
+        data = sse(mstart(), *text_block(0), mdelta("end_turn"), MSTOP) + done
+        self.assertEqual(b"".join(feed_all(sp, data, 3)), data)
+        self.assertFalse(sp.broken)
 
     def test_partial_thinking_and_tool_input_split(self):
         """thinking keeps its signature; a tool_use input split across deltas (and chunks) is parsed whole."""

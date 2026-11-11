@@ -904,7 +904,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     if not sp:
                         break
                     send(sp.finish())
-                    if err or sp.call is None or calls == advisor.MAX_CALLS:  # a normal end: release what's held
+                    if err or sp.broken or sp.call is None or calls == advisor.MAX_CALLS:  # a normal end: release what's held
                         send(sp.flush())
                         break
                     calls, sent = calls + 1, False

@@ -856,6 +856,22 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual([e["delta"]["stop_reason"] for e in ev if e["type"] == "message_delta"], ["tool_use"])
         self.assertEqual(ev[-1]["type"], "message_stop")
 
+    def test_advisor_call_with_a_done_sentinel(self):
+        """A downstream that ends its SSE with `data: [DONE]` (OpenAI-heritage gateways): one clean spliced stream."""
+        self.advised()
+        done = b"data: [DONE]\n\n"
+        l1, l2 = leg("ask", ("advisor", "tu1")), leg("done")
+        self.v.script = [(*l1[:2], l1[2] + done), ADVICE, (*l2[:2], l2[2] + done)]
+        _, data = self.post(self.adv_body())
+        self.assertEqual(len(self.v.seen), 3)
+        self.assertEqual(data.count(done), 1)
+        self.assertTrue(data.endswith(done))
+        ev = events(data[:-len(done)])
+        self.assertEqual([e["type"] for e in ev].count("message_start"), 1)
+        self.assertEqual([e["type"] for e in ev].count("message_stop"), 1)
+        starts = [(e["index"], e["content_block"]["type"]) for e in ev if e["type"] == "content_block_start"]
+        self.assertEqual(starts, [(0, "text"), (1, "server_tool_use"), (2, "advisor_tool_result"), (3, "text")])
+
     def test_session_lever_survives_restart(self):
         self.app.set_session_lever("s1", "valar")
         self.assertEqual(App(Config("127.0.0.1", 0, self.a.url, (self.v.url, "VK")), self.dir).session_levers, {"s1": "valar"})
