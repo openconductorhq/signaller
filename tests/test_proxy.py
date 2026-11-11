@@ -725,8 +725,9 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual((b2["model"], b2["tool_choice"], b2["stream"]), ("VO", {"type": "none"}, False))
         self.assertEqual(b2["messages"][-1]["content"][-1]["text"], advisor.PROMPT)
         self.assertEqual(self.v.seen[1][1], "/v1/messages")
-        self.assertEqual(b3["messages"][-2]["content"][-1], {"type": "tool_use", "id": "tu1", "name": "advisor", "input": {}})
-        self.assertEqual(b3["messages"][-1]["content"], [{"type": "tool_result", "tool_use_id": "tu1", "content": "do X"}])
+        sid = advisor.ISSUED + "tu1"  # the id the spliced block and every later request carry
+        self.assertEqual(b3["messages"][-2]["content"][-1], {"type": "tool_use", "id": sid, "name": "advisor", "input": {}})
+        self.assertEqual(b3["messages"][-1]["content"], [{"type": "tool_result", "tool_use_id": sid, "content": "do X"}])
         ev = events(data)
         starts = [e["content_block"] for e in ev if e["type"] == "content_block_start"]
         self.assertEqual([b["type"] for b in starts], ["text", "server_tool_use", "advisor_tool_result", "text"])
@@ -740,6 +741,24 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual((served["in_tok"], served["out_tok"], served["cache_read_tok"]), (200, 10, 100))  # both legs
         self.assertIsNone(served["parent_id"])
         self.assertIn("reason=advisor", self.err.getvalue())
+
+    def test_leg2_carries_the_pair_the_next_request_will(self):
+        """Leg 2 and the next request (built from what the client got) hold the same advisor pair: prefix caches hit."""
+        self.advised()
+        self.v.script = [leg("let me ask", ("advisor", "tu1")), ADVICE, leg("done"), leg("ok")]
+        _, data = self.post(self.adv_body())
+        blocks = []
+        for e in events(data):
+            if e["type"] == "content_block_start":
+                blocks.append(dict(e["content_block"]))
+            elif e["type"] == "content_block_delta" and e["delta"]["type"] == "text_delta":
+                blocks[-1]["text"] += e["delta"]["text"]
+        req = json.loads(self.adv_body())
+        req["messages"] += [{"role": "assistant", "content": blocks}, {"role": "user", "content": "next"}]
+        self.post(json.dumps(req).encode())
+        leg2, nxt = json.loads(self.v.seen[2][3])["messages"], json.loads(self.v.seen[3][3])["messages"]
+        self.assertEqual(leg2[1:3], nxt[1:3])
+        self.assertEqual(nxt[1]["content"][-1]["id"], advisor.ISSUED + "tu1")
 
     def test_advice_model_and_window_follow_settings_lines(self):
         self.advised()

@@ -1003,7 +1003,9 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                             break
                         if self._client_gone():
                             break
-                        cur = advisor.continue_request(cur, partial, call_id, text, failed, calls < advisor.MAX_CALLS)
+                        # the issued id, as the spliced block and every later request carry it: one pair, so prefix caches hit
+                        cur = advisor.continue_request(cur, partial, advisor.ISSUED + str(call_id), text, failed,
+                                                       calls < advisor.MAX_CALLS)
                         sp.next_leg()
                         conn.close()
                         conn, stage = None, "leg2"  # a failure from here on is the next leg's, not the advice's
