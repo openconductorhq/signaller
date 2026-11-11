@@ -837,8 +837,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             # stream keeps leg 1's input and cache tokens. One capture per leg, raw bytes
             leg_caps, sp = [], None
             adv_ms = [0]  # time spent in advice calls: their own rows carry it, the served row's ms doesn't
-            # the columns the served row and its advice rows share
-            context = lambda: {"track": route, "step": f.step, "prompt": f.prompt, "turn_id": turn_id, "session_id": sid,
+            # the columns the served row and its advice rows share; not turn_id: an advice row is never doubled
+            context = lambda: {"track": route, "step": f.step, "prompt": f.prompt, "session_id": sid,
                                "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120]}
 
             def run_advice(body_d):
@@ -1038,7 +1038,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                                  "error": err.strip() or res.get("error")})
                 if rec:
                     app.store.record_request(request_row(
-                        app, pr.ds, usage, model, pr.model, pr.window, status, ttfb, ms, **context(), id=rid, ts=t0,
+                        app, pr.ds, usage, model, pr.model, pr.window, status, ttfb, ms, **context(), turn_id=turn_id, id=rid, ts=t0,
                         reason=d.reason, explanation=json.dumps(d.explanation), stream=int(stream), override=pr.override))
                     f.prompt, f.messages = None, None  # recorded; the preview deque keeps only the capped text, not the history
                     app.recent.append((f, d, rid))

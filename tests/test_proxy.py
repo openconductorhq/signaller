@@ -767,6 +767,18 @@ class ProxyTest(unittest.TestCase):
         self.assertIsNone(served["override"])
         self.assertEqual(self.err.getvalue().count("settings failed: RuntimeError"), 2)  # the answer's and the advice's
 
+    def test_advice_row_has_no_turn_id(self):
+        """A doubled turn: the served row keeps its turn_id; the advice row, never doubled, has none (parent_id links it)."""
+        self.advised()
+        self.app.routing = replace(self.app.routing, doubling=replace(self.app.routing.doubling, rate=1.0))
+        self.v.script = [leg(("advisor", "tu1")), ADVICE, leg("done")]
+        self.post(self.adv_body(), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        served, adv = self.rows(2)
+        self.assertIsNotNone(served["turn_id"])
+        self.assertIsNone(adv["turn_id"])
+        self.assertEqual((adv["parent_id"], adv["session_id"], adv["prompt_hash"], adv["preview"]),
+                         (served["id"], "s1", served["prompt_hash"], served["preview"]))
+
     def test_advice_failure_continues_without_advice(self):
         self.advised()
         self.v.script = [leg(("advisor", "tu1")), (529, "application/json", b'{"type":"error"}'), leg("done")]
