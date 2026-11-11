@@ -54,6 +54,10 @@ def _is_result(b) -> bool:
     return isinstance(b, dict) and b.get("type") == "advisor_tool_result"
 
 
+def _id(v) -> bool:
+    return isinstance(v, str) and bool(v)
+
+
 def _result_block(b: dict) -> dict:
     c = b.get("content")
     kind = c.get("type") if isinstance(c, dict) else None
@@ -71,7 +75,9 @@ def _result_block(b: dict) -> dict:
 
 def to_client_form(req: dict) -> bool:
     """Swap the Advisor definition for TOOL and split each call/result pair into a client round trip:
-    assistant [..., tool_use], user [tool_result], assistant [rest]. Orphans and empty messages are dropped."""
+    assistant [..., tool_use], user [tool_result], assistant [rest]. A tool call before the advisor's moves to
+    after the round trip, so the next user message's result still answers the message before it. Orphans,
+    pairs without an id and empty messages are dropped."""
     changed = False
     tools = req.get("tools")
     if isinstance(tools, list) and any(isinstance(t, dict) and is_advisor(t) for t in tools):
@@ -87,19 +93,20 @@ def to_client_form(req: dict) -> bool:
             out.append(m)
             continue
         changed = True
-        results = {b.get("tool_use_id"): b for b in c if _is_result(b)}
+        results = {b.get("tool_use_id"): b for b in c if _is_result(b) and _id(b.get("tool_use_id"))}
         cur = []
         for b in c:
             if _is_result(b):
                 continue
             if _is_call(b):
-                r = results.get(b.get("id"))
+                r = results.get(b.get("id")) if _id(b.get("id")) else None
                 if r is None:
                     continue
-                cur.append({"type": "tool_use", "id": b["id"], "name": "advisor", "input": {}})
-                out.append({**m, "content": cur})
+                calls = [x for x in cur if isinstance(x, dict) and x.get("type") == "tool_use"]
+                out.append({**m, "content": [x for x in cur if x not in calls] +
+                            [{"type": "tool_use", "id": b["id"], "name": "advisor", "input": {}}]})
                 out.append({"role": "user", "content": [_result_block(r)]})
-                cur = []
+                cur = calls
             else:
                 cur.append(b)
         out.append({**m, "content": cur})
@@ -108,11 +115,13 @@ def to_client_form(req: dict) -> bool:
 
 
 def advice_request(req: dict, partial: list, model: str) -> dict:
-    """The body for the advice call: the conversation, the work so far, then PROMPT. No thinking."""
+    """The body for the advice call: the conversation, the work so far (less its tool calls: nothing answers
+    them here), then PROMPT. No thinking."""
     body = copy.deepcopy(req)
     msgs = list(body.get("messages") or [])
-    if partial:
-        msgs.append({"role": "assistant", "content": copy.deepcopy(partial)})
+    work = [b for b in partial if not (isinstance(b, dict) and b.get("type") == "tool_use")]
+    if work:
+        msgs.append({"role": "assistant", "content": copy.deepcopy(work)})
     msgs.append({"role": "user", "content": [{"type": "text", "text": PROMPT}]})
     body.update(messages=msgs, model=model, max_tokens=4096, stream=False, tool_choice={"type": "none"})
     body.pop("thinking", None)
@@ -265,7 +274,8 @@ class Splicer:
                     b["input"] = json.loads("".join(self._json[i]) or "{}")
                 except ValueError:
                     pass
-            out.append(b)
+            if not (b.get("type") == "text" and not b.get("text")):  # strict APIs reject an empty text block
+                out.append(b)
         return out
 
     def advice_events(self, call_id: str, text, error: bool) -> list:

@@ -121,6 +121,30 @@ class AdvisorTest(unittest.TestCase):
         self.assertTrue(A.to_client_form(r))
         self.assertEqual(r["messages"][1]["content"], [txt("a")])
 
+    def test_to_client_form_moves_an_earlier_tool_call_past_the_advice(self):
+        """A tool call before the advisor's in one message ends up after the advice round trip, so its result
+        (in the next user message) still answers the message right before it."""
+        bash = {"type": "tool_use", "id": "tb", "name": "Bash", "input": {}}
+        r = req([txt("a"), bash, call(), res(), txt("b"), {**bash, "id": "tc"}])
+        A.to_client_form(r)
+        self.assertEqual(r["messages"][1:], [
+            {"role": "assistant", "content": [txt("a"), {"type": "tool_use", "id": "s1", "name": "advisor", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "s1", "content": "do X"}]},
+            {"role": "assistant", "content": [bash, txt("b"), {**bash, "id": "tc"}]}])
+
+    def test_to_client_form_skips_a_pair_without_an_id(self):
+        r = req([txt("a"), {"type": "server_tool_use", "name": "advisor", "input": {}},
+                 {"type": "advisor_tool_result", "content": {"type": "advisor_result", "text": "x"}}])
+        self.assertTrue(A.to_client_form(r))
+        self.assertEqual(r["messages"][1:], [{"role": "assistant", "content": [txt("a")]}])
+
+    def test_advice_request_drops_unanswered_tool_calls(self):
+        bash = {"type": "tool_use", "id": "tb", "name": "Bash", "input": {}}
+        b = A.advice_request(req([txt("a")]), [txt("work"), bash], "m")
+        self.assertEqual(b["messages"][-2], {"role": "assistant", "content": [txt("work")]})
+        b = A.advice_request(req([txt("a")]), [bash], "m")
+        self.assertEqual([m["role"] for m in b["messages"]], ["user", "assistant", "user"])
+
     def test_to_client_form_untouched_without_advisor(self):
         r = {"tools": [{"name": "Bash"}], "messages": [{"role": "user", "content": "hi"}]}
         before = copy.deepcopy(r)
@@ -320,6 +344,12 @@ class SplicerTest(unittest.TestCase):
         self.assertEqual(sp.partial, [{"type": "thinking", "thinking": "hmm", "signature": "SIG"},
                                       {"type": "tool_use", "id": "tr", "name": "Read", "input": {"file_path": "/a"}}])
         self.assertTrue(sp.mixed)
+
+    def test_partial_drops_empty_text(self):
+        sp = A.Splicer()
+        feed_all(sp, sse(mstart(), bstart(0, {"type": "text", "text": ""}), bstop(0), *text_block(1, "x"),
+                         *tool_block(2, "advisor", "tu1"), mdelta("tool_use"), MSTOP))
+        self.assertEqual(sp.partial, [txt("x")])
 
     def test_leg_without_call_after_next_leg(self):
         sp = A.Splicer()
