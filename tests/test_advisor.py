@@ -192,6 +192,22 @@ class SplicerTest(unittest.TestCase):
         self.assertEqual(sp.out_tokens, 12)
         self.assertIsNone(sp.call)
 
+    def test_leg2_input_and_cache_tokens_stay_leg1s(self):
+        """Leg 2's delta carries its own (bigger) prompt counts: they become leg 1's, or go if leg 1 had none."""
+        start = mstart()
+        start["message"]["usage"]["cache_read_input_tokens"] = 3
+        leg1 = [start, *self.LEG1[1:-2], {**mdelta("tool_use", 7), "usage": {"output_tokens": 7, "input_tokens": 10}},
+                MSTOP]
+        sp = A.Splicer()
+        feed_all(sp, sse(*leg1))
+        sp.advice_events("x", "do X", False)
+        sp.next_leg()
+        d2 = {**mdelta("end_turn"), "usage": {"output_tokens": 5, "input_tokens": 999, "cache_read_input_tokens": 50,
+                                              "cache_creation_input_tokens": 40,
+                                              "cache_creation": {"ephemeral_5m_input_tokens": 40}}}
+        out = ev_list(feed_all(sp, sse(mstart(), *text_block(0, "ok"), d2, MSTOP)))
+        self.assertEqual(out[-2]["usage"], {"output_tokens": 12, "input_tokens": 10, "cache_read_input_tokens": 3})
+
     def test_advice_events_error_and_sse_form(self):
         sp = A.Splicer()
         feed_all(sp, sse(*self.LEG1))

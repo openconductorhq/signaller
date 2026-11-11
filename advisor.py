@@ -145,6 +145,10 @@ def advice_text(body: dict) -> str:
 _BOUNDARY = re.compile(rb"\r?\n\r?\n")
 
 
+def _in_field(f) -> bool:
+    return f == "input_tokens" or str(f).startswith("cache_")
+
+
 def _sse(ev: dict) -> bytes:
     return b"event: %s\ndata: %s\n\n" % (str(ev.get("type")).encode(), json.dumps(ev).encode())
 
@@ -157,6 +161,7 @@ class Splicer:
     def __init__(self):
         self.buf, self.broken, self.offset, self.out_tokens = b"", False, 0, 0
         self._base, self._first = 0, True  # output tokens of earlier legs; is this the first leg
+        self._in_usage = {}                # leg 1's message_start input and cache usage fields
         self._reset()
 
     def _reset(self):
@@ -206,13 +211,24 @@ class Splicer:
             return raw, None, None
         k, i = ev.get("type"), ev.get("index")
         if k == "message_start":
+            if self._first:
+                u = (ev.get("message") or {}).get("usage")
+                self._in_usage = {f: v for f, v in u.items() if _in_field(f)} if isinstance(u, dict) else {}
             return (raw if self._first else None), ev, None
         if k == "message_delta":
-            n = (ev.get("usage") or {}).get("output_tokens")
-            if isinstance(n, int):
-                self.out_tokens = self._base + n
-                if self._base:
-                    raw = _sse({**ev, "usage": {**ev["usage"], "output_tokens": self.out_tokens}})
+            u = ev.get("usage")
+            if isinstance(u, dict):
+                new = dict(u)
+                if isinstance(u.get("output_tokens"), int):
+                    self.out_tokens = new["output_tokens"] = self._base + u["output_tokens"]
+                if not self._first:  # input and cache tokens stay leg 1's: replaced, or dropped if leg 1 had none
+                    for f in [f for f in new if _in_field(f)]:
+                        if f in self._in_usage:
+                            new[f] = self._in_usage[f]
+                        else:
+                            del new[f]
+                if new != u:
+                    raw = _sse({**ev, "usage": new})
             if (ev.get("delta") or {}).get("stop_reason") == "tool_use" and self._adv is not None:
                 self.call, self.mixed = {"id": self._adv_id}, self._tools > 1
             return raw, ev, None
