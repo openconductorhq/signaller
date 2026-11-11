@@ -1112,5 +1112,21 @@ class HoistTolerantTest(unittest.TestCase):
         self.assertEqual(req["messages"], [])
 
 
+class StripAdvisorTest(unittest.TestCase):
+    def test_drops_definition_calls_and_results(self):
+        from signaller import strip_advisor
+        req = {"tools": [{"name": "Bash"}, {"type": "advisor_20260301", "name": "advisor"}], "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "text", "text": "x"}, {"type": "server_tool_use", "id": "a", "name": "advisor"},
+                                              {"type": "advisor_tool_result", "tool_use_id": "a"}]},
+            {"role": "assistant", "content": [{"type": "advisor_tool_result", "tool_use_id": "b"}]},
+            {"role": "user", "content": [{"type": "server_tool_use", "id": "w", "name": "web_search"}]}]}
+        self.assertTrue(strip_advisor(req))
+        self.assertEqual(req["tools"], [{"name": "Bash"}])
+        self.assertEqual([m["content"] for m in req["messages"]],
+                         ["hi", [{"type": "text", "text": "x"}], [{"type": "server_tool_use", "id": "w", "name": "web_search"}]])
+        self.assertFalse(strip_advisor({"tools": [{"name": "Bash"}], "messages": [{"role": "user", "content": "hi"}]}))
+
+
 if __name__ == "__main__":
     unittest.main()

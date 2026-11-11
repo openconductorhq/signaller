@@ -279,6 +279,8 @@ class ThreeTrackTests(unittest.TestCase):
         self.assertEqual((d.track, d.reason), ("anthropic", "rule:Tools only Anthropic can run"))
         plain = {**ws, "tools": [{"name": "Bash", "input_schema": {}}, {"type": "custom", "name": "X", "input_schema": {}}]}
         self.assertIs(Features.from_body(json.dumps(plain).encode()).servertool, False)
+        adv = {**ws, "tools": [{"name": "Bash", "input_schema": {}}, {"type": "advisor_20260301", "name": "advisor"}]}
+        self.assertIs(Features.from_body(json.dumps(adv).encode()).servertool, False)  # the Advisor rides on every request
         check = {"model": "claude-sonnet-5", "messages": [user('<transcript>\n{"user":"hi"}\n</transcript>')]}
         self.assertIs(Features.from_body(json.dumps(check).encode()).servertool, True)
         self.assertEqual(route(replace(DEFAULT_CONFIG, lever="valar"), Features.from_body(json.dumps(check).encode()), boom).track, "anthropic")

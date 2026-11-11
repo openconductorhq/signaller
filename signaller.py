@@ -30,7 +30,7 @@ from keys import host_of
 from prices import Prices, parse_valar
 from routing import (DEFAULT_CONFIG, LEVER_MODES, has_images, session_of, strip_lead_tags, text_hash, Decision, Downstream, Features, RoutingConfig,
                      config_from_json, config_to_json, downstream, is_routed, references, route as decide_route,
-                     track_model, track_window, tracks)
+                     is_advisor, track_model, track_window, tracks)
 from keys import Keys, write_json
 from store import NullStore, Store, load_console_config, save_console_config
 
@@ -123,6 +123,28 @@ def hoist_inline_tools(req: dict) -> bool:
     return changed
 
 
+def strip_advisor(req: dict) -> bool:
+    """Every downstream: drop the Advisor tool definition and its calls and results from the history
+    (server_tool_use named advisor, advisor_tool_result): a downstream can't run it and rejects the types.
+    A message the drop leaves empty goes too. True if anything changed."""
+    tools = req.get("tools")
+    changed = False
+    if isinstance(tools, list) and any(isinstance(t, dict) and is_advisor(t) for t in tools):
+        req["tools"] = [t for t in tools if not (isinstance(t, dict) and is_advisor(t))]
+        changed = True
+    adv = lambda b: isinstance(b, dict) and (b.get("type") == "advisor_tool_result"
+                                             or (b.get("type") == "server_tool_use" and b.get("name") == "advisor"))
+    msgs = req.get("messages")
+    for m in msgs if isinstance(msgs, list) else []:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list) and any(adv(b) for b in c):
+            m["content"], changed = [b for b in c if not adv(b)], True
+    if changed and isinstance(msgs, list):
+        # ponytail: an emptied message is dropped, which can leave two same-role messages side by side
+        req["messages"] = [m for m in msgs if not (isinstance(m, dict) and m.get("content") == [])]
+    return changed
+
+
 def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=None):
     """A request as it leaves for a track, the served one and its shadow alike:
     (name, base, key, ds, headers, out_model, window, changed, override). On a downstream the model is renamed, Valar's
@@ -137,7 +159,8 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
         return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, dropped, None
     out_model = track_model(model, ds)
     hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
-    changed = isinstance(req, dict) and (hoisted or out_model != model)
+    stripped = isinstance(req, dict) and strip_advisor(req)
+    changed = isinstance(req, dict) and (hoisted or stripped or out_model != model)
     headers, window = upstream_headers(headers, key), track_window(model, ds)
     override = None
     if f is not None and (routing or app.routing).settings:

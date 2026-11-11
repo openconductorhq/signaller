@@ -119,6 +119,11 @@ def is_routed(method: str, path: str) -> bool:
     return method == "POST" and path.split("?", 1)[0] in ROUTED_PATHS
 
 
+def is_advisor(t: dict) -> bool:
+    """Claude Code's Advisor tool definition (type advisor_20260301): run by Anthropic, unknown to a downstream."""
+    return str(t.get("type") or "").startswith("advisor_")
+
+
 def tier_of(model: str) -> str:
     m = model.lower()
     return next((t for t in ("haiku", "sonnet", "opus", "fable") if t in m), "other")
@@ -188,7 +193,10 @@ class Features:
             sub = isinstance(first, str) and "cc_is_subagent=true" in first
             # a typed tool (web_search_20250305, web_fetch_…, code_execution_…) runs on Anthropic's side;
             # other upstreams 400 on it. Claude Code sends these in their own small requests (WebSearch).
-            srv = any(isinstance(t, dict) and t.get("type") not in (None, "custom") for t in req.get("tools") or [])
+            # The Advisor (advisor_…) rides on every main-loop request since Claude Code 2.1.3xx: it doesn't pin the
+            # turn to Anthropic; prepare() drops it on the way to a downstream (strip_advisor).
+            srv = any(isinstance(t, dict) and t.get("type") not in (None, "custom") and not is_advisor(t)
+                      for t in req.get("tools") or [])
             # Claude Code's own check of the whole conversation (auto-mode permissions): keep it on Anthropic too
             srv = srv or text.startswith("<transcript>")
             step = latest_tool_results(req["messages"])
