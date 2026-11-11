@@ -149,6 +149,27 @@ class Prepared(NamedTuple):
     plan: AdvisorPlan | None
 
 
+def settings_lines(settings, ds: Downstream, model: str, f) -> tuple[dict, str | None]:
+    """(the settings lines for a model on this downstream, as overrides.resolve gives them; the row's override
+    column). ({}, None) without lines or features, or on a failure, which is logged and never fails the request."""
+    if f is None or not settings:
+        return {}, None
+    try:
+        applied = overrides.resolve(settings, ds.id, model, lambda n: f.get(n, lambda: "none"))
+        return applied, overrides.describe(applied)
+    except Exception as e:
+        print("settings failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+        return {}, None
+
+
+def fit_window(app: "App", ds: Downstream, window, model):
+    """A model without the window the router is about to send falls back to Now, the same rule the Tracks row
+    applies; a model Valar hasn't priced (no listed windows) goes out as set."""
+    if ds.kind == "valar" and window and (listed := app.prices.listed.get(ds.id, {}).get(model)) and window not in listed:
+        return "asap"
+    return window
+
+
 def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=None, advise=False) -> Prepared:
     """A request as it leaves for a track, the served one and its shadow alike. On a downstream the model is renamed,
     Valar's tool fix applied, the client's credentials swapped for the downstream's key, the window set and the
@@ -177,39 +198,17 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
     changed = isinstance(req, dict) and (hoisted or stripped or out_model != model)
     headers, window = upstream_headers(headers, key), track_window(model, ds)
     settings = (routing or app.routing).settings
-
-    def lines(m):  # the settings lines for a model on this downstream; {} on a failure, logged
-        if f is None or not settings:
-            return {}
-        try:
-            return overrides.resolve(settings, ds.id, m, lambda n: f.get(n, lambda: "none"))
-        except Exception as e:
-            print("settings failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
-            return {}
-
-    def fit(w, m):
-        # a model without the window the router is about to send falls back to Now, the same rule the Tracks
-        # row applies; a model Valar hasn't priced (no listed windows) goes out as set
-        if ds.kind == "valar" and w and (listed := app.prices.listed.get(ds.id, {}).get(m)) and w not in listed:
-            return "asap"
-        return w
-
-    applied = lines(model)
-    try:
-        override = overrides.describe(applied)
-    except Exception as e:
-        print("settings failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
-        applied, override = {}, None
+    applied, override = settings_lines(settings, ds, model, f)
     if "model" in applied:
         out_model, changed = applied["model"][0], True
     if "window" in applied:
         window = applied["window"][0]
-    window = fit(window, out_model)
+    window = fit_window(app, ds, window, out_model)
     plan = None
     if adv_model:
         m = track_model(adv_model, ds)
-        m = lines(adv_model).get("model", (m,))[0]
-        plan = AdvisorPlan(m, fit(window, m), adv_model)
+        m = settings_lines(settings, ds, adv_model, f)[0].get("model", (m,))[0]
+        plan = AdvisorPlan(m, fit_window(app, ds, window, m), adv_model)
     if changed:
         req["model"] = out_model
     if window:

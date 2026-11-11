@@ -754,6 +754,19 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual((json.loads(b2)["model"], h2.get_all("X-Valar-Completion-Window")), ("glm-adv", ["asap"]))
         self.assertEqual(h2["Authorization"], "Bearer VK")
 
+    def test_settings_failure_never_fails_the_request(self):
+        """A settings line that can't be resolved: logged once per resolution, the downstream's defaults apply."""
+        self.advised()
+        self.set_settings({"when": "", "downstream": "valar", "tier": None, "set": "model", "value": "glm-x"})
+        self.v.script = [leg(("advisor", "tu1")), ADVICE, leg("done")]
+        with mock.patch.object(overrides, "resolve", side_effect=RuntimeError("boom")):
+            status, _ = self.post(self.adv_body())
+        self.assertEqual(status, 200)
+        self.assertEqual([json.loads(x[3])["model"] for x in self.v.seen], ["VS", "VO", "VS"])
+        served, _ = self.rows(2)
+        self.assertIsNone(served["override"])
+        self.assertEqual(self.err.getvalue().count("settings failed: RuntimeError"), 2)  # the answer's and the advice's
+
     def test_advice_failure_continues_without_advice(self):
         self.advised()
         self.v.script = [leg(("advisor", "tu1")), (529, "application/json", b'{"type":"error"}'), leg("done")]
