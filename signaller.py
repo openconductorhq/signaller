@@ -142,8 +142,11 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
     if not ds:
         # any lever: a downstream's unsigned thinking can't reach Anthropic (it 400s on it) — in auto after a
         # downstream turn, in rules after a switch back, or mid-turn on the image fallback. Nothing of theirs to
-        # drop → the request goes out byte for byte.
-        dropped = track == "anthropic" and isinstance(req, dict) and autophase.drop_old_thinking(req)
+        # drop → the request goes out byte for byte. The advisor pairs the router issued go too: Anthropic never did.
+        dropped = False
+        if track == "anthropic" and isinstance(req, dict):
+            dropped = autophase.drop_old_thinking(req)
+            dropped = advisor.drop_issued(req) or dropped
         return name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, dropped, None, None
     out_model = track_model(model, ds)
     hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)

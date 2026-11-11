@@ -6,6 +6,7 @@ import re
 from routing import is_advisor
 
 MAX_CALLS = 3
+ISSUED = "srvtoolu_sgnl_"  # the id prefix of the advisor blocks the router issues (dropped on the way to Anthropic)
 PROMPT = ("You are an advisor to the assistant in this conversation, a stronger model it consulted mid-task. "
           "You can't run tools. Read the conversation and the assistant's work so far, then advise it on what to do "
           "next: what it may have missed or got wrong, the risks in its current approach, and a concrete next step. "
@@ -41,6 +42,23 @@ def strip_advisor(req: dict) -> bool:
         if isinstance(c, list) and any(adv(b) for b in c):
             m["content"], changed = [b for b in c if not adv(b)], True
     if changed and isinstance(msgs, list):
+        # ponytail: an emptied message is dropped, which can leave two same-role messages side by side
+        req["messages"] = [m for m in msgs if not (isinstance(m, dict) and m.get("content") == [])]
+    return changed
+
+
+def drop_issued(req: dict) -> bool:
+    """On the way to Anthropic: drop the advisor pairs the router issued (ids starting ISSUED), which Anthropic
+    never did, and any message the drop leaves empty. Anthropic's own pairs stay. True if anything changed."""
+    ours = lambda b: isinstance(b, dict) and (
+        (_is_call(b) and str(b.get("id")).startswith(ISSUED))
+        or (_is_result(b) and str(b.get("tool_use_id")).startswith(ISSUED)))
+    msgs, changed = req.get("messages"), False
+    for m in msgs if isinstance(msgs, list) else []:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list) and any(ours(b) for b in c):
+            m["content"], changed = [b for b in c if not ours(b)], True
+    if changed:
         # ponytail: an emptied message is dropped, which can leave two same-role messages side by side
         req["messages"] = [m for m in msgs if not (isinstance(m, dict) and m.get("content") == [])]
     return changed
@@ -281,7 +299,7 @@ class Splicer:
     def advice_events(self, call_id: str, text, error: bool) -> list:
         """server_tool_use + advisor_tool_result at the next two indices; the next leg's offset moves past them."""
         at = self.offset + (self._adv if self._adv is not None else self._top + 1)
-        sid = "srvtoolu_" + str(call_id)
+        sid = ISSUED + str(call_id)
         content = ({"type": "advisor_tool_result_error", "error_code": "unavailable"} if error else
                    {"type": "advisor_result", "text": text or "", "stop_reason": "end_turn"})
         self.offset = at + 2

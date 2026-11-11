@@ -145,6 +145,34 @@ class AdvisorTest(unittest.TestCase):
         b = A.advice_request(req([txt("a")]), [bash], "m")
         self.assertEqual([m["role"] for m in b["messages"]], ["user", "assistant", "user"])
 
+    def test_to_client_form_converts_a_router_issued_pair(self):
+        r = req([txt("a"), call("srvtoolu_sgnl_tu1"), res("srvtoolu_sgnl_tu1")])
+        A.to_client_form(r)
+        self.assertEqual(r["messages"][1:], [
+            {"role": "assistant", "content": [txt("a"), {"type": "tool_use", "id": "srvtoolu_sgnl_tu1", "name": "advisor", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "srvtoolu_sgnl_tu1", "content": "do X"}]}])
+
+    def test_drop_issued(self):
+        """Router-issued pairs go (and a message they empty); Anthropic's own stay."""
+        ours, theirs = A.ISSUED + "tu1", "srvtoolu_01abc"
+        r = {"tools": [DEF], "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [txt("a"), call(ours), res(ours), txt("b")]},
+            {"role": "user", "content": "more"},
+            {"role": "assistant", "content": [call(ours), res(ours)]},
+            {"role": "user", "content": "again"},
+            {"role": "assistant", "content": [call(theirs), res(theirs), txt("c")]}]}
+        self.assertTrue(A.drop_issued(r))
+        self.assertEqual(r, {"tools": [DEF], "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [txt("a"), txt("b")]},
+            {"role": "user", "content": "more"},
+            {"role": "user", "content": "again"},
+            {"role": "assistant", "content": [call(theirs), res(theirs), txt("c")]}]})
+        before = copy.deepcopy(r)
+        self.assertFalse(A.drop_issued(r))
+        self.assertEqual(r, before)
+
     def test_to_client_form_untouched_without_advisor(self):
         r = {"tools": [{"name": "Bash"}], "messages": [{"role": "user", "content": "hi"}]}
         before = copy.deepcopy(r)
@@ -204,8 +232,8 @@ class SplicerTest(unittest.TestCase):
         feed_all(sp, sse(*self.LEG1))
         adv = ev_list(sp.advice_events("x", "do X", False))
         self.assertEqual(adv, [
-            bstart(1, {"type": "server_tool_use", "id": "srvtoolu_x", "name": "advisor", "input": {}}), bstop(1),
-            bstart(2, {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_x",
+            bstart(1, {"type": "server_tool_use", "id": "srvtoolu_sgnl_x", "name": "advisor", "input": {}}), bstop(1),
+            bstart(2, {"type": "advisor_tool_result", "tool_use_id": "srvtoolu_sgnl_x",
                        "content": {"type": "advisor_result", "text": "do X", "stop_reason": "end_turn"}}), bstop(2)])
         sp.next_leg()
         out = ev_list(feed_all(sp, sse(mstart(), *text_block(0, "ok"), mdelta("end_turn", 5), MSTOP), 2))

@@ -790,6 +790,38 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(self.a.seen[0][3], body)
         self.assertEqual(self.v.seen, [])
 
+    def issued_body(self, sid):
+        msgs = [{"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "ask"},
+                    {"type": "server_tool_use", "id": sid, "name": "advisor", "input": {}},
+                    {"type": "advisor_tool_result", "tool_use_id": sid,
+                     "content": {"type": "advisor_result", "text": "do X", "stop_reason": "end_turn"}},
+                    {"type": "text", "text": "ok"}]},
+                {"role": "user", "content": "next"}]
+        return body_for("claude-sonnet-5-5", {"messages": msgs, "tools": [ADV_DEF]}, True)
+
+    def test_router_issued_advice_dropped_on_the_way_to_anthropic(self):
+        self.advised()
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        self.a.script = [leg("hi"), leg("hi")]
+        theirs = self.issued_body("srvtoolu_01abc")
+        self.post(theirs)
+        self.assertEqual(self.a.seen[0][3], theirs)  # Anthropic's own pair: byte for byte
+        ours = self.issued_body(advisor.ISSUED + "tu1")
+        self.post(ours)
+        want = json.loads(ours)
+        want["messages"][1]["content"] = [{"type": "text", "text": "ask"}, {"type": "text", "text": "ok"}]
+        self.assertEqual(json.loads(self.a.seen[1][3]), want)
+
+    def test_router_issued_advice_converted_for_the_downstream(self):
+        self.advised()
+        self.v.script = [leg("hi")]
+        self.post(self.issued_body(advisor.ISSUED + "tu1"))
+        msgs = json.loads(self.v.seen[0][3])["messages"]
+        self.assertEqual(msgs[1]["content"][-1], {"type": "tool_use", "id": advisor.ISSUED + "tu1", "name": "advisor", "input": {}})
+        self.assertEqual(msgs[2]["content"], [{"type": "tool_result", "tool_use_id": advisor.ISSUED + "tu1", "content": "do X"}])
+
     def test_served_row_bills_every_leg(self):
         self.advised()
         self.app.prices.set_listed("valar", {"VS": dict.fromkeys(("asap", "priority", "standard"), [1.0, 0.5, 2.0])})
