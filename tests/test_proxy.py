@@ -944,6 +944,33 @@ class ProxyTest(unittest.TestCase):
         self.assertIn(b'event: ping\ndata: {"type": "ping"}\n\n', data[:data.index(b"server_tool_use")])
         self.assertEqual(len(self.v.seen), 3)
 
+    def test_pings_while_leg2_connects(self):
+        self.advised()
+        self.v.script = [leg("ask", ("advisor", "tu1")), ADVICE, (*leg("done"), 0.3)]
+        with mock.patch.object(signaller, "PING_EVERY", 0.05):
+            _, data = self.post(self.adv_body())
+        between = data[data.index(b"advisor_tool_result"):data.index(b'"text": "done"')]
+        self.assertIn(signaller.PING_SSE, between)
+        self.assertEqual([e["type"] for e in events(data)].count("message_stop"), 1)
+
+    def test_client_gone_while_leg2_connects(self):
+        self.advised()
+        self.v.script = [leg("ask", ("advisor", "tu1"), out=9), ADVICE, (*leg("done"), 0.5)]
+        body = self.adv_body()
+        # the backstop off: the failed ping write alone must find the client gone
+        with mock.patch.object(signaller, "PING_EVERY", 0.05), \
+                mock.patch.object(self.srv.RequestHandlerClass, "_client_gone", return_value=False):
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+            got = b""
+            while b"advisor_tool_result" not in got:  # the advice is out: leg 2 is connecting
+                got += s.recv(4096)
+            s.close()
+            served, adv = self.rows(2)  # both log lines: a clean end, no raise
+        self.assertEqual(len(self.v.seen), 3)
+        self.assertEqual((served["out_tok"], adv["status"]), (9, 200))
+        self.assertNotIn(" err=", self.err.getvalue())
+
     def test_ping_bytes(self):
         self.assertEqual(signaller.PING_SSE, b'event: ping\ndata: {"type": "ping"}\n\n')
 

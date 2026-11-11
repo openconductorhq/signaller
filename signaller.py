@@ -877,6 +877,24 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     time.strftime("%Y-%m-%d %H:%M:%S"), route, plan.asked, plan.model, st, ms1, "" if text else " err=advisor"),
                     file=sys.stderr, flush=True)
                 return text or "advisor unavailable", text is None
+
+            def open_leg(body_b):
+                """The next leg, connected and its first bytes read: (conn, resp, first chunk), or None when it can't
+                be had or isn't a 200 event stream (its connection closed). Never raises: run_pinging runs it."""
+                c3 = None
+                try:
+                    c3, r3 = open_upstream(pr.base, self.command, self.path, pr.headers, body_b)
+                    if r3.status == 200 and r3.getheader("content-type", "").startswith("text/event-stream"):
+                        return c3, r3, r3.read1(65536)
+                except Exception:
+                    pass
+                if c3:
+                    c3.close()
+                return None
+
+            def ping(b):
+                self.wfile.write(b)
+                self.wfile.flush()
             try:
                 if route != "anthropic" and not pr.key:  # never fall back to another track
                     status = 502
@@ -936,14 +954,17 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         if cap:  # only after the bytes are out: the capture sees what the client got
                             cap.feed(c)
 
-                cur, calls, adv_err = req, 0, ""
+                cur, calls, adv_err, nxt = req, 0, "", None
                 if sp:
                     leg_caps.append(AnswerCapture(ctype))
                 while first is None:
-                    try:
-                        chunk = resp.read1(65536)
-                    except (OSError, http.client.HTTPException):
-                        chunk, err = b"", " err=midstream"
+                    if nxt is not None:  # the next leg's first bytes, read while pinging
+                        chunk, nxt = nxt, None
+                    else:
+                        try:
+                            chunk = resp.read1(65536)
+                        except (OSError, http.client.HTTPException):
+                            chunk, err = b"", " err=midstream"
                     if chunk:
                         send(sp.feed(chunk) if sp else [chunk])
                         if sp:
@@ -962,8 +983,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     try:
                         partial, call_id = sp.partial, sp.call["id"]
                         body_d = advisor.advice_request(cur, partial, pr.plan.model)
-                        got, gone = run_pinging(lambda: run_advice(body_d),
-                                                lambda b: (self.wfile.write(b), self.wfile.flush()))
+                        got, gone = run_pinging(lambda: run_advice(body_d), ping)
                         if gone:
                             break
                         text, failed = got or ("advisor unavailable", True)
@@ -979,10 +999,16 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         sp.next_leg()
                         conn.close()
                         conn, stage = None, "leg2"  # a failure from here on is the next leg's, not the advice's
-                        conn, resp = open_upstream(pr.base, self.command, self.path, pr.headers, json.dumps(cur).encode())
+                        # pings go on until the next leg's first bytes: a queued window can hold its headers back
+                        body_n = json.dumps(cur).encode()
+                        got, gone = run_pinging(lambda: open_leg(body_n), ping)
+                        if got:
+                            conn, resp, nxt = got
+                        if gone:  # nothing of the next leg goes out; finally closes it
+                            break
+                        if not got:
+                            raise ValueError("leg %d unavailable" % (calls + 1))
                         leg_caps.append(AnswerCapture(resp.getheader("content-type", "")))
-                        if resp.status != 200 or not resp.getheader("content-type", "").startswith("text/event-stream"):
-                            raise ValueError("leg %d answered %d" % (calls + 1, resp.status))
                     except Exception:
                         adv_err = " err=" + stage
                         send([MIDSTREAM_SSE] if sent else sp.flush())
