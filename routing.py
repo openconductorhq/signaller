@@ -151,6 +151,7 @@ class Downstream:
     color: str
     windows: dict | None = None  # tier -> WINDOWS value; valar only
     prices: dict | None = None  # PRICE_KEYS -> USD per 1M tokens; generic only, None = unpriced
+    advisor: bool = True  # Claude Code's Advisor tool works on this downstream
 
 
 def track_model(model: str, ds: Downstream) -> str:
@@ -419,7 +420,10 @@ def _downstream(d, taken):
         if not isinstance(p, dict) or set(p) != set(PRICE_KEYS):
             raise ValueError(msg)
         prices = {k: float(_num(p[k], 0, 1e6, msg)) for k in PRICE_KEYS}
-    return Downstream(i, d["name"], d["url"], d["kind"], {t: m[t] for t in MODEL_TIERS}, d["color"], windows, prices)
+    adv = d.get("advisor", True)
+    if not isinstance(adv, bool):
+        raise ValueError(f"downstream {i}: advisor must be true or false")
+    return Downstream(i, d["name"], d["url"], d["kind"], {t: m[t] for t in MODEL_TIERS}, d["color"], windows, prices, adv)
 
 
 PROMPT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
@@ -472,7 +476,9 @@ def config_from_json(obj: dict) -> RoutingConfig:
             obj, off = _v2_to_v3(obj)
         if obj.get("version") == 3:
             obj = {**obj, "version": 4, "settings": []}
-        if obj.get("version") != 4:
+        if obj.get("version") == 4:
+            obj = {**obj, "version": 5, "downstreams": [{**d, "advisor": True} for d in obj["downstreams"]]}
+        if obj.get("version") != 5:
             raise ValueError("unsupported config version")
         if len(obj["downstreams"]) > MAX_DOWNSTREAMS:
             raise ValueError(f"at most {MAX_DOWNSTREAMS} downstreams")
@@ -526,7 +532,7 @@ def config_from_json(obj: dict) -> RoutingConfig:
 def config_to_json(cfg: RoutingConfig) -> dict:
     import overrides  # local: overrides imports routing, so the module can't import it at the top
     return {
-        "version": 4, "settings": overrides.settings_to_json(cfg.settings),
+        "version": 5, "settings": overrides.settings_to_json(cfg.settings),
         "prompts": [{"name": n, "text": t} for n, t in cfg.prompts],
         "lever": cfg.lever, "otherwise": cfg.otherwise, "seeded": cfg.seeded,
         "rules": [{"name": r.name, "kind": r.kind, "enabled": r.enabled, "text": r.text, "builtin": r.builtin}
