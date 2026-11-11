@@ -74,6 +74,8 @@ UPSTREAM_TIMEOUT = 600
 MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_error",'
                  b'"message":"signaller: upstream ended mid-stream"}}\n\n')
 ADVICE_CAP = 4 << 20  # bytes read of an advice answer; a longer one fails as unparseable
+PING_EVERY = 10.0  # seconds between SSE pings to Claude Code while an advice call runs (no bytes flow otherwise)
+PING_SSE = b'event: ping\ndata: {"type": "ping"}\n\n'
 
 
 def upstream(app: "App", track: str, routing=None) -> tuple[str, str, str, Downstream | None]:
@@ -774,6 +776,9 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 shown = "%s→%s" % (model, out_model)
             status, err, ttfb, conn, first, fell = 0, "", None, None, None, None
             images = route != "anthropic" and has_images(req)
+            # the row bills every leg as the downstream sent it (each leg re-sends the conversation); the client
+            # stream keeps leg 1's input and cache tokens. One capture per leg, raw bytes
+            leg_caps = []
             adv_ms = [0]  # time spent in advice calls: their own rows carry it, the served row's ms doesn't
             preview = lambda: ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120]
 
@@ -793,10 +798,12 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     if st == 200:
                         text = advisor.advice_text(json.loads(raw))
                 except Exception:
-                    st = st or 502
+                    pass
                 finally:
                     if c2:
                         c2.close()
+                if text is None and st in (0, 200):  # no answer, or one that can't be read: an error row like any other
+                    st = 502
                 ms1 = int((time.time() - t1) * 1000)
                 adv_ms[0] += ms1
                 try:
@@ -879,6 +886,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                             cap.feed(c)
 
                 cur, calls, adv_err = req, 0, ""
+                if sp:
+                    leg_caps.append(AnswerCapture(ctype))
                 while first is None:
                     try:
                         chunk = resp.read1(65536)
@@ -886,6 +895,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         chunk, err = b"", " err=midstream"
                     if chunk:
                         send(sp.feed(chunk) if sp else [chunk])
+                        if sp:
+                            leg_caps[-1].feed(chunk)
                         continue
                     # a short content-length body ends silently; resp.length is the bytes still owed
                     if resp.length:
@@ -899,7 +910,23 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     calls, sent = calls + 1, False
                     try:
                         partial, call_id = sp.partial, sp.call["id"]
-                        text, failed = run_advice(advisor.advice_request(cur, partial, plan.model))
+                        got, gone = [], False
+                        worker = threading.Thread(target=lambda b: got.extend(run_advice(b)), daemon=True,
+                                                  args=(advisor.advice_request(cur, partial, plan.model),))
+                        worker.start()
+                        while True:  # pings keep a client's idle watchdog off the stream while the advice runs
+                            worker.join(PING_EVERY)
+                            if not worker.is_alive():
+                                break
+                            if not gone:
+                                try:
+                                    self.wfile.write(PING_SSE)
+                                    self.wfile.flush()
+                                except OSError:
+                                    gone = True  # wait on: the advice still finishes, so its row is recorded
+                        if gone:
+                            break
+                        text, failed = got if got else ("advisor unavailable", True)
                         evs = sp.advice_events(call_id, text, failed)
                         sent = True
                         send(evs)
@@ -913,6 +940,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         conn.close()
                         conn = None
                         conn, resp = open_upstream(base, self.command, self.path, headers, json.dumps(cur).encode())
+                        leg_caps.append(AnswerCapture(resp.getheader("content-type", "")))
                         if resp.status != 200 or not resp.getheader("content-type", "").startswith("text/event-stream"):
                             raise ValueError("leg %d answered %d" % (calls + 1, resp.status))
                     except Exception:
@@ -936,6 +964,14 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 except Exception:
                     res = {}
                 usage = res.get("usage") or {}
+                if len(leg_caps) > 1:  # advised: the row's tokens are every leg's, summed
+                    try:
+                        legs = [c.result()["usage"] for c in leg_caps]
+                        usage = {k: (sum(u[k] for u in legs if u.get(k) is not None)
+                                     if any(u.get(k) is not None for u in legs) else None)
+                                 for k in ("in", "out", "cache_read", "cache_write", "cache_write_1h")}
+                    except Exception:
+                        pass
                 try:  # pricing never fails the request: unknown → nulls
                     cost, api_cost = app.prices.cost(ds, out_model, window, usage), app.prices.api_cost(model, usage)
                 except Exception:

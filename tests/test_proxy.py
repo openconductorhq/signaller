@@ -132,10 +132,10 @@ def events(data):
     return [json.loads(ln[5:]) for ln in data.decode().split("\n") if ln.startswith("data:")]
 
 
-def leg(*blocks, out=5):
+def leg(*blocks, out=5, inp=100, cached=50):
     """A downstream's streamed answer: a str is a text block, a (name, id) pair a tool_use."""
     ev = [{"type": "message_start", "message": {"id": "m", "type": "message", "role": "assistant", "content": [], "model": "VO",
-                                                "usage": {"input_tokens": 100, "output_tokens": 1, "cache_read_input_tokens": 50}}}]
+                                                "usage": {"input_tokens": inp, "output_tokens": 1, "cache_read_input_tokens": cached}}}]
     for i, b in enumerate(blocks):
         if isinstance(b, str):
             ev += [{"type": "content_block_start", "index": i, "content_block": {"type": "text", "text": ""}},
@@ -737,7 +737,7 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual((adv["reason"], adv["parent_id"], adv["model_in"], adv["model_out"], adv["track"]),
                          ("advisor", served["id"], "claude-opus-5-5", "VO", "valar"))
         self.assertEqual((adv["in_tok"], adv["out_tok"], adv["status"], adv["session_id"]), (300, 20, 200, "s1"))
-        self.assertEqual((served["in_tok"], served["out_tok"], served["cache_read_tok"]), (100, 10, 50))
+        self.assertEqual((served["in_tok"], served["out_tok"], served["cache_read_tok"]), (200, 10, 100))  # both legs
         self.assertIsNone(served["parent_id"])
         self.assertIn("reason=advisor", self.err.getvalue())
 
@@ -790,18 +790,49 @@ class ProxyTest(unittest.TestCase):
         self.assertEqual(self.a.seen[0][3], body)
         self.assertEqual(self.v.seen, [])
 
+    def test_served_row_bills_every_leg(self):
+        self.advised()
+        self.app.prices.set_listed("valar", {"VS": dict.fromkeys(("asap", "priority", "standard"), [1.0, 0.5, 2.0])})
+        self.v.script = [leg(("advisor", "tu1"), out=5), ADVICE, leg("done", out=7, inp=200, cached=150)]
+        _, data = self.post(self.adv_body())
+        ev = events(data)
+        self.assertEqual([e["message"]["usage"]["input_tokens"] for e in ev if e["type"] == "message_start"], [100])
+        self.assertEqual([e["usage"]["output_tokens"] for e in ev if e["type"] == "message_delta"], [12])
+        served, _ = self.rows(2)
+        self.assertEqual((served["in_tok"], served["cache_read_tok"], served["out_tok"]), (300, 200, 12))
+        self.assertAlmostEqual(served["cost"], (300 * 1.0 + 200 * 0.5 + 12 * 2.0) / 1e6)
+
+    def test_unreadable_advice_is_an_error_row(self):
+        self.advised()
+        self.v.script = [leg(("advisor", "tu1")), (200, "application/json", b"not json"), leg("done")]
+        _, data = self.post(self.adv_body())
+        res = [e["content_block"] for e in events(data) if e["type"] == "content_block_start"][1]
+        self.assertEqual(res["content"]["type"], "advisor_tool_result_error")
+        _, adv = self.rows(2)
+        self.assertEqual(adv["status"], 502)
+        self.assertEqual(self.app.store.stats(time.time(), ("anthropic", "valar"))["errors_last_hour"], 1)
+
+    def test_pings_while_the_advice_runs(self):
+        self.advised()
+        self.v.script = [leg("ask", ("advisor", "tu1")), (*ADVICE, 0.3), leg("done")]
+        with mock.patch.object(signaller, "PING_EVERY", 0.05):
+            _, data = self.post(self.adv_body())
+        self.assertIn(b'event: ping\ndata: {"type": "ping"}\n\n', data[:data.index(b"server_tool_use")])
+        self.assertEqual(len(self.v.seen), 3)
+
     def test_client_gone_mid_advice(self):
         self.advised()
         self.v.script = [leg("ask", ("advisor", "tu1")), (*ADVICE, 0.5), leg("done")]
         body = self.adv_body()
-        s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
-        s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
-        got = b""
-        while b"text_delta" not in got:
-            got += s.recv(4096)
-        s.close()
-        served, adv = self.rows(2)
-        self.assertEqual(len(self.v.seen), 2)
+        with mock.patch.object(signaller, "PING_EVERY", 0.05):
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+            got = b""
+            while b"event: ping" not in got:  # the advice is running
+                got += s.recv(4096)
+            s.close()
+            served, adv = self.rows(2)  # both log lines: a clean end
+        self.assertEqual(len(self.v.seen), 2)  # no leg 2
         self.assertEqual((adv["reason"], adv["status"]), ("advisor", 200))
         self.assertGreaterEqual(adv["ms"], 500)
         self.assertLess(served["ms"], 400)  # the advice's time is its own row's, not counted twice
