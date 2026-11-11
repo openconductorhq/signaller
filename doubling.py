@@ -204,7 +204,7 @@ class Doubler:
             req = json.loads(body)
             req["stream"] = False
             strip_lead_tags(req)
-            pr = prepare(app, track, str(req.get("model", "")), req, headers, routing, f)
+            pr = prepare(app, track, str(req.get("model", "")), req, headers, routing, f, raw=body)
             ds, model_out, window = pr.ds, pr.model, pr.window  # read again for the cost below
             if track != "anthropic" and not pr.key:
                 raise NotConfigured("%s has no key" % pr.name)

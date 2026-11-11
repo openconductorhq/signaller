@@ -827,6 +827,33 @@ class ProxyTest(unittest.TestCase):
         want["messages"][1]["content"] = [{"type": "text", "text": "ask"}, {"type": "text", "text": "ok"}]
         self.assertEqual(json.loads(self.a.seen[1][3]), want)
 
+    def test_advisor_scans_skipped_without_advisor_bytes(self):
+        self.advised()
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        body = body_for("claude-opus-5-5", stream=True)
+        with mock.patch.object(advisor, "drop_issued", wraps=advisor.drop_issued) as drop, \
+                mock.patch.object(advisor, "strip_advisor", wraps=advisor.strip_advisor) as strip, \
+                mock.patch.object(advisor, "definition", wraps=advisor.definition) as defn:
+            self.post(body)
+            self.advised()
+            self.post(body_for("claude-sonnet-5-5", {"tools": [{"name": "Bash", "input_schema": {"type": "object"}}]}, True))
+        self.assertEqual(self.a.seen[0][3], body)  # byte for byte
+        self.assertEqual(json.loads(self.v.seen[0][3])["tools"], [{"name": "Bash", "input_schema": {"type": "object"}}])
+        self.assertEqual((drop.call_count, strip.call_count, defn.call_count), (0, 0, 0))
+
+    def test_advisor_scans_run_on_a_hit(self):
+        self.advised()
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        self.a.script = [leg("hi")]
+        with mock.patch.object(advisor, "drop_issued", wraps=advisor.drop_issued) as drop, \
+                mock.patch.object(advisor, "strip_advisor", wraps=advisor.strip_advisor) as strip:
+            self.post(self.issued_body(advisor.ISSUED + "tu1"))
+            self.advised()
+            self.post(self.adv_body(stream=False))
+        self.assertEqual((drop.call_count, strip.call_count), (1, 1))
+        self.assertNotIn(advisor.ISSUED.encode(), self.a.seen[0][3])
+        self.assertEqual([t["name"] for t in json.loads(self.v.seen[0][3])["tools"]], ["Bash"])
+
     def test_router_issued_advice_converted_for_the_downstream(self):
         self.advised()
         self.v.script = [leg("hi")]

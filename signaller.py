@@ -76,6 +76,7 @@ MIDSTREAM_SSE = (b'event: error\ndata: {"type":"error","error":{"type":"api_erro
 ADVICE_CAP = 4 << 20  # bytes read of an advice answer; a longer one fails as unparseable
 PING_EVERY = 10.0  # seconds between SSE pings to Claude Code while an advice call runs (no bytes flow otherwise)
 PING_SSE = b'event: ping\ndata: {"type": "ping"}\n\n'
+ISSUED_BYTES = advisor.ISSUED.encode()
 
 
 def upstream(app: "App", track: str, routing=None) -> tuple[str, str, str, Downstream | None]:
@@ -170,12 +171,14 @@ def fit_window(app: "App", ds: Downstream, window, model):
     return window
 
 
-def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=None, advise=False) -> Prepared:
+def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=None, advise=False,
+            raw: bytes | None = None) -> Prepared:
     """A request as it leaves for a track, the served one and its shadow alike. On a downstream the model is renamed,
     Valar's tool fix applied, the client's credentials swapped for the downstream's key, the window set and the
     matching settings lines applied. The Advisor is stripped, or with `advise` (a streaming /v1/messages request) on a
     downstream that has it on, offered as a client tool, `plan` saying which model and window run its calls.
-    `req` (when a dict) is edited in place; `changed` says it must be re-serialised."""
+    `req` (when a dict) is edited in place; `changed` says it must be re-serialised. `raw`, the body `req` was parsed
+    from, lets the advisor scans be skipped when its bytes can't hold what they look for (None: always scan)."""
     name, base, key, ds = upstream(app, track, routing)
     if not ds:
         # any lever: a downstream's unsigned thinking can't reach Anthropic (it 400s on it) — in auto after a
@@ -184,17 +187,22 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
         dropped = False
         if track == "anthropic" and isinstance(req, dict):
             dropped = autophase.drop_old_thinking(req)
-            dropped = advisor.drop_issued(req) or dropped
+            # the issued ids are ASCII, which no JSON encoder escapes: absent from the bytes, absent from req
+            if raw is None or ISSUED_BYTES in raw:
+                dropped = advisor.drop_issued(req) or dropped
         return Prepared(name, base, key, None, [(k, v) for k, v in headers if k.lower() not in HOP], model, None, dropped,
                         None, None)
     out_model = track_model(model, ds)
     hoisted = ds.kind == "valar" and isinstance(req, dict) and hoist_inline_tools(req)
-    adef = advisor.definition(req) if advise and ds.advisor and isinstance(req, dict) else None
+    # every advisor definition, call and result names "advisor" (a type advisor_*, a name advisor): without those
+    # bytes there's nothing to offer or strip
+    scan = isinstance(req, dict) and (raw is None or b"advisor" in raw)
+    adef = advisor.definition(req) if scan and advise and ds.advisor else None
     adv_model = adef.get("model") if adef else None
     if isinstance(adv_model, str) and adv_model:
         stripped = advisor.to_client_form(req)
     else:
-        adv_model, stripped = None, isinstance(req, dict) and advisor.strip_advisor(req)
+        adv_model, stripped = None, scan and advisor.strip_advisor(req)
     changed = isinstance(req, dict) and (hoisted or stripped or out_model != model)
     headers, window = upstream_headers(headers, key), track_window(model, ds)
     settings = (routing or app.routing).settings
@@ -786,7 +794,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 except Exception:
                     pass
                 advise = rec and stream and isinstance(req, dict)  # the Advisor runs only in a streamed main answer
-                pr = prepare(app, route, model, req, self.headers.items(), routing, f, advise=advise)
+                pr = prepare(app, route, model, req, self.headers.items(), routing, f, advise=advise, raw=body)
             if stripped or pr.changed:
                 body = json.dumps(req).encode()
             if pr.model != model:
@@ -865,7 +873,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         route = "anthropic"
                         req2 = json.loads(orig_body)
                         stripped2 = strip_lead_tags(req2)
-                        pr = prepare(app, route, model, req2, self.headers.items(), routing, f)
+                        pr = prepare(app, route, model, req2, self.headers.items(), routing, f, raw=orig_body)
                         body, shown = json.dumps(req2).encode() if stripped2 or pr.changed else orig_body, model
                         d.explanation.append({"rule": "Fallback", "outcome": f"{fell} can't take images → anthropic", "decided": True})
                         if sid:
