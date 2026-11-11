@@ -200,7 +200,7 @@ class Splicer:
         self.buf, self.broken, self.offset, self.out_tokens = b"", False, 0, 0
         self._scan = 0                     # where the next boundary search starts in buf
         self._base, self._first = 0, True  # output tokens of earlier legs; is this the first leg
-        self._in_usage = {}                # leg 1's message_start input and cache usage fields
+        self._in_usage = {}                # leg 1's input and cache usage fields (message_start, then its deltas)
         self._reset()
 
     def _reset(self):
@@ -264,6 +264,8 @@ class Splicer:
         if k == "message_delta":
             u = ev.get("usage")
             if isinstance(u, dict):
+                if self._first:  # some downstreams send the real input/cache split here, not in message_start
+                    self._in_usage.update({f: v for f, v in u.items() if _in_field(f)})
                 new = dict(u)
                 if isinstance(u.get("output_tokens"), int):
                     self.out_tokens = new["output_tokens"] = self._base + u["output_tokens"]

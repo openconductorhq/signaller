@@ -309,6 +309,22 @@ class SplicerTest(unittest.TestCase):
         out = ev_list(feed_all(sp, sse(mstart(), *text_block(0, "ok"), d2, MSTOP)))
         self.assertEqual(out[-2]["usage"], {"output_tokens": 12, "input_tokens": 10, "cache_read_input_tokens": 3})
 
+    def test_leg1_input_and_cache_tokens_from_its_message_delta(self):
+        """A downstream that sends 0/0 in message_start and the real split in leg 1's (held) message_delta:
+        the client's final delta carries leg 1's delta counts, not the start's zeros nor leg 2's own."""
+        start = mstart()
+        start["message"]["usage"] = {"input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 1}
+        d1 = {**mdelta("tool_use"), "usage": {"output_tokens": 7, "input_tokens": 120, "cache_read_input_tokens": 80}}
+        leg1 = [start, *self.LEG1[1:-2], d1, MSTOP]
+        sp = A.Splicer()
+        out = feed_all(sp, sse(*leg1), 5)
+        self.assertEqual(b"".join(out), sse(start, *text_block(0, "thinking out loud")))  # leg 1 untouched
+        sp.advice_events("x", "do X", False)
+        sp.next_leg()
+        d2 = {**mdelta("end_turn"), "usage": {"output_tokens": 5, "input_tokens": 200, "cache_read_input_tokens": 150}}
+        out = ev_list(feed_all(sp, sse(mstart(), *text_block(0, "ok"), d2, MSTOP)))
+        self.assertEqual(out[-2]["usage"], {"output_tokens": 12, "input_tokens": 120, "cache_read_input_tokens": 80})
+
     def test_advice_events_error_and_sse_form(self):
         sp = A.Splicer()
         feed_all(sp, sse(*self.LEG1))
