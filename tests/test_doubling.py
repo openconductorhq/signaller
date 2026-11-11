@@ -15,7 +15,7 @@ from unittest import mock
 import signaller
 import overrides
 from signaller import App, Config, make_server
-from doubling import AnswerCapture, Doubler
+from doubling import AnswerCapture, Doubler, sum_usage
 from routing import DEFAULT_CONFIG, Doubling, Features
 from tests.test_proxy import CLASSIFIER_OFF, HDRS, LEMMI
 
@@ -140,6 +140,20 @@ class CaptureTest(unittest.TestCase):
             c = AnswerCapture(ct)
             c.feed(junk)
             self.assertEqual(c.result()["usage"], dict.fromkeys(want))
+
+    def test_sum_usage(self):
+        def cap(u):
+            c = AnswerCapture("text/event-stream")
+            c.feed(sse({"type": "message_start", "message": {"usage": u}},
+                       {"type": "message_delta", "delta": {}, "usage": {"output_tokens": u["output_tokens"]}}))
+            return c
+        a = cap({"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 3,
+                 "cache_creation": {"ephemeral_1h_input_tokens": 2}})
+        b = cap({"input_tokens": 20, "output_tokens": 7, "cache_read_input_tokens": 4})
+        self.assertEqual(sum_usage([a, b]), {"in": 30, "out": 12, "cache_read": 7, "cache_write": None, "cache_write_1h": 2})
+        broken = mock.Mock(result=mock.Mock(side_effect=RuntimeError))
+        self.assertEqual(sum_usage([a, broken]), {"in": 10, "out": 5, "cache_read": 3, "cache_write": None, "cache_write_1h": 2})
+        self.assertEqual(sum_usage([]), dict.fromkeys(("in", "out", "cache_read", "cache_write", "cache_write_1h")))
 
     def test_capture_garbage_never_raises(self):
         for ct in ("text/event-stream", "application/json", ""):

@@ -26,7 +26,7 @@ from autophase import BoundedDict
 from sessions import SessionDirectory, claude_dir
 from console import LOOPBACK_HOST_RE
 from classifier import Classifier
-from doubling import AnswerCapture, Doubler
+from doubling import AnswerCapture, Doubler, sum_usage
 from keys import host_of
 from prices import Prices, parse_valar
 from routing import (DEFAULT_CONFIG, LEVER_MODES, has_images, session_of, strip_lead_tags, text_hash, Decision, Downstream, Features, RoutingConfig,
@@ -994,13 +994,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     res = {}
                 usage = res.get("usage") or {}
                 if len(leg_caps) > 1:  # advised: the row's tokens are every leg's, summed
-                    try:
-                        legs = [c.result()["usage"] for c in leg_caps]
-                        usage = {k: (sum(u[k] for u in legs if u.get(k) is not None)
-                                     if any(u.get(k) is not None for u in legs) else None)
-                                 for k in ("in", "out", "cache_read", "cache_write", "cache_write_1h")}
-                    except Exception:
-                        pass
+                    usage = sum_usage(leg_caps)
                 try:  # pricing never fails the request: unknown → nulls
                     cost, api_cost = app.prices.cost(pr.ds, pr.model, pr.window, usage), app.prices.api_cost(model, usage)
                 except Exception:

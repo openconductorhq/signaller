@@ -105,6 +105,19 @@ class AnswerCapture:
                 "tools": [{"name": t["name"], "input": "".join(t["input"])[:INPUT_CAP]} for t in self.tools]}
 
 
+def sum_usage(captures) -> dict:
+    """The usage of several answers (an advised stream's legs) summed per field; a field none of them has stays None.
+    Never raises: a capture that can't give its usage counts as having none."""
+    legs = []
+    for c in captures:
+        try:
+            legs.append(c.result().get("usage") or {})
+        except Exception:
+            legs.append({})
+    return {k: (sum(u[k] for u in legs if u.get(k) is not None) if any(u.get(k) is not None for u in legs) else None)
+            for k in ("in", "out", "cache_read", "cache_write", "cache_write_1h")}
+
+
 class PairHandle:
     """Joins the served side and the shadow side; whichever arrives second writes the pair."""
 
