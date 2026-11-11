@@ -211,6 +211,24 @@ def test_old_db_gets_columns(tmp_path):
     c.close()
 
 
+
+def test_parent_id_migrates(tmp_path):
+    p = str(tmp_path / "old.db")
+    c = sqlite3.connect(p)
+    c.executescript("""CREATE TABLE requests(id INTEGER PRIMARY KEY, ts REAL, track TEXT, reason TEXT,
+      explanation TEXT, model_in TEXT, model_out TEXT, status INTEGER, ttfb_ms INTEGER, ms INTEGER,
+      stream INTEGER, preview TEXT, turn_id TEXT, session_id TEXT, in_tok INTEGER, out_tok INTEGER,
+      cache_read_tok INTEGER, cache_write_tok INTEGER, cache_write_1h_tok INTEGER, window TEXT, override TEXT,
+      step TEXT, cost REAL, api_cost REAL, prompt_hash TEXT);""")
+    c.commit(); c.close()
+    s = Store(p)
+    s.record_request(req(4, time.time(), track="valar", reason="advisor", parent_id=3))
+    s.close()
+    assert s.request(4)["parent_id"] == 3
+    c = sqlite3.connect(p)
+    assert dict((r[1], r[2]) for r in c.execute("PRAGMA table_info(requests)"))["parent_id"] == "INTEGER"
+    c.close()
+
 T = ("anthropic", "valar", "local")
 
 
