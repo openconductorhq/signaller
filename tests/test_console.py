@@ -26,12 +26,9 @@ from compact import error_body
 
 
 
-# reuse ProxyTest's fixtures without inheriting (and re-running) its tests
-Fixture = type("Fixture", (unittest.TestCase,), {k: v for k, v in vars(test_proxy.ProxyTest).items()
-                                                  if not k.startswith(("test_", "__"))})
+class ConsoleFixture(unittest.TestCase):
+    """HTTP helpers for the fixture app: every request carries the loopback Origin unless told otherwise."""
 
-
-class ConsoleTest(Fixture):
     def req(self, method, path, body=None, origin="own", host=None, hdrs=None):
         h = dict(hdrs or {})
         if origin == "own":
@@ -51,6 +48,13 @@ class ConsoleTest(Fixture):
         r, d = self.req(*a, **k)
         return r.status, json.loads(d)
 
+
+# reuse ProxyTest's fixtures without inheriting (and re-running) its tests
+Fixture = type("Fixture", (ConsoleFixture,), {k: v for k, v in vars(test_proxy.ProxyTest).items()
+                                              if not k.startswith(("test_", "__"))})
+
+
+class ConsoleTest(Fixture):
     def put_cfg(self, **patch):
         """A whole-config PUT from the page's point of view: the config it last rendered, plus that rev."""
         st = self.js("GET", "/ui/api/state")[1]
@@ -578,7 +582,9 @@ INFO = json.dumps({"data": [{"model_name": "deepseek-v4.1-flash",
 
 
 class DownstreamApiTest(Fixture):
-    req, js = ConsoleTest.req, ConsoleTest.js
+    def ctx(self):
+        """The context windows the models endpoint serves for the lemmi track."""
+        return self.js("GET", "/ui/api/models?track=lemmi")[1]["context"]
 
     def add(self, id="lemmi", url=None, key="LMK", **kw):
         self.l.models = self.l.models if self.l.models != b"{}" else ONE
@@ -666,11 +672,11 @@ class DownstreamApiTest(Fixture):
     def test_empty_payload_keeps_saved_windows(self):
         self.l.models = WINDOWED
         self.assertEqual(self.add()[0], 201)
-        self.assertEqual(self.js("GET", "/ui/api/models?track=lemmi")[1]["context"],
+        self.assertEqual(self.ctx(),
                          {"deepseek-v4.1-flash": 850000})
         self.l.models = ONE  # now the downstream lists no windows at all
         self.l.model_info = 404
-        self.assertEqual(self.js("GET", "/ui/api/models?track=lemmi")[1]["context"],
+        self.assertEqual(self.ctx(),
                          {"deepseek-v4.1-flash": 850000})  # the saved ones stay
 
     def test_add_downstream_captures_windows(self):
@@ -682,7 +688,7 @@ class DownstreamApiTest(Fixture):
     def test_stale_path_serves_saved_context(self):
         self.l.models = WINDOWED
         self.assertEqual(self.add()[0], 201)
-        self.assertEqual(self.js("GET", "/ui/api/models?track=lemmi")[1]["context"],
+        self.assertEqual(self.ctx(),
                          {"deepseek-v4.1-flash": 850000})  # a live fetch first: it saves
         self.set_lemmi_url("http://127.0.0.1:1")  # unreachable: the stale branch
         s, j = self.js("GET", "/ui/api/models?track=lemmi")
@@ -910,27 +916,15 @@ class CompactTest(Fixture):
         assert len(body) == n
         return body
 
-    def req(self, method, path, body=None, origin="own", host=None, hdrs=None):
-        h = dict(hdrs or {})
-        if origin == "own":
-            origin = "http://127.0.0.1:%d" % self.port
-        if origin:
-            h["Origin"] = origin
-        if host:
-            h["Host"] = host
-        c = HTTPConnection("127.0.0.1", self.port, timeout=5)
-        c.request(method, path, json.dumps(body) if body is not None else None, h)
-        r = c.getresponse()
-        data = r.read()
-        c.close()
-        return r, data
+    S1 = {**HDRS, "X-Claude-Code-Session-Id": "s1"}
 
-    def js(self, *a, **k):
-        r, d = self.req(*a, **k)
-        return r.status, json.loads(d)
+    def ask(self, n, **hdrs):
+        """POST self.big(n) as session s1; (status, how many asks have reached the downstream so far)."""
+        s, _ = self.post(self.big(n), {**self.S1, **hdrs})
+        return s, len(self.v.seen)
 
     def test_refuses_near_window(self):
-        s, d = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        s, d = self.post(self.big(4000), self.S1)
         self.assertEqual((s, d), (400, error_body(1000, 900)))  # 4000 bytes / 4 = 1000 ≥ 900
         self.assertEqual(self.v.seen, [])  # the downstream was never asked
         self.logged(1)
@@ -944,65 +938,59 @@ class CompactTest(Fixture):
         self.assertEqual(len(notice["turn"]), 16)
 
     def test_compaction_request_not_refused(self):
-        s, _ = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1",
-                                          "X-Claude-Code-Request-Class": "compaction"})
-        self.assertEqual((s, len(self.v.seen)), (200, 1))  # the compaction itself runs on the downstream
+        self.assertEqual(self.ask(4000, **{"X-Claude-Code-Request-Class": "compaction"}),
+                         (200, 1))  # the compaction itself runs on the downstream
 
     def test_no_window_no_check(self):
         self.app.listed_context = {}  # m without a window: nothing is ever refused
-        s, _ = self.post(self.big(40000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
-        self.assertEqual((s, len(self.v.seen)), (200, 1))
+        self.assertEqual(self.ask(40000), (200, 1))
 
     def test_keyless_downstream_gets_502_not_compact(self):
         self.app.keys.delete("valar", self.v.url)  # the wizard allows a downstream with no key yet
-        s, d = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        s, d = self.post(self.big(4000), self.S1)
         self.assertEqual(s, 502)
         self.assertIn(b"has no key", d)
         self.assertEqual(self.v.seen, [])  # never asked, and never told to compact
 
     def test_anthropic_never_checked(self):
         self.app.routing = replace(self.app.routing, lever="anthropic")
-        s, _ = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        s, _ = self.post(self.big(4000), self.S1)
         self.assertEqual((s, len(self.a.seen)), (200, 1))  # a normal answer, never 400 from signaller
         self.assertEqual(self.v.seen, [])
 
     def test_anchor_from_usage(self):
         self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 100}}).encode()),
                          (200, "application/json", b"{}")]
-        self.assertEqual(self.post(self.big(3200), {**HDRS, "X-Claude-Code-Session-Id": "s1"})[0], 200)
+        self.assertEqual(self.ask(3200)[0], 200)
         self.logged(1)  # the note happens in the handler's finally, after the client has the response
         self.assertEqual(self.app.anchors.estimate(("s1", "main"), 3200), 100)  # anchored, not bytes/4
-        s, _ = self.post(self.big(3600), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
-        self.assertEqual((s, len(self.v.seen)), (200, 2))
+        self.assertEqual(self.ask(3600), (200, 2))
         self.logged(2)
         self.assertEqual(self.app.anchors.estimate(("s1", "main"), 3600), 200)  # 100 + 400 bytes of growth / 4
 
     def test_compacted_drops_anchor(self):
         self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 950}}).encode()),
                          (200, "application/json", b"{}")]
-        self.assertEqual(self.post(self.big(3200), {**HDRS, "X-Claude-Code-Session-Id": "s1"})[0], 200)
+        self.assertEqual(self.ask(3200)[0], 200)
         self.logged(1)
         self.assertEqual(self.app.anchors.estimate(("s1", "main"), 3200), 950)
         # 950 ≥ 900: this request would be refused were the anchor not dropped first
-        s, _ = self.post(self.big(400), {**HDRS, "X-Claude-Code-Session-Id": "s1",
-                                        "X-Claude-Code-Context-Compacted": "reactive"})
-        self.assertEqual((s, len(self.v.seen)), (200, 2))
+        self.assertEqual(self.ask(400, **{"X-Claude-Code-Context-Compacted": "reactive"}), (200, 2))
         self.logged(2)
         self.assertEqual(self.app.anchors.estimate(("s1", "main"), 400), 100)  # the anchor is gone: bytes/4 again
 
     def test_count_tokens_anchor(self):
         self.v.script = [(200, "application/json", b'{"input_tokens": 100}'), (200, "application/json", b"{}")]
-        s, _ = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"}, path="/v1/messages/count_tokens")
+        s, _ = self.post(self.big(4000), self.S1, path="/v1/messages/count_tokens")
         self.assertEqual((s, len(self.v.seen)), (200, 1))
         self.logged(1)
-        s, _ = self.post(self.big(4400), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
-        self.assertEqual((s, len(self.v.seen)), (200, 2))
+        self.assertEqual(self.ask(4400), (200, 2))
         self.logged(2)
         self.assertEqual(self.app.anchors.estimate(("s1", "main"), 4400), 200)  # 100 + 400/4
 
     def test_refused_has_no_shadow(self):
         self.app.routing = replace(self.app.routing, doubling=replace(self.app.routing.doubling, rate=100))
-        s, _ = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        s, _ = self.post(self.big(4000), self.S1)
         self.assertEqual((s, self.v.seen, self.a.seen), (400, [], []))  # no served ask, no shadow to Anthropic
 
 
@@ -1069,25 +1057,6 @@ class TrainTest(Fixture):
                 events += [tu(txt), ta("m%d" % t)]
             write_transcript(d, "sess%d" % s, events)
         return texts
-
-    def req(self, method, path, body=None, origin="own", host=None, hdrs=None):
-        h = dict(hdrs or {})
-        if origin == "own":
-            origin = "http://127.0.0.1:%d" % self.port
-        if origin:
-            h["Origin"] = origin
-        if host:
-            h["Host"] = host
-        c = HTTPConnection("127.0.0.1", self.port, timeout=5)
-        c.request(method, path, json.dumps(body) if body is not None else None, h)
-        r = c.getresponse()
-        data = r.read()
-        c.close()
-        return r, data
-
-    def js(self, *a, **k):
-        r, d = self.req(*a, **k)
-        return r.status, json.loads(d)
 
     def train_get(self):
         return self.js("GET", "/ui/api/train")[1]
