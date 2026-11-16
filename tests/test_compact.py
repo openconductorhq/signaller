@@ -13,6 +13,19 @@ class TestCompact(unittest.TestCase):
         self.assertEqual(listed_windows(p), {"a": 850000, "b": 200000, "c": 131072})
         self.assertEqual(listed_windows({}), {})
 
+    def test_listed_window_floor(self):
+        # a listed window under 1000 is nonsense (a broken list or hand-edit): ignored, never a "0K of 0K" refusal
+        p = {"data": [{"id": "t999", "context_length": 999}, {"id": "t512", "context_length": 512},
+                      {"id": "ok", "context_length": 1000}]}
+        self.assertEqual(listed_windows(p), {"ok": 1000})
+        info = {"data": [{"model_name": "t999", "model_info": {"max_input_tokens": 999}},
+                         {"model_name": "t512", "model_info": {"max_input_tokens": 512}},
+                         {"model_name": "ok", "model_info": {"max_input_tokens": 1000}}]}
+        self.assertEqual(model_info_windows(info), {"ok": 1000})
+        ds = replace(DEFAULT_CONFIG.downstreams[0], context=None)
+        listed = {"valar": {"t999": 999, "t512": 512, "ok": 1000}}
+        self.assertEqual([window_for(ds, m, listed) for m in ("t999", "t512", "ok")], [None, None, 1000])
+
     def test_model_info_windows(self):
         p = {"data": [{"model_name": "ds", "model_info": {"max_input_tokens": 900000}},
                       {"model_name": "ds", "model_info": {"max_input_tokens": 850000}},

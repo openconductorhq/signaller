@@ -14,9 +14,12 @@ LIMIT = 0.9
 
 WINDOW_KEYS = ("context_length", "max_input_tokens", "max_model_len")
 
+FLOOR = 1000  # a window below this is nonsense (a broken list or a hand-edit): treated as not listed
 
-def _positive_int(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+def _window_int(v) -> bool:
+    """A value that may act as a context window: a positive int at least FLOOR (manual windows are validated 1000..10_000_000 at config time)."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= FLOOR
 
 
 def listed_windows(payload: dict) -> dict:
@@ -34,7 +37,7 @@ def listed_windows(payload: dict) -> dict:
         if not isinstance(mid, str):
             continue
         for k in WINDOW_KEYS:
-            if _positive_int(entry.get(k)):
+            if _window_int(entry.get(k)):
                 out[mid] = entry[k]
                 break
     return out
@@ -53,7 +56,7 @@ def model_info_windows(payload: dict) -> dict:
         name = entry.get("model_name")
         info = entry.get("model_info")
         v = info.get("max_input_tokens") if isinstance(info, dict) else None
-        if not isinstance(name, str) or not _positive_int(v):
+        if not isinstance(name, str) or not _window_int(v):
             continue
         if name not in out or v < out[name]:
             out[name] = v
@@ -66,11 +69,11 @@ def window_for(ds, model: str, listed: dict):
     context = getattr(ds, "context", None)
     if isinstance(context, dict):
         v = context.get(model)
-        if _positive_int(v):
+        if _window_int(v):
             return v
     # a hand-edited models.json can give a listed value of any kind: only a positive int is a window
     v = listed.get(ds.id, {}).get(model) if isinstance(listed, dict) else None
-    return v if _positive_int(v) else None
+    return v if _window_int(v) else None
 
 
 class Anchors:

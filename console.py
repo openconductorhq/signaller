@@ -209,8 +209,7 @@ def forget_models(app, ids):
     for i in ids:
         app.listed_context.pop(i, None)
     upd = dict.fromkeys(ids)  # a None drops each id's saved list
-    if app.listed_context:
-        upd["listed_context"] = app.listed_context
+    upd["listed_context"] = app.listed_context or None  # always: an empty map must drop the saved one too
     try:
         save_models(app.config_dir, **upd)
     except OSError:

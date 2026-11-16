@@ -635,6 +635,18 @@ class DownstreamApiTest(Fixture):
             saved = json.load(f)
         self.assertEqual(saved["listed_context"]["lemmi"], {"deepseek-v4.1-flash": 850000})
 
+    def test_delete_drops_last_listed_windows_from_disk(self):
+        self.l.models = WINDOWED
+        self.assertEqual(self.add()[0], 201)
+        with open(os.path.join(self.dir, "models.json")) as f:
+            self.assertIn("listed_context", json.load(f))
+        self.assertEqual(self.js("DELETE", "/ui/api/downstreams/lemmi")[0], 200)
+        with open(os.path.join(self.dir, "models.json")) as f:
+            self.assertNotIn("listed_context", json.load(f))
+        app2 = App(Config("127.0.0.1", 0, self.a.url, (self.v.url, "VK")), self.dir)
+        app2.store.close()
+        self.assertEqual(app2.listed_context, {})  # a re-added lemmi mustn't inherit the stale window
+
     def test_model_info_fallback(self):
         self.l.models = ONE  # ids only
         self.l.model_info = INFO
@@ -940,6 +952,13 @@ class CompactTest(Fixture):
         self.app.listed_context = {}  # m without a window: nothing is ever refused
         s, _ = self.post(self.big(40000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
         self.assertEqual((s, len(self.v.seen)), (200, 1))
+
+    def test_keyless_downstream_gets_502_not_compact(self):
+        self.app.keys.delete("valar", self.v.url)  # the wizard allows a downstream with no key yet
+        s, d = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual(s, 502)
+        self.assertIn(b"has no key", d)
+        self.assertEqual(self.v.seen, [])  # never asked, and never told to compact
 
     def test_anthropic_never_checked(self):
         self.app.routing = replace(self.app.routing, lever="anthropic")

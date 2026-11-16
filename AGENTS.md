@@ -74,15 +74,18 @@ breaks.
   and before the upstream call — a refused request starts no shadow. It never
   touches Anthropic-bound requests, shadows, the labelling request, a request
   with `x-claude-code-request-class: compaction` (that one is Claude Code's own
-  compaction; refusing it loops), or a request with no session id. Never fail
+  compaction; refusing it loops), or a request with no session id. A request
+  carrying `x-claude-code-context-compacted` drops the conversation's anchor
+  before the estimate — without that, the retry after a compaction would be
+  refused again against the stale pre-compaction figure. Never fail
   closed: any exception anywhere in the check sends the request as today. The
   size anchors are keyed `(session id, x-claude-code-agent-id or "main")` — a
   subagent has its own context — and live in memory only (`Anchors`), lost on
   restart (the bytes/4 fallback covers it). `window_for` precedence: the
   downstream's manual window (`Downstream.context`, per model id) beats the
   listed one (`App.listed_context`, persisted under `listed_context` in
-  `models.json`). Both headers above are undocumented, so a Claude Code update
-  can break the check.
+  `models.json`). The three headers above are undocumented, so a Claude Code
+  update can break the check.
 - **One request prep for every track:** `prepare()` in `signaller.py`
   renames the model, applies Valar's tool fix, swaps credentials and sets the
   window, for the served request and its shadow alike. Change it there, once.

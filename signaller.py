@@ -861,8 +861,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 try:
                     if self.headers.get("x-claude-code-context-compacted"):
                         app.anchors.drop(ckey)  # the history shrank: the old anchor overstates it
-                    ds = upstream(app, route, routing)[3]
-                    if ds:
+                    name_, url_, key, ds = upstream(app, route, routing)
+                    if ds and key:  # a keyless downstream goes on to the clean 502 "no key", not a compaction that 502s too
                         # the model the request would go out as (tier mapping, then a settings line): the window
                         # is looked up for it, so a rename is checked against the right window
                         sent = sent_model(routing.settings, ds, model, f)[0]
