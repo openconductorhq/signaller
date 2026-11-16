@@ -456,6 +456,49 @@ so a deleted Valar stays deleted.
 **History:** a deleted downstream's past requests show as "<id>, removed".
 Adding one back under the same id picks that history up again.
 
+## Compacting for a downstream's window
+
+Claude Code decides when to compact from the context window it assumes for the
+Claude model it asked for: about 1M tokens. A downstream may serve a model with
+less — DeepSeek at 850K, say — and between the two every request fails there,
+with Claude Code none the wiser.
+
+Signaller closes the gap. When a turn served by a downstream would near that
+model's window — past 90% of it — the router answers Claude Code itself with
+the same "prompt is too long" 400 the model would have given, and Claude Code
+compacts and retries on its own. The compaction request is smaller, so it still
+fits on the same downstream, where it's cheap. No Claude Code setting changes,
+and requests bound for Anthropic are never touched.
+
+**Where the window comes from, per model:**
+- a manual value on the downstream's row in the console (per model id, 1,000 to
+  10,000,000 tokens), which wins;
+- else what the downstream reports: `/v1/models` (`context_length`,
+  `max_input_tokens` or `max_model_len`), or LiteLLM's `/model/info`
+  (`max_input_tokens`) when the model list gives no window for any model;
+- listed windows are fetched at startup, hourly, and from the row's
+  "Refresh models", and saved in `models.json` (`listed_context`), so a
+  downstream that's down keeps its windows.
+
+No window known for a model means no check for it.
+
+**How the size is estimated:** the last exact input-token count the session
+saw — from a served response's usage, or a `count_tokens` answer — plus about
+4 bytes per token of body growth since. With no anchor (a first request or a
+restart) it is body length / 4, which is generous for base64 images: an
+image-heavy session may compact a little early.
+
+**What to expect:** the console's departures show `compact: 56K of 60K on
+<name>` rows with status 400, no tokens and no cost, and the session gets a
+notice that the plugin shows as a transcript line. A request carrying images is
+checked like any other. The Advisor's continuation legs, opened mid-stream, are
+not checked.
+
+**Limits:** the check relies on undocumented Claude Code headers
+(`x-claude-code-request-class: compaction`, `x-claude-code-context-compacted`)
+— a Claude Code update can break it, the same caveat as the subagent marker.
+The 90% trigger is fixed, not configurable.
+
 ## Console
 
 Open `http://127.0.0.1:8787/ui` (loopback only).
@@ -466,7 +509,11 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
   small settings box. With one session picked, the lever shows and sets that session's own lever (the same one
   `/signaller` sets, updated live). "back to global" drops it.
 - **Tracks:** one row per downstream. Each row shows whether a key is set, the
-  model map and the prices, with Rename, Replace key and Delete. The classifier's
+  model map and the prices, with Rename, Replace key and Delete. Each tier's
+  model dropdown has a context-window line (see
+  [Compacting for a downstream's window](#compacting-for-a-downstreams-window)):
+  the window for that model — manual, or the listed one — and where the router
+  would compact ("compacts at 765K"). The classifier's
   upstream and model are set here too. When a schedule line is in force for
   every session (a blank or hour-only condition), the window it sets is
   outlined on the row with "Priority now · line N"; the filled pill stays the
@@ -748,7 +795,8 @@ claude plugin test plugin/signaller
 | File | Role |
 |------|------|
 | `signaller.py` | the HTTP proxy, the `App` and startup |
-| `routing.py` | config model (v5), request features, rule evaluation and explanations |
+| `routing.py` | config model (v6), request features, rule evaluation and explanations |
+| `compact.py` | windows, the size estimate and the refusal body for compacting before a downstream model's window, pure |
 | `advisor.py` | the Advisor on a downstream: request rewrites and the stream splicer, pure |
 | `overrides.py` | settings lines: resolve, collisions, pruning, what's in force now |
 | `rulelang.py` | the `when … go …` parser, pure (no eval) |

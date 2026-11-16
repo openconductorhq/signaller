@@ -68,6 +68,21 @@ breaks.
   into a transcript line and a band above the prompt. Nothing is remembered
   between requests, because a rewound or forked conversation may have no
   image. Every other error passes through as it came.
+- **The compact check:** a served downstream `/v1/messages` request that would
+  near the model's context window is answered with the 400 Claude Code compacts
+  on (`compact.py`, wired in `signaller.py`), before the doubling shadow starts
+  and before the upstream call — a refused request starts no shadow. It never
+  touches Anthropic-bound requests, shadows, the labelling request, a request
+  with `x-claude-code-request-class: compaction` (that one is Claude Code's own
+  compaction; refusing it loops), or a request with no session id. Never fail
+  closed: any exception anywhere in the check sends the request as today. The
+  size anchors are keyed `(session id, x-claude-code-agent-id or "main")` — a
+  subagent has its own context — and live in memory only (`Anchors`), lost on
+  restart (the bytes/4 fallback covers it). `window_for` precedence: the
+  downstream's manual window (`Downstream.context`, per model id) beats the
+  listed one (`App.listed_context`, persisted under `listed_context` in
+  `models.json`). Both headers above are undocumented, so a Claude Code update
+  can break the check.
 - **One request prep for every track:** `prepare()` in `signaller.py`
   renames the model, applies Valar's tool fix, swaps credentials and sets the
   window, for the served request and its shadow alike. Change it there, once.
