@@ -148,6 +148,7 @@ input.tname:hover,input.tname:focus{border-color:var(--off);background:var(--pap
 .wmodels{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:8px}
 .wtest{font-size:12.5px;margin-left:8px}.wtest.ok{color:var(--ok)}.wtest.no{color:var(--stop)}
 .trow .warn{grid-column:2/-1;font-size:12px;color:#7a4b00;background:#FBEFD9;border-radius:6px;padding:5px 8px;margin:0}
+.trow .tnote{grid-column:2/-1;font-size:12px;color:var(--muted);margin:0}
 
 /* columns */
 .cols{display:grid;grid-template-columns:1.05fr 1fr;gap:26px;margin-top:14px}
@@ -316,7 +317,7 @@ ol.prlist>li{padding:10px 4px;border-top:1px solid var(--line)}
   .tacts{grid-column:auto}
   .money{grid-template-columns:1fr 1fr}
   .tf .seg button{padding:3px 7px}
-  .trow .warn{grid-column:auto}
+  .trow .warn,.trow .tnote{grid-column:auto}
   .frame{margin-left:0;width:100%}.lever{flex:1}
   .refcols{columns:1}
   .yard{margin-top:34px}

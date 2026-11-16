@@ -651,6 +651,8 @@ function trow(d) {
         if (!p.error) saveDs(t, { prices: p.prices });
       } })), !d.prices && el("span", {}, "unpriced"), pErr),
     el("div", { class: "tacts" },
+      el("button", { type: "button", class: "mini", "data-k": "rm:" + t, title: `Ask ${d.name} for its model list again`,
+        onclick: (e) => refreshModels(t, e.currentTarget) }, "Refresh models"),
       el("label", { class: "tadv", title: "Let the model ask a stronger model for advice (Claude Code's Advisor), run on this downstream" },
         el("input", { type: "checkbox", checked: !!d.advisor, "data-k": "adv:" + t, onchange: (e) => saveDs(t, { advisor: e.target.checked }) }), " Advisor"), keyIn,
       el("button", { type: "button", class: "mini", "data-k": "ks:" + t, onclick: () => {
@@ -668,7 +670,8 @@ function trow(d) {
           `Its key goes too; its history stays, shown as "${t}, removed".`))
           act(() => dsCall("DELETE", "downstreams/" + encodeURIComponent(t) + "?repoint=1", undefined, t));
       } }, "Repoint to Anthropic and delete")] : re.msg),
-    el("p", { class: "warn", role: "status", hidden: !WARN[t] }, WARN[t] || ""));
+    el("p", { class: "warn", role: "status", hidden: !WARN[t] }, WARN[t] || ""),
+    el("p", { class: "tnote", role: "status", hidden: !NOTE[t] }, NOTE[t] || ""));
 }
 const WIN = { asap: "Now", priority: "Priority", standard: "Standard" };
 const WINDOWS = {};  // model id → completion windows it has a price for (absent until the models response says: all)
@@ -679,17 +682,30 @@ function modelPick(t, value, attrs, onPick) {
   const ids = MODELS[t];
   if (!ids) return el("input", { ...attrs, value, spellcheck: "false", autocomplete: "off", onchange: (e) => onPick(e.target.value.trim()) });
   return el("select", { ...attrs, onchange: (e) => onPick(e.target.value) },
-    (ids.includes(value) ? ids : [value, ...ids]).map((m) => el("option", { value: m, selected: m === value }, m)));
+    (ids.includes(value) ? ids : [value, ...ids]).map((m) => el("option", { value: m, selected: m === value }, ids.includes(m) ? m : m + " (not listed)")));
 }
 // GET /ui/api/models?track=…: the router asks the downstream with its key; the key never reaches the page
 function loadModels(t) {
   ASKED.add(t);
-  api("GET", "models?track=" + encodeURIComponent(t), undefined, 15000).then((j) => {
+  const before = MODELS[t];
+  return api("GET", "models?track=" + encodeURIComponent(t), undefined, 15000).then((j) => {
     MODELS[t] = j.models;
     Object.assign(WINDOWS, j.windows);
     WARN[t] = j.stale ? `${j.stale}. Showing the saved model list (models.json).` : "";
+    if (before && !j.stale) {  // a refresh: say what it found
+      const added = j.models.filter((m) => !before.includes(m)).length, gone = before.filter((m) => !j.models.includes(m)).length;
+      NOTE[t] = `${plural(j.models.length, "model")} listed, refreshed ${hm(Date.now() / 1000)}` +
+        (added ? ` · ${added} new` : "") + (gone ? ` · ${gone} gone` : "");
+    }
     renderConfig(true);
   }, (e) => { WARN[t] = `Couldn't load models (${e.message}). Type a model id.`; renderConfig(true); });
+}
+const NOTE = {};  // track → what its last Refresh models found
+async function refreshModels(t, btn) {
+  btn.disabled = true;
+  btn.textContent = "Refreshing…";
+  delete NOTE[t];
+  await loadModels(t);  // re-renders the row, which draws a fresh button
 }
 
 /* the wizard: connect (and test), a model per tier, prices for a generic one, save. A failed test can still be saved. */
