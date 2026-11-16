@@ -71,21 +71,33 @@ breaks.
 - **The compact check:** a served downstream `/v1/messages` request that would
   near the model's context window is answered with the 400 Claude Code compacts
   on (`compact.py`, wired in `signaller.py`), before the doubling shadow starts
-  and before the upstream call — a refused request starts no shadow. It never
-  touches Anthropic-bound requests, shadows, the labelling request, a request
-  with `x-claude-code-request-class: compaction` (that one is Claude Code's own
-  compaction; refusing it loops), or a request with no session id. A request
-  carrying `x-claude-code-context-compacted` drops the conversation's anchor
-  before the estimate — without that, the retry after a compaction would be
-  refused again against the stale pre-compaction figure. Never fail
-  closed: any exception anywhere in the check sends the request as today. The
-  size anchors are keyed `(session id, x-claude-code-agent-id or "main")` — a
-  subagent has its own context — and live in memory only (`Anchors`), lost on
-  restart (the bytes/4 fallback covers it). `window_for` precedence: the
-  downstream's manual window (`Downstream.context`, per model id) beats the
-  listed one (`App.listed_context`, persisted under `listed_context` in
-  `models.json`). The three headers above are undocumented, so a Claude Code
-  update can break the check.
+  and before the upstream call — a refused request starts no shadow, even when
+  the client hung up before reading it (the 400 write has its own
+  `except OSError`; only the estimate fails open). It never touches
+  Anthropic-bound requests, shadows, the labelling request, a request without
+  tools (`f.tools` — a title generation is a side request, neither checked nor
+  an anchor), a request with `x-claude-code-request-class: compaction` (that
+  one is Claude Code's own compaction; refusing it loops), or a request with no
+  session id. A request carrying `x-claude-code-context-compacted` drops the
+  conversation's anchor first, whatever the route — without that, the retry
+  after a compaction would be refused again against the stale pre-compaction
+  figure. The limit (`compact.over`) is the smaller of 90% of the window and
+  the window minus the request's `max_tokens`, never below half the window. The
+  size (`compact.body_size`) counts base64 images at a flat ~1.5K tokens each,
+  not their bytes. Anchors (`Anchors`) are model-aware — one noted for another
+  model is ignored — and never come from a compaction-class answer (dropped
+  instead), a zeroed count, or a `count_tokens` answer that would shrink the
+  anchor (`grow_only`); they are keyed `(session id, x-claude-code-agent-id or
+  "main")` — a subagent has its own context — and live in memory only, lost on
+  restart (the bytes/4 fallback covers it). The same conversation is never
+  refused twice in a row within 60 s (`Refusals`, cleared by a served answer):
+  the second over-limit request goes through and the downstream's own error
+  decides, so a session can always compact even if a Claude Code update drops
+  the headers. Never fail closed: any exception in the decision sends the
+  request as today. `window_for` precedence: the downstream's manual window
+  (`Downstream.context`, per model id) beats the listed one (`App.listed_context`,
+  persisted under `listed_context` in `models.json`). The three headers above
+  are undocumented, so a Claude Code update can break the check.
 - **One request prep for every track:** `prepare()` in `signaller.py`
   renames the model, applies Valar's tool fix, swaps credentials and sets the
   window, for the served request and its shadow alike. Change it there, once.

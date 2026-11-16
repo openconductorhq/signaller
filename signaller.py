@@ -347,6 +347,7 @@ class App:
                                if isinstance(saved_lc, dict) else {})  # downstream id → {model: listed tokens}
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
         self.anchors = compact.Anchors()  # compact size anchors: in memory only, lost on restart (bytes/4 covers it)
+        self.refusals = compact.Refusals()  # the compact loop breaker: never two refusals in a row for a conversation
 
     def migrate_keys(self) -> None:
         """Tie the keys still without a host (an old flat file's, or ones a start with an unreadable console.json
@@ -405,10 +406,11 @@ class App:
         except OSError:
             pass
 
-    def compact_hit(self, ckey, route, routing, model, f, body_len: int):
+    def compact_hit(self, ckey, route, routing, model, f, req, size: int):
         """The compact decision for one downstream-bound request: (estimate, window, limit, the sent model, the
         downstream) when it would near the served model's context window and is answered with the 400 Claude Code
-        compacts on, else None (no key, no window, or headroom to spare). No I/O, no state changed: the caller
+        compacts on, else None (no key, no window, or headroom to spare). `size` is the request's discounted body
+        size (compact.body_size); its max_tokens narrows the limit. No I/O, no state changed: the caller
         fails open, and the answer is the handler's."""
         _, _, key, ds = upstream(self, route, routing)
         if not (ds and key):  # a keyless downstream goes on to the clean 502 "no key", not a compaction that 502s too
@@ -418,13 +420,12 @@ class App:
         # the model the request would go out as (tier mapping, then a settings line): the window
         # is looked up for it, so a rename is checked against the right window
         sent = sent_model(routing.settings, ds, model, f)[0]
-        # ponytail: bytes/4 estimates the growth over the anchor (the whole body with none) —
-        # generous for base64 images, close enough for text
         window = compact.window_for(ds, sent, self.listed_context)
         if not window:
             return None
-        est = self.anchors.estimate(ckey, body_len)
-        limit = compact.over(est, window)
+        est = self.anchors.estimate(ckey, sent, size)
+        mt = req.get("max_tokens") if isinstance(req, dict) else None
+        limit = compact.over(est, window, mt if isinstance(mt, int) and not isinstance(mt, bool) and mt > 0 else 0)
         return (est, window, limit, sent, ds) if limit else None
 
     def refresh_prices(self) -> None:
@@ -823,7 +824,6 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 return self._error(400, "signaller: bad content-length")
             body = self.rfile.read(n)
             routing = app.routing  # read once; a concurrent set_routing doesn't affect this request
-            path = self.path.split("?", 1)[0]  # the path without its query: the endpoint tests below share it
             model, stream, req = "-", False, None
             try:
                 req = json.loads(body)
@@ -836,7 +836,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 routing = replace(routing, lever=lever)
             try:  # a bad saved config must answer, not drop the connection; never guess a track
                 f = Features.from_body(body, req) if is_routed(self.command, self.path) else None
-                msgs = path == "/v1/messages"  # count_tokens decides but doesn't move auto_last
+                msgs = p == "/v1/messages"  # count_tokens decides but doesn't move auto_last
                 labelling = f is not None and msgs and autotrain.is_label_request(req)
                 if f is not None:
                     f.session, f.hour = any_sid, app.hour_of(f.turn_key, time.localtime(t0).tm_hour)
@@ -862,8 +862,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 return
             route, reason = (d.track, d.reason) if d else ("anthropic", "passthrough")
             shown = model
-            rec = f is not None and path == "/v1/messages"
-            ctok = path == "/v1/messages/count_tokens"  # its answer anchors the estimate too
+            rec = f is not None and p == "/v1/messages"
+            ctok = p == "/v1/messages/count_tokens"  # its answer anchors the estimate too
             sid = any_sid if rec else None
             rid = app.store.next_id() if rec else None
             # compact keys a conversation by the session id and the agent (the main thread: "main"); any_sid, not
@@ -880,38 +880,52 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                     app.sessions.note(sid, t0)
                 except Exception:
                     pass
+            # compact: a request carrying x-claude-code-context-compacted means the history shrank, whatever
+            # serves the next request (Anthropic too): the old anchor overstates it, so it is dropped first
+            if ckey and self.headers.get("x-claude-code-context-compacted"):
+                try:
+                    app.anchors.drop(ckey)
+                except Exception:
+                    pass
             # compact: a downstream-bound /v1/messages request that would near the served model's context window is
             # answered here, before the shadow starts or the downstream is asked, with the 400 Claude Code compacts
-            # on. The Advisor's leg 2+ requests, opened mid-stream, are not checked (the check ran at the request's
-            # start; the headroom is deemed to cover a leg). Any failure of any part sends the request on untouched.
-            if (rec and dkey and not labelling
+            # on. A request without tools (a title generation) is a side request of the main thread: never checked,
+            # never an anchor. The Advisor's leg 2+ requests, opened mid-stream, are not checked (the check ran at
+            # the request's start; the headroom is deemed to cover a leg). Only the decision (the estimate, the
+            # lookup, the loop breaker) fails open; the refusal below it is the handler's, whatever the client did.
+            size = compact.body_size(req, len(body)) if b"image" in body else len(body)
+            hit = None
+            if (rec and dkey and f.tools and not labelling
                     and self.headers.get("x-claude-code-request-class") != "compaction"):
                 try:
-                    if self.headers.get("x-claude-code-context-compacted"):
-                        app.anchors.drop(ckey)  # the history shrank: the old anchor overstates it
-                    hit = app.compact_hit(ckey, route, routing, model, f, len(body))
-                    if hit:
-                        est, window, limit, sent, ds = hit
-                        why = "compact: %dK of %dK on %s" % (est // 1000, window // 1000, ds.name)
-                        out = compact.error_body(est, limit)
-                        self._send_json(400, out)
-                        ms = int((time.time() - t0) * 1000)
-                        app.notices[sid] = {"turn": f.turn_key[:16],
-                                            "text": "Asked Claude Code to compact: about %dK of %s's %dK window."
-                                                    % (est // 1000, ds.name, window // 1000)}
-                        try:  # the row shows the refusal in the console's departures: no tokens, no cost
-                            app.store.record_request(request_row(
-                                app, ds, {}, model, sent, None, 400, None, ms, **context(), id=rid, ts=t0,
-                                reason=why, explanation=json.dumps(d.explanation), stream=int(stream), override=None))
-                        except Exception:
-                            pass
-                        print("%s route=%s reason=%s model=%s status=400 ms=%d stream=%s shadow=-" % (
-                            time.strftime("%Y-%m-%d %H:%M:%S"), route, '"%s"' % why,
-                            "%s→%s" % (model, sent) if sent != model else model, ms, stream),
-                            file=sys.stderr, flush=True)
-                        return
+                    hit = app.compact_hit(ckey, route, routing, model, f, req, size)
+                    if hit and not app.refusals.refuse(ckey):
+                        hit = None  # refused within the minute: the downstream's own error decides this one
                 except Exception as e:
                     print("compact check failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+                    hit = None
+            if hit:
+                est, window, limit, sent, ds = hit
+                why = "compact: %dK of %dK on %s" % (est // 1000, window // 1000, ds.name)
+                try:
+                    self._send_json(400, compact.error_body(est, limit))
+                except OSError:
+                    pass  # the client hung up: the refusal is still the row and the log the console sees
+                ms = int((time.time() - t0) * 1000)
+                app.notices[sid] = {"turn": f.turn_key[:16],
+                                    "text": "Asked Claude Code to compact: about %dK of %s's %dK window."
+                                            % (est // 1000, ds.name, window // 1000)}
+                try:  # the row shows the refusal in the console's departures: no tokens, no cost
+                    app.store.record_request(request_row(
+                        app, ds, {}, model, sent, None, 400, None, ms, **context(), id=rid, ts=t0,
+                        reason=why, explanation=json.dumps(d.explanation), stream=int(stream), override=None))
+                except Exception:
+                    pass
+                print("%s route=%s reason=%s model=%s status=400 ms=%d stream=%s shadow=-" % (
+                    time.strftime("%Y-%m-%d %H:%M:%S"), route, '"%s"' % why,
+                    "%s→%s" % (model, sent) if sent != model else model, ms, stream),
+                      file=sys.stderr, flush=True)
+                return
             pair, cap, shadow, turn_id = None, None, "-", None
             try:  # a doubling fault must never change the served request
                 # a labelling request has no shadow: its text goes to Anthropic and nowhere else
@@ -1145,22 +1159,31 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 usage = res.get("usage") or {}
                 if sp:  # the Splicer may have held leg 1's message_delta back from cap: every leg's tokens, summed
                     usage = sum_usage(leg_caps)
-                # compact anchors, from this answer: the request as Claude Code sent it (orig_body's length — the
-                # same length the check estimates from, whatever prepare did to the sent body) and its input total.
+                # compact anchors, from this answer: the request as Claude Code sent it (the same discounted size
+                # the check estimates from, whatever prepare did to the sent body), its input total, and the model
+                # it went out as — a figure measured on one model's tokens never estimates another's.
                 # ponytail: leg 1's usage is the anchor (its request is what leg 1 re-sends); legs 2+ are unchecked
-                if rec and dkey and status == 200:
+                if rec and dkey and f.tools and status == 200:
                     try:
-                        u = sum_usage(leg_caps[:1]) if sp else usage
-                        got = (u.get("in"), u.get("cache_read"), u.get("cache_write"))
-                        if any(isinstance(x, int) for x in got):  # an answer without counts never wipes an anchor
-                            app.anchors.note(ckey, len(orig_body), sum(x or 0 for x in got))
+                        app.refusals.clear(ckey)  # a served request: whatever refusal streak the conversation had is over
+                        if self.headers.get("x-claude-code-request-class") == "compaction":
+                            app.anchors.drop(ckey)  # its totals are the pre-compaction body's: no anchor for what follows
+                        else:
+                            u = sum_usage(leg_caps[:1]) if sp else usage
+                            got = (u.get("in"), u.get("cache_read"), u.get("cache_write"))
+                            if any(isinstance(x, int) for x in got):  # an answer without counts never wipes an anchor
+                                app.anchors.note(ckey, pr.model, size, sum(x or 0 for x in got))  # a 0 total is never an anchor
                     except Exception:
                         pass
-                if ct is not None:  # a count_tokens answer: input_tokens is exact for that body (no cache split)
+                if ct is not None and f.tools:  # a count_tokens answer: input_tokens is exact for that body (no cache split)
                     try:
-                        inp = json.loads(b"".join(ct)).get("input_tokens")
-                        if isinstance(inp, int) and not isinstance(inp, bool):
-                            app.anchors.note(ckey, len(orig_body), inp)
+                        app.refusals.clear(ckey)
+                        if self.headers.get("x-claude-code-request-class") == "compaction":
+                            app.anchors.drop(ckey)
+                        else:
+                            inp = json.loads(b"".join(ct)).get("input_tokens")
+                            if isinstance(inp, int) and not isinstance(inp, bool):  # a 0 answer is never an anchor
+                                app.anchors.note(ckey, pr.model, size, inp, grow_only=True)  # never shrink an anchor
                     except Exception:
                         pass
                 if pair:

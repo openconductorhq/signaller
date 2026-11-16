@@ -464,11 +464,11 @@ less — DeepSeek at 850K, say — and between the two every request fails there
 with Claude Code none the wiser.
 
 Signaller closes the gap. When a turn served by a downstream would near that
-model's window — past 90% of it — the router answers Claude Code itself with
-the same "prompt is too long" 400 the model would have given, and Claude Code
-compacts and retries on its own. The compaction request is smaller, so it still
-fits on the same downstream, where it's cheap. No Claude Code setting changes,
-and requests bound for Anthropic are never touched.
+model's window, the router answers Claude Code itself with the same "prompt is
+too long" 400 the model would have given, and Claude Code compacts and retries
+on its own. The compaction request is smaller, so it still fits on the same
+downstream, where it's cheap. No Claude Code setting changes, and requests
+bound for Anthropic are never touched.
 
 **Where the window comes from, per model:**
 - a manual value on the downstream's row in the console (per model id, 1,000 to
@@ -484,9 +484,23 @@ No window known for a model means no check for it.
 
 **How the size is estimated:** the last exact input-token count the session
 saw — from a served response's usage, or a `count_tokens` answer — plus about
-4 bytes per token of body growth since. With no anchor (a first request or a
-restart) it is body length / 4, which is generous for base64 images: an
-image-heavy session may compact a little early.
+4 bytes per token of body growth since. With no anchor (a first request, a
+restart, or one noted for a different model) it is body length / 4, with
+base64 images counted at a flat ~1.5K tokens each instead of their bytes, so
+a screenshot-heavy session isn't refused over and over. Anchors are model-
+aware: a figure measured on one model never estimates another's window. A
+request without tools — a title generation — is a side request of the main
+thread, never checked and never an anchor. A compaction request's own answer
+is never an anchor either (its totals describe the body before compaction;
+the anchor is dropped instead), a `count_tokens` answer only ever grows the
+anchor, and a zeroed count is never anchored at all.
+
+**The refusal:** the limit is the smaller of 90% of the window and the window
+minus the request's `max_tokens` (some servers count prompt plus output
+against it), never below half the window. The same conversation is never
+refused twice in a row within 60 seconds — the second over-limit request goes
+to the model and its own error decides — so a session can always compact,
+whatever Claude Code does with its headers.
 
 **What to expect:** the console's departures show `compact: 56K of 60K on
 <name>` rows with status 400, no tokens and no cost, and the session gets a
@@ -496,8 +510,9 @@ not checked.
 
 **Limits:** the check relies on undocumented Claude Code headers
 (`x-claude-code-request-class: compaction`, `x-claude-code-context-compacted`)
-— a Claude Code update can break it, the same caveat as the subagent marker.
-The 90% trigger is fixed, not configurable.
+— a Claude Code update can break it, the same caveat as the subagent marker;
+the 60-second breaker is the backstop if it happens. The 90% trigger and the
+60-second window are fixed, not configurable.
 
 ## Console
 

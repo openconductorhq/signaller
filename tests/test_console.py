@@ -903,25 +903,38 @@ class CompactTest(Fixture):
     context window is answered by signaller with the 400 Claude Code compacts on — before the shadow starts or
     the downstream is asked."""
 
+    TOOLS = [{"name": "t", "description": "d", "input_schema": {"type": "object"}}]  # the main loop's own
+
     def setUp(self):
         super().setUp()
         ds = replace(self.app.routing.downstreams[0], models=dict.fromkeys(MODEL_TIERS, "m"))
         self.app.routing = replace(self.app.routing, downstreams=(ds,))
         self.app.listed_context = {ds.id: {"m": 1000}}  # the served model m: 1000 tokens, compacts at 900
 
-    def big(self, n, model="claude-sonnet-5-5"):
-        """A request body of exactly n bytes (json grows one byte per padding x)."""
-        base = body_for(model, {"messages": [{"role": "user", "content": ""}]})
-        body = body_for(model, {"messages": [{"role": "user", "content": "x" * (n - len(base))}]})
+    def big(self, n, model="claude-sonnet-5-5", max_tokens=None):
+        """A request body of exactly n bytes (json grows one byte per padding x), tools included: the main
+        loop carries its tools, a side request doesn't."""
+        extra = {"messages": [{"role": "user", "content": ""}], "tools": self.TOOLS}
+        if max_tokens is not None:
+            extra["max_tokens"] = max_tokens
+        base = body_for(model, extra)
+        body = body_for(model, {**extra, "messages": [{"role": "user", "content": "x" * (n - len(base))}]})
         assert len(body) == n
         return body
 
     S1 = {**HDRS, "X-Claude-Code-Session-Id": "s1"}
 
-    def ask(self, n, **hdrs):
-        """POST self.big(n) as session s1; (status, how many asks have reached the downstream so far)."""
-        s, _ = self.post(self.big(n), {**self.S1, **hdrs})
+    def ask(self, n, sid="s1", **hdrs):
+        """POST self.big(n) as session sid; (status, how many asks have reached the downstream so far)."""
+        s, _ = self.post(self.big(n), {**HDRS, "X-Claude-Code-Session-Id": sid, **hdrs})
         return s, len(self.v.seen)
+
+    def img(self, n, sid="s1"):
+        """A tools-carrying request whose content is one base64 image of n bytes, nested in a tool_result."""
+        img = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "A" * n}}
+        return body_for("claude-sonnet-5-5", {"messages": [
+            {"role": "user", "content": [{"type": "tool_result", "content": [img]}, {"type": "text", "text": "hi"}]}],
+            "tools": self.TOOLS}), {**HDRS, "X-Claude-Code-Session-Id": sid}
 
     def test_refuses_near_window(self):
         s, d = self.post(self.big(4000), self.S1)
@@ -958,26 +971,65 @@ class CompactTest(Fixture):
         self.assertEqual((s, len(self.a.seen)), (200, 1))  # a normal answer, never 400 from signaller
         self.assertEqual(self.v.seen, [])
 
+    def test_side_request_without_tools_neither_checked_nor_anchored(self):
+        # a title generation: the main thread, no tools — too small a view to check the window with, and
+        # never a measure of the conversation it would otherwise anchor
+        self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 100}}).encode())]
+        body = body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "x" * 4000}]})
+        s, _ = self.post(body, self.S1)
+        self.assertEqual((s, len(self.v.seen)), (200, 1))  # served, not refused
+        self.logged(1)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 3200), 800)  # bytes/4: never anchored
+
+    def test_anchor_for_another_model_is_ignored(self):
+        # a token figure measured on model A never estimates model B's window
+        self.app.anchors.note(("s1", "main"), "other", 3200, 900)
+        self.assertEqual(self.ask(3200), (200, 1))  # 800 by bytes/4: whatever the other model's anchor said
+
     def test_anchor_from_usage(self):
         self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 100}}).encode()),
                          (200, "application/json", b"{}")]
         self.assertEqual(self.ask(3200)[0], 200)
         self.logged(1)  # the note happens in the handler's finally, after the client has the response
-        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 3200), 100)  # anchored, not bytes/4
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 3200), 100)  # anchored, not bytes/4
         self.assertEqual(self.ask(3600), (200, 2))
         self.logged(2)
-        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 3600), 200)  # 100 + 400 bytes of growth / 4
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 3600), 200)  # 100 + 400 bytes of growth / 4
+
+    def test_zero_usage_never_anchors(self):
+        # Kimi-style zeroed usage would anchor a 0 total and disable the check for the session
+        self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 0}}).encode())]
+        self.assertEqual(self.ask(3200)[0], 200)
+        self.logged(1)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 3200), 800)
+
+    def test_compaction_answer_never_anchors(self):
+        # the 200 of a compaction request is the pre-compaction body and total: no measure of what follows
+        self.app.anchors.note(("s1", "main"), "m", 3200, 950)
+        self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 950}}).encode())]
+        self.assertEqual(self.ask(3200, **{"X-Claude-Code-Request-Class": "compaction"}), (200, 1))
+        self.logged(1)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 3200), 800)  # dropped, not noted
 
     def test_compacted_drops_anchor(self):
         self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 950}}).encode()),
                          (200, "application/json", b"{}")]
         self.assertEqual(self.ask(3200)[0], 200)
         self.logged(1)
-        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 3200), 950)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 3200), 950)
         # 950 ≥ 900: this request would be refused were the anchor not dropped first
         self.assertEqual(self.ask(400, **{"X-Claude-Code-Context-Compacted": "reactive"}), (200, 2))
         self.logged(2)
-        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 400), 100)  # the anchor is gone: bytes/4 again
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 400), 100)  # the anchor is gone: bytes/4 again
+
+    def test_compacted_drops_the_anchor_on_anthropics_route_too(self):
+        # the drop follows the conversation, not the track: a compacted retry served by Anthropic must
+        # not leave the stale anchor for the next downstream request
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        self.app.anchors.note(("s1", "main"), "m", 3200, 950)
+        s, _ = self.post(self.big(400), {**self.S1, "X-Claude-Code-Context-Compacted": "reactive"})
+        self.assertEqual((s, len(self.a.seen)), (200, 1))
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 3200), 800)  # dropped whatever the route
 
     def test_count_tokens_anchor(self):
         self.v.script = [(200, "application/json", b'{"input_tokens": 100}'), (200, "application/json", b"{}")]
@@ -986,12 +1038,73 @@ class CompactTest(Fixture):
         self.logged(1)
         self.assertEqual(self.ask(4400), (200, 2))
         self.logged(2)
-        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 4400), 200)  # 100 + 400/4
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 4400), 200)  # 100 + 400/4
+
+    def test_count_tokens_never_shrinks_an_anchor(self):
+        # a partial count_tokens body (the tool definitions, a stub message) must not lose the exact
+        # anchor the last served answer noted
+        self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 100}}).encode())]
+        self.assertEqual(self.ask(3200)[0], 200)
+        self.logged(1)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 3200), 100)
+        self.v.script = [(200, "application/json", b'{"input_tokens": 500}')]
+        s, _ = self.post(self.big(1600), self.S1, path="/v1/messages/count_tokens")
+        self.assertEqual(s, 200)
+        self.logged(2)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), "m", 3200), 100)  # not shrunk to the partial 500
+
+    def test_max_tokens_narrows_the_limit(self):
+        # window 1000: the limit is min(900, 1000 - max_tokens), floored at half the window
+        body = self.big(3200, max_tokens=200)
+        s, d = self.post(body, self.S1)
+        self.assertEqual((s, d), (400, error_body(800, 800)))  # 800 bytes/4 ≥ 1000 - 200
+        for mt in ("lots", 0, -5, None, 2.5):  # not a positive int: the bare 90% applies
+            s, _ = self.post(self.big(3200, max_tokens=mt), {**self.S1, "X-Claude-Code-Session-Id": "sx"})
+            self.assertEqual((s, mt), (200, mt))
+        for sid, n, want in (("sy", 2100, 400), ("sz", 1900, 200)):  # a huge max_tokens floors at 500
+            s, _ = self.post(self.big(n, max_tokens=900), {**self.S1, "X-Claude-Code-Session-Id": sid})
+            self.assertEqual(s, want)
+
+    def test_images_count_flat(self):
+        # base64 data at bytes/4 would put a 600 KB screenshot at ~150K tokens; flat it is a few thousand
+        self.app.listed_context = {"valar": {"m": 100000}}  # compacts at 90K
+        s, d = self.post(*self.img(600000))
+        self.assertEqual((s, len(self.v.seen)), (200, 1))  # fits, nested in a tool_result too
+
+    def test_never_two_refusals_in_a_row(self):
+        self.assertEqual(self.ask(4000)[0], 400)                # refused: the streak is on
+        self.assertEqual(self.ask(4000), (200, 1))              # within the minute: the downstream's own error decides
+        self.assertEqual(self.ask(4000)[0], 400)                # the memory was cleared: refused again
+
+    def test_served_request_ends_the_streak(self):
+        self.assertEqual(self.ask(4000)[0], 400)                # refused: the streak is remembered
+        self.assertEqual(self.ask(400), (200, 1))               # a small served request clears it
+        self.assertEqual(self.ask(4000)[0], 400)                # refused again, not let through
 
     def test_refused_has_no_shadow(self):
         self.app.routing = replace(self.app.routing, doubling=replace(self.app.routing.doubling, rate=100))
         s, _ = self.post(self.big(4000), self.S1)
         self.assertEqual((s, self.v.seen, self.a.seen), (400, [], []))  # no served ask, no shadow to Anthropic
+
+    def test_hung_up_client_refuses_without_a_shadow_or_an_ask(self):
+        # the client closed before reading: the 400 write dies on the dead socket, and the refusal is
+        # still recorded and returned — no shadow, no downstream contact (an OSError from the write
+        # must not fall through to the upstream call)
+        import socket
+        import struct
+        req = self.big(4000)
+        head = ("POST /v1/messages HTTP/1.0\r\nHost: 127.0.0.1:%d\r\nAuthorization: %s\r\n"
+                "anthropic-beta: %s\r\nX-Claude-Code-Session-Id: s1\r\nContent-Length: %d\r\n\r\n"
+                % (self.port, HDRS["Authorization"], HDRS["anthropic-beta"], len(req))).encode()
+        c = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        try:
+            c.sendall(head + req)
+            c.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # abortive close: RST now
+        finally:
+            c.close()
+        self.logged(1)  # the refusal row logs even with no client to read it
+        self.assertIn('reason="compact:', self.err.getvalue())  # the refusal, not a passthrough
+        self.assertEqual((len(self.v.seen), len(self.a.seen)), (0, 0))  # never asked, no shadow
 
 
 class MigrationBannerTest(unittest.TestCase):
