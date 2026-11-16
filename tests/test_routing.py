@@ -326,7 +326,7 @@ class ThreeTrackTests(unittest.TestCase):
         self.assertEqual(c.classifier.labels[0].track, "anthropic")
         self.assertEqual(c.doubling.shadow, {"anthropic": None, "valar": None})
         self.assertEqual(c.rules, DEFAULT_CONFIG.rules)
-        self.assertEqual(config_to_json(c)["version"], 5)
+        self.assertEqual(config_to_json(c)["version"], 6)
 
     def test_windows(self):
         o = config_to_json(DEFAULT_CONFIG)
@@ -367,7 +367,26 @@ class ConfigJsonTests(unittest.TestCase):
     def test_v4_config_migrates_to_advisor_on(self):
         cfg = config_from_json(json.load(open("tests/fixtures/console_v4_advisor.json")))
         self.assertTrue(all(d.advisor for d in cfg.downstreams))
-        self.assertEqual(config_to_json(cfg)["version"], 5)
+        self.assertEqual(config_to_json(cfg)["version"], 6)
+
+    def test_v5_migrates_with_no_context(self):
+        cfg = config_from_json(json.load(open("tests/fixtures/console_v5.json")))
+        self.assertIsNone(cfg.downstreams[0].context)
+        self.assertEqual(config_to_json(cfg)["version"], 6)
+
+    def test_context_validated(self):
+        j = config_to_json(DEFAULT_CONFIG)
+        j["downstreams"][0]["context"] = {"m": 850000}
+        cfg = config_from_json(j)
+        self.assertEqual(cfg.downstreams[0].context, {"m": 850000})
+        self.assertEqual(config_to_json(cfg)["downstreams"][0]["context"], {"m": 850000})
+        j["downstreams"][0]["context"] = {}
+        self.assertIsNone(config_from_json(j).downstreams[0].context)  # {} stored as None
+        for bad in ({"m": 999}, {"m": 10_000_001}, {"m": "x"}, {"": 5000}, {"m": True}, {"m": 850000.0},
+                    ["m"], "context"):
+            j["downstreams"][0]["context"] = bad
+            with self.assertRaisesRegex(ValueError, "downstream valar: context"):
+                config_from_json(j)
 
     def test_advisor_switch_roundtrips_and_validates(self):
         j = config_to_json(DEFAULT_CONFIG)
@@ -379,7 +398,7 @@ class ConfigJsonTests(unittest.TestCase):
 
     def test_config_roundtrip(self):
         j = config_to_json(DEFAULT_CONFIG)
-        self.assertEqual(j["version"], 5)
+        self.assertEqual(j["version"], 6)
         self.assertEqual(j["settings"], [])
         self.assertEqual(config_from_json(json.loads(json.dumps(j))), DEFAULT_CONFIG)
 
@@ -396,7 +415,7 @@ class ConfigJsonTests(unittest.TestCase):
             return with_rules([{**r, **kw} if n == i else r for n, r in enumerate(rules)])
         cl = config_to_json(DEFAULT_CONFIG)["classifier"]
         cases = [
-            (j(version=6), "unsupported config version"),
+            (j(version=7), "unsupported config version"),
             (j(settings=[{"when": "", "downstream": "nope", "tier": None, "set": "window", "value": "priority"}]),
              "settings line 1: no downstream named 'nope'"),
             (j(lever="x"), "lever: no downstream named x"),
@@ -519,7 +538,7 @@ class DownstreamTests(unittest.TestCase):
     def test_v3_round_trip(self):
         for cfg in (DEFAULT_CONFIG, with_lemmi()):
             j = json.loads(json.dumps(config_to_json(cfg)))
-            self.assertEqual(j["version"], 5)
+            self.assertEqual(j["version"], 6)
             self.assertEqual(config_from_json(j), cfg)
 
     def test_unknown_track_in_enabled_rule_rejected(self):
@@ -723,7 +742,7 @@ class AutoTests(unittest.TestCase):
         j["auto"]["threshold"] = 0.9
         self.assertEqual(config_from_json(j).auto.threshold, 0.9)
         fx = json.load(open(os.path.join(os.path.dirname(__file__), "fixtures", "console_v4_auto.json")))
-        want = {**fx, "version": 5, "downstreams": [{**d, "advisor": True} for d in fx["downstreams"]]}  # v4 migrates up
+        want = {**fx, "version": 6, "downstreams": [{**d, "advisor": True, "context": None} for d in fx["downstreams"]]}  # v4 migrates up
         self.assertEqual(config_to_json(config_from_json(fx)), want)
         for bad in ({"threshold": 2}, {"execution": "nope"}, {"plan_dirs": [""]}, {"plan_dirs": ["x"] * 21}):
             with self.assertRaises(ValueError):

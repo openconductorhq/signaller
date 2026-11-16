@@ -893,7 +893,7 @@ class MigrationBannerTest(unittest.TestCase):
             app.store.close()
             self.assertIn("Mine", app.banner)
             with open(os.path.join(d, "console.json")) as f:
-                self.assertEqual(json.load(f)["version"], 5)
+                self.assertEqual(json.load(f)["version"], 6)
             again = App(Config("127.0.0.1", 0, "http://a"), d)
             again.store.close()
         self.assertIsNone(again.banner)

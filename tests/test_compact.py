@@ -1,8 +1,9 @@
 import json
 import unittest
-from types import SimpleNamespace
+from dataclasses import replace
 
 from compact import Anchors, error_body, listed_windows, model_info_windows, over, window_for
+from routing import DEFAULT_CONFIG
 
 
 class TestCompact(unittest.TestCase):
@@ -19,8 +20,7 @@ class TestCompact(unittest.TestCase):
         self.assertEqual(model_info_windows(p), {"ds": 850000})
 
     def test_window_for(self):
-        # Downstream.context arrives in Task 3; a stand-in carries the same field until then.
-        ds = SimpleNamespace(id="valar", context={"m": 500000})
+        ds = replace(DEFAULT_CONFIG.downstreams[0], context={"m": 500000})
         listed = {"valar": {"m": 850000, "n": 128000}}
         self.assertEqual((window_for(ds, "m", listed), window_for(ds, "n", listed), window_for(ds, "z", listed)), (500000, 128000, None))
 

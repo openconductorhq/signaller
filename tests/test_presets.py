@@ -105,6 +105,11 @@ class PresetTest(unittest.TestCase):
         self.assertNotIn("migrated_off", out)
         self.assertEqual([s["when"] for s in out["settings"]], ["hour >= 22"])
 
+    def test_portable_keeps_a_manual_context(self):
+        j = config_to_json(DEFAULT_CONFIG)
+        j["downstreams"][0]["context"] = {"m": 850000}
+        self.assertEqual(presets.portable(j)["downstreams"][0]["context"], {"m": 850000})
+
     def test_portable_keeps_an_unparseable_line_for_the_reason(self):
         j = config_to_json(DEFAULT_CONFIG)
         j["settings"] = [{"when": "hour is not a thing", "downstream": "valar", "tier": None,

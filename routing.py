@@ -152,6 +152,7 @@ class Downstream:
     windows: dict | None = None  # tier -> WINDOWS value; valar only
     prices: dict | None = None  # PRICE_KEYS -> USD per 1M tokens; generic only, None = unpriced
     advisor: bool = True  # Claude Code's Advisor tool works on this downstream
+    context: dict | None = None  # model id -> manual context window (1000..10_000_000); None = use the listed one
 
 
 def track_model(model: str, ds: Downstream) -> str:
@@ -449,7 +450,18 @@ def _downstream(d, taken):
     adv = d.get("advisor", True)
     if not isinstance(adv, bool):
         raise ValueError(f"downstream {i}: advisor must be true or false")
-    return Downstream(i, d["name"], d["url"], d["kind"], {t: m[t] for t in MODEL_TIERS}, d["color"], windows, prices, adv)
+    ctx = d.get("context")
+    if ctx is not None:
+        msg = f"downstream {i}: context must map a model id to a window of 1000–10000000 tokens"
+        if not isinstance(ctx, dict):
+            raise ValueError(msg)
+        for k, v in ctx.items():
+            if not isinstance(k, str) or not k:
+                raise ValueError(msg)
+            if type(v) is not int or not 1000 <= v <= 10_000_000:
+                raise ValueError(msg)
+        ctx = dict(ctx) or None
+    return Downstream(i, d["name"], d["url"], d["kind"], {t: m[t] for t in MODEL_TIERS}, d["color"], windows, prices, adv, ctx)
 
 
 PROMPT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
@@ -504,7 +516,9 @@ def config_from_json(obj: dict) -> RoutingConfig:
             obj = {**obj, "version": 4, "settings": []}
         if obj.get("version") == 4:
             obj = {**obj, "version": 5, "downstreams": [{**d, "advisor": True} for d in obj["downstreams"]]}
-        if obj.get("version") != 5:
+        if obj.get("version") == 5:
+            obj = {**obj, "version": 6, "downstreams": [{**d, "context": None} for d in obj["downstreams"]]}
+        if obj.get("version") != 6:
             raise ValueError("unsupported config version")
         if len(obj["downstreams"]) > MAX_DOWNSTREAMS:
             raise ValueError(f"at most {MAX_DOWNSTREAMS} downstreams")
@@ -558,7 +572,7 @@ def config_from_json(obj: dict) -> RoutingConfig:
 def config_to_json(cfg: RoutingConfig) -> dict:
     import overrides  # local: overrides imports routing, so the module can't import it at the top
     return {
-        "version": 5, "settings": overrides.settings_to_json(cfg.settings),
+        "version": 6, "settings": overrides.settings_to_json(cfg.settings),
         "prompts": [{"name": n, "text": t} for n, t in cfg.prompts],
         "lever": cfg.lever, "otherwise": cfg.otherwise, "seeded": cfg.seeded,
         "rules": [{"name": r.name, "kind": r.kind, "enabled": r.enabled, "text": r.text, "builtin": r.builtin}

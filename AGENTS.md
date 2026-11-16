@@ -215,8 +215,8 @@ breaks.
   changed elsewhere (a `/signaller` write, a prune) gets 409 and reloads, rather
   than erasing those lines. When testing with curl, send
   `-H 'Origin: http://127.0.0.1:<port>'`.
-- **The config** (`console.json`) is version 5 (v5 added each downstream's
-  `advisor` switch; a v4 config migrates with it on). If you change its shape,
+- **The config** (`console.json`) is version 6 (v6 added each downstream's
+  per-model `context` windows). If you change its shape,
   add a migration in `routing.config_from_json`, plus a fixture under
   `tests/fixtures/`.
 - **Tracks:** Anthropic plus `RoutingConfig.downstreams`. Don't hardcode

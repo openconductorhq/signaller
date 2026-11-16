@@ -1,0 +1,117 @@
+{
+  "version": 5,
+  "settings": [],
+  "prompts": [],
+  "lever": "rules",
+  "otherwise": "anthropic",
+  "seeded": false,
+  "rules": [
+    {
+      "name": "Tools only Anthropic can run",
+      "kind": "dsl",
+      "enabled": true,
+      "text": "when servertool go anthropic",
+      "builtin": "servertool"
+    },
+    {
+      "name": "Tags in your message",
+      "kind": "dsl",
+      "enabled": true,
+      "text": "when tag is planning go anthropic\nwhen tag is execution go valar",
+      "builtin": "tags"
+    },
+    {
+      "name": "What the prompt is about",
+      "kind": "classifier",
+      "enabled": true,
+      "text": "",
+      "builtin": "classifier"
+    },
+    {
+      "name": "Model the request asked for",
+      "kind": "dsl",
+      "enabled": true,
+      "text": "when tier is opus or tier is fable go anthropic\nwhen tier is sonnet or tier is haiku or tier is other go valar",
+      "builtin": "tier"
+    }
+  ],
+  "classifier": {
+    "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+    "threshold": 0.7,
+    "timeout_s": 2.5,
+    "upstream": "valar",
+    "labels": [
+      {
+        "name": "planning",
+        "description": "designing, specifying or planning work",
+        "track": "anthropic"
+      },
+      {
+        "name": "design & review",
+        "description": "judging, reviewing or critiquing code or ideas",
+        "track": "anthropic"
+      },
+      {
+        "name": "coding",
+        "description": "writing, editing, fixing or running code",
+        "track": "valar"
+      },
+      {
+        "name": "chit-chat",
+        "description": "greetings, thanks, small talk",
+        "track": "valar"
+      }
+    ]
+  },
+  "doubling": {
+    "rate": 0,
+    "tag": "",
+    "shadow": {
+      "anthropic": "valar",
+      "valar": "anthropic"
+    }
+  },
+  "downstreams": [
+    {
+      "id": "valar",
+      "name": "Valar",
+      "url": "https://api.valarhq.ai",
+      "kind": "valar",
+      "models": {
+        "fable": "zai-org/GLM-5.3",
+        "opus": "zai-org/GLM-5.3",
+        "sonnet": "zai-org/GLM-5.3",
+        "haiku": "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+      },
+      "color": "#2F6DB5",
+      "windows": {
+        "fable": "asap",
+        "opus": "asap",
+        "sonnet": "asap",
+        "haiku": "asap"
+      },
+      "prices": null,
+      "advisor": true
+    }
+  ],
+  "auto": {
+    "execution": null,
+    "planning_skills": [
+      "superpowers:brainstorming",
+      "superpowers:writing-plans"
+    ],
+    "execution_skills": [
+      "superpowers:subagent-driven-development",
+      "superpowers:executing-plans"
+    ],
+    "plan_dirs": [
+      "docs/superpowers/specs/",
+      "docs/superpowers/plans/",
+      "/.claude/projects/",
+      "/private/tmp/claude-",
+      "/.superpowers/"
+    ],
+    "threshold": 0.8,
+    "train_cap": 5.0
+  }
+}
