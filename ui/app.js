@@ -633,10 +633,13 @@ function trow(d) {
     el("div", {}, el("input", { class: "tname", value: d.name, spellcheck: "false", "data-k": "n:" + t, "aria-label": `Name of ${d.name}`,
       onchange: (e) => { const v = e.target.value.trim(); if (v) saveDs(t, { name: v }); else renderConfig(true); } }),
       el("div", { class: "tmeta" }, el("code", {}, t), " · ", el("span", { class: "turl" }, k ? k.url : ""), " · ", el("span", { class: "tkey " + (keyed ? "ok" : "no") }, keyed ? "key set" : "no key"))),
-    Object.entries(TIER).map(([m, tn]) => { const act = S && S.active_windows && (S.active_windows[t] || {})[m]; return el("label", { class: "f" }, tn + " ",
+    Object.entries(TIER).map(([m, tn]) => { const act = S && S.active_windows && (S.active_windows[t] || {})[m];
+      const ctxErr = el("p", { class: "err", role: "alert", hidden: true });
+      return el("label", { class: "f" }, tn + " ",
       modelPick(t, d.models[m], { "data-m": m, "data-k": `m:${t}:${m}`, "aria-label": `${d.name} model for ${m}` },
         // a model without the slot's window falls back to Now
         (v) => { const c = cur(); saveDs(t, { models: { ...c.models, [m]: v }, ...(valar && { windows: { ...c.windows, [m]: windowsFor(v).includes(c.windows[m]) ? c.windows[m] : "asap" } }) }); }),
+      ctxLine(t, d, m, ctxErr),
       valar && el("span", { class: "seg win", role: "group", "aria-label": `${d.name} completion window for ${m}` },
         windowsFor(d.models[m]).map((w) => el("button", { type: "button", "data-k": `w:${t}:${m}:${w}`, "aria-pressed": String(d.windows[m] === w),
           class: act && act.value === w && act.value !== d.windows[m] ? "now" : null,
@@ -673,10 +676,38 @@ function trow(d) {
     el("p", { class: "warn", role: "status", hidden: !WARN[t] }, WARN[t] || ""),
     el("p", { class: "tnote", role: "status", hidden: !NOTE[t] }, NOTE[t] || ""));
 }
+// The tier cell's context-window line: the effective window (manual, else listed) with where it came from and
+// where the router would compact (90% of it, rounded down to thousands — as compact.check does with int(w*0.9)).
+// Stored per model id, so two tiers on one model share the value.
+function ctxLine(t, d, m, errNode) {
+  const model = d.models[m], manual = d.context && d.context[model], listed = CTX[t] && CTX[t][model];
+  const win = manual != null ? manual : listed != null ? listed : null;
+  return el("span", { class: "tctx" }, "context ",
+    el("input", { type: "text", inputmode: "numeric", spellcheck: "false", autocomplete: "off", value: win == null ? "" : win,
+      placeholder: "unknown — no check", "data-k": `ctx:${t}:${m}`, "aria-label": `${d.name} context window for ${model}`,
+      onchange: (e) => {
+        const v = e.target.value.trim(), c = dsOf(t);  // the config as it is when the change fires, not as it was drawn
+        if (!c.models[m]) { showErr(errNode, "Pick a model first."); return; }  // a hand-typed id may not be saved yet
+        const model = c.models[m];
+        if (v === "") {  // drop the manual window; the listed one, if any, shows through again
+          const rest = { ...(c.context || {}) }; delete rest[model];
+          showErr(errNode, "");
+          saveDs(t, { context: Object.keys(rest).length ? rest : null });
+          return;
+        }
+        if (!/^\d+$/.test(v)) { showErr(errNode, "A whole number of tokens, 1000–10000000, or empty to use the listed one."); return; }
+        const n = Number(v);
+        if (n < 1000 || n > 10000000) { showErr(errNode, "Between 1000 and 10000000 tokens, or empty to use the listed one."); return; }
+        showErr(errNode, "");
+        saveDs(t, { context: { ...(c.context || {}), [model]: n } });
+      } }),
+    " ", win == null ? "" : win === manual ? "set here" : "listed",
+    win == null ? "" : ` · compacts at ${Math.floor(win * 0.9 / 1000)}K`, errNode);
+}
 const WIN = { asap: "Now", priority: "Priority", standard: "Standard" };
 const WINDOWS = {};  // model id → completion windows it has a price for (absent until the models response says: all)
 const windowsFor = (id) => WINDOWS[id] ? Object.keys(WIN).filter((w) => WINDOWS[id].includes(w)) : Object.keys(WIN);
-const MODELS = {}, WARN = {}, ASKED = new Set();  // track → model ids from it, once loaded; → a note on its row; asked already
+const MODELS = {}, CTX = {}, WARN = {}, ASKED = new Set();  // track → model ids from it, once loaded; → its listed context windows; → a note on its row; asked already
 // A real dropdown once the track's models are in; a text box until then, or when the downstream can't be reached.
 function modelPick(t, value, attrs, onPick) {
   const ids = MODELS[t];
@@ -690,6 +721,7 @@ function loadModels(t) {
   const before = MODELS[t];
   return api("GET", "models?track=" + encodeURIComponent(t), undefined, 15000).then((j) => {
     MODELS[t] = j.models;
+    CTX[t] = j.context || {};
     Object.assign(WINDOWS, j.windows);
     WARN[t] = j.stale ? `${j.stale}. Showing the saved model list (models.json).` : "";
     if (before && !j.stale) {  // a refresh: say what it found

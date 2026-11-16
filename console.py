@@ -222,7 +222,7 @@ def in_use(id, refs):
 
 
 def check_downstream_edits(app, new):
-    """A config PUT may edit downstreams (name, url, models, windows, prices), never add or remove one."""
+    """A config PUT may edit downstreams (name, url, models, windows, prices, context), never add or remove one."""
     before = {d.id: d for d in app.routing.downstreams}
     for d in new.downstreams:
         o = before.get(d.id)
