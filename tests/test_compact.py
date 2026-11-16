@@ -30,6 +30,13 @@ class TestCompact(unittest.TestCase):
         listed = {"valar": {"t999": 999, "t512": 512, "ok": 1000}}
         self.assertEqual([window_for(ds, m, listed) for m in ("t999", "t512", "ok")], [None, None, 1000])
 
+    def test_listed_window_ceiling(self):
+        # above 10,000,000 is beyond the manual-window range routing validates against: ignored like one
+        p = {"data": [{"id": "big", "context_length": 10_000_001}, {"id": "ok", "context_length": 10_000_000}]}
+        self.assertEqual(listed_windows(p), {"ok": 10_000_000})
+        self.assertIsNone(window_for(replace(DEFAULT_CONFIG.downstreams[0], context=None), "big",
+                                     {"valar": {"big": 10_000_001}}))
+
     def test_model_info_windows(self):
         p = {"data": [{"model_name": "ds", "model_info": {"max_input_tokens": 900000}},
                       {"model_name": "ds", "model_info": {"max_input_tokens": 850000}},

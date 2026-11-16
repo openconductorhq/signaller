@@ -1,7 +1,7 @@
 """Windows, size estimate and refusal body for compacting before a downstream model's window.
 
-Pure helpers: no I/O, no state beyond `Anchors`' and `Refusals`' in-memory maps. Later
-tasks wire these into the request path; nothing here knows about requests.
+Pure helpers: no I/O, no state beyond `Anchors`' and `Refusals`' in-memory maps. signaller.py wires
+these into the request path; nothing here knows about requests.
 """
 
 import json
@@ -26,8 +26,9 @@ CEILING = 10_000_000  # and above this: the manual-window range routing validate
 
 
 def _window_int(v) -> bool:
-    """A value that may act as a context window: a positive int at least FLOOR (manual windows are validated 1000..10_000_000 at config time)."""
-    return isinstance(v, int) and not isinstance(v, bool) and v >= FLOOR
+    """A value that may act as a context window: an int from FLOOR to CEILING (the range routing
+    validates a manual window against at config time)."""
+    return isinstance(v, int) and not isinstance(v, bool) and FLOOR <= v <= CEILING
 
 
 def _entries(payload: dict):
@@ -40,9 +41,9 @@ def _entries(payload: dict):
 
 
 def listed_windows(payload: dict) -> dict:
-    """Windows from a downstream's `/v1/models` payload: per model id, the first
-    int > 0 of `context_length`, `max_input_tokens`, `max_model_len`. Models with
-    none are omitted. Malformed entries are skipped, never raised."""
+    """Windows from a downstream's `/v1/models` payload: per model id, the first value of
+    `context_length`, `max_input_tokens`, `max_model_len` that is a window (an int from FLOOR to
+    CEILING). Models with none are omitted. Malformed entries are skipped, never raised."""
     out = {}
     for entry in _entries(payload):
         mid = entry.get("id")
@@ -57,7 +58,8 @@ def listed_windows(payload: dict) -> dict:
 
 def model_info_windows(payload: dict) -> dict:
     """Windows from LiteLLM's `/model/info`: `data[].model_name` →
-    `model_info.max_input_tokens` (int > 0), the smallest when a name repeats."""
+    `model_info.max_input_tokens` (a window: an int from FLOOR to CEILING),
+    the smallest when a name repeats."""
     out = {}
     for entry in _entries(payload):
         name = entry.get("model_name")
@@ -78,7 +80,7 @@ def window_for(ds, model: str, listed: dict):
         v = context.get(model)
         if _window_int(v):
             return v
-    # a hand-edited models.json can give a listed value of any kind: only a positive int is a window
+    # a hand-edited models.json can give a listed value of any kind: only an int from FLOOR to CEILING is a window
     v = listed.get(ds.id, {}).get(model) if isinstance(listed, dict) else None
     return v if _window_int(v) else None
 

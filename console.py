@@ -204,12 +204,9 @@ def add_downstream(app, body):
 
 def forget_models(app, ids):
     """A deleted downstream's saved model list and listed windows go too: one re-added under its id must not show them."""
-    for i in ids:
-        app.listed_context.pop(i, None)
-    upd = dict.fromkeys(ids)  # a None drops each id's saved list
-    upd["listed_context"] = app.listed_context or None  # always: an empty map must drop the saved one too
+    app.forget_listed_context(ids)  # the windows, memory and models.json, under the lock
     try:
-        save_models(app.config_dir, **upd)
+        save_models(app.config_dir, **dict.fromkeys(ids))  # a None drops each id's saved list
     except OSError:
         pass
 

@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 import autotrain
+import console
 import overrides
 from signaller import App, Config, make_server
 from routing import MODEL_TIERS
@@ -679,6 +680,68 @@ class DownstreamApiTest(Fixture):
         self.assertEqual(self.ctx(),
                          {"deepseek-v4.1-flash": 850000})  # the saved ones stay
 
+    def test_url_change_drops_listed_windows(self):
+        self.l.models = WINDOWED
+        self.assertEqual(self.add()[0], 201)
+        self.assertEqual(self.ctx(), {"deepseek-v4.1-flash": 850000})
+        self.set_lemmi_url("http://127.0.0.1:1")  # same id, a new host: the old host's windows don't apply
+        self.assertEqual(self.app.listed_context, {})
+        with open(os.path.join(self.dir, "models.json")) as f:
+            self.assertNotIn("listed_context", json.load(f))
+
+    def test_url_unchanged_keeps_listed_windows(self):
+        self.l.models = WINDOWED
+        self.assertEqual(self.add()[0], 201)
+        cfg = self.cfg()
+        next(d for d in cfg["downstreams"] if d["id"] == "lemmi")["name"] = "Lemmi 2"
+        self.assertEqual(self.js("PUT", "/ui/api/config", cfg)[0], 200)
+        self.assertEqual(self.app.listed_context["lemmi"], {"deepseek-v4.1-flash": 850000})
+        with open(os.path.join(self.dir, "models.json")) as f:
+            self.assertEqual(json.load(f)["listed_context"]["lemmi"], {"deepseek-v4.1-flash": 850000})
+
+    def test_listed_context_saves_are_copies(self):
+        # models.json never receives the live map: one thread's json.dumps must not race another's mutation
+        self.l.models = WINDOWED
+        self.assertEqual(self.add()[0], 201)
+        self.assertEqual(self.app.set_listed_context("valar", {"m": 1000}), None)
+        real, got = console.save_models, []
+        with mock.patch("console.save_models",
+                        side_effect=lambda d, **u: (got.append(u.get("listed_context", False)), real(d, **u))):
+            self.app.set_listed_context("lemmi", {"deepseek-v4.1-flash": 850000})
+            self.assertIsNot(got[-1], self.app.listed_context)
+            self.set_lemmi_url("http://127.0.0.1:1")  # the _put drop hands a copy too
+            self.assertIsNot(got[-1], self.app.listed_context)
+        self.assertEqual(got[-1], {"valar": {"m": 1000}})  # lemmi's dropped, valar's kept
+        self.assertEqual(self.app.listed_context, {"valar": {"m": 1000}})
+
+    def test_listed_context_hammer(self):
+        # smoke: mutations and lock-held serialisations never trip each other ("dictionary changed size")
+        stop = threading.Event()
+        errors = []
+
+        def hammer():
+            n = 0
+            while not stop.is_set():
+                try:
+                    self.app.set_listed_context("ds%d" % (n % 4), {"m": n})
+                except Exception as e:  # noqa: BLE001
+                    errors.append(e)
+                n += 1
+
+        threads = [threading.Thread(target=hammer, daemon=True) for _ in range(4)]
+        for t in threads:
+            t.start()
+        try:
+            deadline = time.time() + 0.3
+            while time.time() < deadline:
+                with self.app._lc_lock:
+                    json.dumps(self.app.listed_context)
+        finally:
+            stop.set()
+            for t in threads:
+                t.join(5)
+        self.assertEqual(errors, [])
+
     def test_add_downstream_captures_windows(self):
         self.l.models = WINDOWED
         self.assertEqual(self.add()[0], 201)
@@ -690,7 +753,8 @@ class DownstreamApiTest(Fixture):
         self.assertEqual(self.add()[0], 201)
         self.assertEqual(self.ctx(),
                          {"deepseek-v4.1-flash": 850000})  # a live fetch first: it saves
-        self.set_lemmi_url("http://127.0.0.1:1")  # unreachable: the stale branch
+        self.l.shutdown()  # the downstream dies at the same url: the stale branch, not a url-change drop
+        self.l.server_close()  # refused connections, not a listening socket nobody accepts on
         s, j = self.js("GET", "/ui/api/models?track=lemmi")
         self.assertEqual(j["models"], ["deepseek-v4.1-flash"])
         self.assertEqual(j["context"], {"deepseek-v4.1-flash": 850000})
@@ -1084,7 +1148,13 @@ class CompactTest(Fixture):
     def test_refused_has_no_shadow(self):
         self.app.routing = replace(self.app.routing, doubling=replace(self.app.routing.doubling, rate=100))
         s, _ = self.post(self.big(4000), self.S1)
-        self.assertEqual((s, self.v.seen, self.a.seen), (400, [], []))  # no served ask, no shadow to Anthropic
+        self.assertEqual(s, 400)
+        # the positive control: a served request does start a shadow, so a silent pass means something
+        self.assertEqual(self.ask(400)[0], 200)
+        deadline = time.time() + 5
+        while time.time() < deadline and not self.a.seen:  # the shadow runs on its own thread
+            time.sleep(0.01)
+        self.assertEqual(len(self.a.seen), 1)  # the served ask's only: the refused one started none
 
     def test_hung_up_client_refuses_without_a_shadow_or_an_ask(self):
         # the client closed before reading: the 400 write dies on the dead socket, and the refusal is

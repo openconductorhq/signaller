@@ -71,6 +71,28 @@ class PresetTest(unittest.TestCase):
         app.activate_preset("b")
         self.assertGreater(app.rev, before)
 
+    def test_switch_drops_listed_windows_when_the_url_changes(self):
+        app = self.app()
+        app.set_listed_context("valar", {"m": 850000})
+        j = presets.portable(config_to_json(app.routing))
+        j["downstreams"][0]["url"] = "http://other.example"  # same id, a new host: the old host's windows don't apply
+        app.add_preset("b", "", j)
+        app.activate_preset("b")
+        self.assertEqual(app.listed_context, {})
+        with open(os.path.join(self.dir, "models.json")) as f:
+            self.assertNotIn("listed_context", json.load(f))
+        app.activate_preset("my setup")  # back on the old host, nothing is listed again
+        self.assertEqual(app.listed_context, {})
+
+    def test_switch_keeps_listed_windows_when_the_url_is_unchanged(self):
+        app = self.app()
+        app.set_listed_context("valar", {"m": 850000})
+        app.save_preset("b", "")
+        app.activate_preset("b")
+        self.assertEqual(app.listed_context, {"valar": {"m": 850000}})
+        with open(os.path.join(self.dir, "models.json")) as f:
+            self.assertEqual(json.load(f)["listed_context"], {"valar": {"m": 850000}})
+
     def test_switch_keeps_keys_per_host(self):
         app = self.app()
         self.assertEqual(signaller.upstream(app, "valar")[2], "VK")  # seeded at host A

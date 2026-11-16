@@ -478,7 +478,8 @@ bound for Anthropic are never touched.
   (`max_input_tokens`) when the model list gives no window for any model;
 - listed windows are fetched at startup, hourly, and from the row's
   "Refresh models", and saved in `models.json` (`listed_context`), so a
-  downstream that's down keeps its windows.
+  downstream that's down keeps its windows. A downstream's saved windows are
+  dropped when its URL changes — they were the old host's.
 
 No window known for a model means no check for it.
 

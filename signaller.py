@@ -316,6 +316,11 @@ class App:
         self.first_party = None  # the latest plugin report: Claude Code runs with the first-party flag (None: no report yet)
         self.notices = {}  # session id -> {"turn", "text"}: the plugin shows it once (an image fallback)
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
+        # downstream id → {model: listed tokens}, before seed()/_finish_switch(): a _put may drop stale entries
+        self._lc_lock = threading.Lock()  # listed_context's mutations and snapshots only, never held with _rlock
+        saved_lc = console.read_models(config_dir).get("listed_context")
+        self.listed_context = ({k: dict(v) for k, v in saved_lc.items() if isinstance(v, dict)}
+                               if isinstance(saved_lc, dict) else {})
         self._turn_hours = BoundedDict(512)  # turn_key -> the hour its turn runs at
         # ponytail: 512 live turns, oldest dropped; a turn outliving them re-pins at a later hour boundary
         self._collisions = (None, [])  # (settings tuple, its collisions), memoised for the 1-second console poll
@@ -342,9 +347,6 @@ class App:
         self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
         self.trainer = autotrain.Trainer(config_dir, self.sessions.dir, lambda: self.routing.auto)
         self.prices = Prices(config_dir)
-        saved_lc = console.read_models(config_dir).get("listed_context")
-        self.listed_context = ({k: dict(v) for k, v in saved_lc.items() if isinstance(v, dict)}
-                               if isinstance(saved_lc, dict) else {})  # downstream id → {model: listed tokens}
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
         self.anchors = compact.Anchors()  # compact size anchors: in memory only, lost on restart (bytes/4 covers it)
         self.refusals = compact.Refusals()  # the compact loop breaker: never two refusals in a row for a conversation
@@ -400,11 +402,28 @@ class App:
         memory and models.json, next to the saved model lists. Never raises."""
         if not windows:
             return
-        self.listed_context[id] = dict(windows)
+        with self._lc_lock:
+            self.listed_context[id] = dict(windows)  # replaced, never mutated: readers may hold the old inner dict
+            snap = self._lc_snapshot()
         try:
-            console.save_models(self.config_dir, listed_context=self.listed_context)
+            console.save_models(self.config_dir, listed_context=snap)
         except OSError:
             pass
+
+    def forget_listed_context(self, ids) -> None:
+        """Drop ids' listed windows from memory and models.json. Never raises: a failed write is
+        ignored like the other models.json writes."""
+        with self._lc_lock:
+            for i in ids:
+                self.listed_context.pop(i, None)
+            snap = self._lc_snapshot()
+        try:
+            console.save_models(self.config_dir, listed_context=snap or None)  # an empty map drops the saved one too
+        except OSError:
+            pass
+
+    def _lc_snapshot(self) -> dict:  # caller holds _lc_lock
+        return {k: dict(v) for k, v in self.listed_context.items()}
 
     def compact_hit(self, ckey, route, routing, model, f, req, size: int):
         """The compact decision for one downstream-bound request: (estimate, window, limit, the sent model, the
@@ -627,9 +646,14 @@ class App:
             self._put(new)
 
     def _put(self, new: RoutingConfig) -> None:  # caller holds _rlock
+        old_urls = {d.id: d.url for d in self.routing.downstreams}
         save_console_config(os.path.join(self.config_dir, "console.json"), new)
         self.rev += 1  # a page holding an older whole-config copy must not overwrite this
         self.routing = new  # single reference assignment; requests read it once
+        # the same id on a new host is a different server: the old host's listed windows don't apply to it
+        moved = [d.id for d in new.downstreams if d.id in old_urls and old_urls[d.id] != d.url]
+        if moved:
+            self.forget_listed_context(moved)
 
     def add_downstream(self, d: dict, key: str) -> Downstream:
         """Append a downstream (its config JSON) with no shadow of its own, and its key. ValueError if the config would be invalid."""
