@@ -334,6 +334,9 @@ class App:
         self.sessions = SessionDirectory(self.store, claude_dir(os.environ))
         self.trainer = autotrain.Trainer(config_dir, self.sessions.dir, lambda: self.routing.auto)
         self.prices = Prices(config_dir)
+        saved_lc = console.read_models(config_dir).get("listed_context")
+        self.listed_context = ({k: dict(v) for k, v in saved_lc.items() if isinstance(v, dict)}
+                               if isinstance(saved_lc, dict) else {})  # downstream id → {model: listed tokens}
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
 
     def migrate_keys(self) -> None:
@@ -382,19 +385,36 @@ class App:
             self.keys.set("valar", vd.url, key)
         self.set_routing(replace(self.routing, downstreams=dss, seeded=True))
 
+    def set_listed_context(self, id: str, windows: dict) -> None:
+        """Remember a downstream's listed context windows (no-op when none came back, so good ones aren't wiped):
+        memory and models.json, next to the saved model lists. Never raises."""
+        if not windows:
+            return
+        self.listed_context[id] = dict(windows)
+        try:
+            console.save_models(self.config_dir, listed_context=self.listed_context)
+        except OSError:
+            pass
+
     def refresh_prices(self) -> None:
-        """Fetch each Valar-kind downstream's price list, keep it in memory and models.json, and price rows that were waiting. Never raises."""
+        """Fetch each keyed downstream's listed windows (and each Valar-kind one's price list), keep them in memory
+        and models.json, and price rows that were waiting. Never raises."""
         for d in self.routing.downstreams:
             _, url, key, _ = upstream(self, d.id)
-            if d.kind != "valar" or not key:
+            if not key:
                 continue
             try:
-                vp = parse_valar(console.fetch_models(url, key))
+                payload = console.fetch_models(url, key)
+                self.set_listed_context(d.id, console.fetch_windows(url, key, payload))
+                if d.kind != "valar":
+                    continue
+                vp = parse_valar(payload)
                 if vp:  # a payload with no prices must not wipe good ones
                     self.prices.set_listed(d.id, vp)
                     console.save_models(self.config_dir, listed_prices=self.prices.listed)
             except Exception as e:  # reason only: never headers, never the key
-                print("%s prices not refreshed: %s" % (d.id, getattr(e, "reason", None) or type(e).__name__),
+                print("%s %s not refreshed: %s" % (d.id, "prices" if d.kind == "valar" else "windows",
+                                                   getattr(e, "reason", None) or type(e).__name__),
                       file=sys.stderr, flush=True)
         try:
             self.store.reprice(self.prices, self.routing.downstreams)

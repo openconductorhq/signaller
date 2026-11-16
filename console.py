@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from keys import write_json
 import autotrain
+import compact
 from prices import parse_valar
 import overrides
 import presets
@@ -88,12 +89,29 @@ def preview(app, body):
             "count": len(app.recent)}
 
 
+def _fetch_json(url, key, path, timeout=5):
+    """GET {url}{path} with the bearer key, never following a redirect (one would re-send the key elsewhere)."""
+    req = urllib.request.Request(url + path, headers={"Authorization": "Bearer " + key})
+    nored = urllib.request.build_opener(type("NoRedirect", (urllib.request.HTTPRedirectHandler,), {"redirect_request": lambda *a: None}))
+    with nored.open(req, timeout=timeout) as r:
+        return json.load(r)
+
+
 def fetch_models(url, key, timeout=5):
     """The upstream's raw /v1/models payload."""
-    req = urllib.request.Request(url + "/v1/models", headers={"Authorization": "Bearer " + key})
-    nored = urllib.request.build_opener(type("NoRedirect", (urllib.request.HTTPRedirectHandler,), {"redirect_request": lambda *a: None}))
-    with nored.open(req, timeout=timeout) as r:  # a redirect would re-send the key elsewhere
-        return json.load(r)
+    return _fetch_json(url, key, "/v1/models", timeout)
+
+
+def fetch_windows(url, key, payload):
+    """Each model's context window, from the /v1/models payload; none listed there → LiteLLM's /model/info.
+    Every /model/info error (404, timeout, bad JSON, redirect) is silent: {}."""
+    out = compact.listed_windows(payload)
+    if out:
+        return out
+    try:
+        return compact.model_info_windows(_fetch_json(url, key, "/model/info"))
+    except Exception:
+        return {}
 
 
 def read_models(config_dir):
@@ -121,32 +139,37 @@ def clean_url(url):
     return url.strip().rstrip("/").removesuffix("/v1")
 
 
-def probe(url, key):
-    """GET {url}/v1/models (never a message): {ok, reason, models, kind}. The reason never carries the key."""
+def _probe(url, key):
+    """probe()'s verdict, plus the raw /v1/models payload the verdict came from (None when the probe failed)."""
     u = urlsplit(url)
     out = {"ok": False, "reason": None, "models": [], "kind": "valar" if u.hostname == VALAR_HOST else "generic"}
     if u.scheme not in ("http", "https") or not u.hostname:
-        return {**out, "reason": "the url must start with http:// or https://"}
+        return {**out, "reason": "the url must start with http:// or https://"}, None
     try:
         payload = fetch_models(url, key)
     except urllib.error.HTTPError as e:
-        return {**out, "reason": "HTTP %d" % e.code}
+        return {**out, "reason": "HTTP %d" % e.code}, None
     except urllib.error.URLError as e:  # the socket's reason: no headers in it
-        return {**out, "reason": "timed out" if isinstance(e.reason, TimeoutError) else str(e.reason)}
+        return {**out, "reason": "timed out" if isinstance(e.reason, TimeoutError) else str(e.reason)}, None
     except TimeoutError:
-        return {**out, "reason": "timed out"}
+        return {**out, "reason": "timed out"}, None
     except ValueError:
-        return {**out, "reason": "not a model list (the answer isn't JSON)"}
+        return {**out, "reason": "not a model list (the answer isn't JSON)"}, None
     except Exception as e:  # type only: some messages quote the request's headers
-        return {**out, "reason": type(e).__name__}
+        return {**out, "reason": type(e).__name__}, None
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list) or not all(isinstance(m, dict) and isinstance(m.get("id"), str) for m in data):
-        return {**out, "reason": "not a model list (no data[].id)"}
+        return {**out, "reason": "not a model list (no data[].id)"}, None
     try:
         valar = bool(parse_valar(payload))
     except Exception:
         valar = False
-    return {"ok": True, "reason": None, "models": sorted(m["id"] for m in data), "kind": "valar" if valar else out["kind"]}
+    return {"ok": True, "reason": None, "models": sorted(m["id"] for m in data), "kind": "valar" if valar else out["kind"]}, payload
+
+
+def probe(url, key):
+    """GET {url}/v1/models (never a message): {ok, reason, models, kind}. The reason never carries the key."""
+    return _probe(url, key)[0]
 
 
 def add_downstream(app, body):
@@ -164,21 +187,32 @@ def add_downstream(app, body):
         raise Err(400, "the url must start with http:// or https://")
     if not isinstance(key, str):
         raise Err(400, "key must be text")
-    kind = probe(url, key)["kind"]
+    verdict, payload = _probe(url, key)
+    kind = verdict["kind"]
     used = {d.color for d in cur.downstreams}
     color = next((c for c in PALETTE if c not in used), PALETTE[len(used) % len(PALETTE)])
     d = {"id": body["id"], "name": body.get("name"), "url": url, "kind": kind, "models": body.get("models"), "color": color,
          "windows": dict.fromkeys(MODEL_TIERS, "asap") if kind == "valar" else None, "prices": body.get("prices")}
     try:
-        return asdict(app.add_downstream(d, key))
+        out = asdict(app.add_downstream(d, key))
     except ValueError as e:
         raise Err(409 if str(e).startswith("at most") else 400, str(e))
+    if payload is not None:  # the probe's payload, reused: no second models call
+        windows = fetch_windows(url, key, payload)
+        if windows:
+            app.set_listed_context(body["id"], windows)
+    return out
 
 
 def forget_models(app, ids):
-    """A deleted downstream's saved model list goes too: one re-added under its id must not show it."""
+    """A deleted downstream's saved model list and listed windows go too: one re-added under its id must not show them."""
+    for i in ids:
+        app.listed_context.pop(i, None)
+    upd = dict.fromkeys(ids)  # a None drops each id's saved list
+    if app.listed_context:
+        upd["listed_context"] = app.listed_context
     try:
-        save_models(app.config_dir, **dict.fromkeys(ids))
+        save_models(app.config_dir, **upd)
     except OSError:
         pass
 
@@ -292,9 +326,13 @@ def api(h, app, method, path, query, body):
                 lp = (saved.get("listed_prices") or {}).get(t) or (t == "valar" and saved.get("valar_prices"))
                 if ds.kind == "valar" and isinstance(lp, dict):
                     out["windows"] = windows_of(lp)
+                lc = saved.get("listed_context")
+                out["context"] = (lc.get(t) if isinstance(lc, dict) else None) or {}
                 return out
             raise
-        out, upd = {"models": ids}, {t: ids}
+        wins = fetch_windows(url, key, payload)
+        app.set_listed_context(t, wins)  # no-op when none came back, so the saved ones stay
+        out, upd = {"models": ids, "context": app.listed_context.get(t) or {}}, {t: ids}
         if ds.kind == "valar":
             try:
                 vp = parse_valar(payload)

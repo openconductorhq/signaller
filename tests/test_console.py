@@ -356,7 +356,8 @@ class ConsoleTest(Fixture):
             {"tier": "flex", "input_per_1m_tokens": 1, "cached_input_per_1m_tokens": 0.1, "output_per_1m_tokens": 5}]},
             {"id": "a", "pricing": []}]}).encode()
         r, d = self.req("GET", "/ui/api/models?track=valar")
-        self.assertEqual((r.status, json.loads(d)), (200, {"models": ["a", "b"], "windows": {"b": ["asap", "standard"]}}))
+        self.assertEqual((r.status, json.loads(d)),
+                         (200, {"models": ["a", "b"], "windows": {"b": ["asap", "standard"]}, "context": {}}))
         with open(os.path.join(self.dir, "models.json")) as f:
             saved = json.load(f)
         self.assertEqual(saved["valar"], ["a", "b"])
@@ -382,7 +383,8 @@ class ConsoleTest(Fixture):
             n = len(self.v.seen)
             r, _ = self.req("GET", "/ui/api/models?track=valar", hdrs={"Sec-Fetch-Site": site} if site else None)
             self.assertEqual(r.status, want, site)
-            self.assertEqual(len(self.v.seen) - n, int(want == 200), site)
+            # a 200 also asks /model/info: the list carries no windows, so the fallback goes looking
+            self.assertEqual(len(self.v.seen) - n, 2 * int(want == 200), site)
 
     def test_models_errors(self):
         self.assertEqual(self.js("GET", "/ui/api/models?track=anthropic")[0], 400)
@@ -569,6 +571,9 @@ def serve(do_GET):
 PRICED = json.dumps({"data": [{"id": "fast-model", "pricing": [
     {"tier": "realtime", "input_per_1m_tokens": 2, "cached_input_per_1m_tokens": 0.2, "output_per_1m_tokens": 9}]}]}).encode()
 ONE = b'{"data":[{"id":"deepseek-v4.1-flash"}]}'
+WINDOWED = json.dumps({"data": [{"id": "deepseek-v4.1-flash", "context_length": 850000}]}).encode()
+INFO = json.dumps({"data": [{"model_name": "deepseek-v4.1-flash",
+                             "model_info": {"max_input_tokens": 850000}}]}).encode()
 
 
 class DownstreamApiTest(Fixture):
@@ -601,7 +606,8 @@ class DownstreamApiTest(Fixture):
         st = self.js("GET", "/ui/api/state")[1]
         self.assertEqual(st["downstreams"]["lemmi"], {"key_set": True, "url": self.l.url[7:]})
         self.assertEqual(st["config"]["doubling"]["shadow"]["lemmi"], None)
-        self.assertEqual(self.js("GET", "/ui/api/models?track=lemmi")[1], {"models": ["deepseek-v4.1-flash"]})
+        self.assertEqual(self.js("GET", "/ui/api/models?track=lemmi")[1],
+                         {"models": ["deepseek-v4.1-flash"], "context": {}})
         self.assertEqual(self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "lemmi"})[1]["lever"], "lemmi")
         self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
         self.assertEqual(self.js("PUT", "/ui/api/config", {**self.cfg(), "lever": "lemmi"})[0], 200)
@@ -617,6 +623,69 @@ class DownstreamApiTest(Fixture):
         self.assertNotIn("lemmi", self.keys_file())
         self.assertNotIn("lemmi", json.load(open(os.path.join(self.dir, "models.json"))))  # a re-added lemmi mustn't show this one's list
         self.assertEqual(self.js("DELETE", "/ui/api/downstreams/lemmi")[0], 404)
+
+    def test_models_returns_listed_context(self):
+        self.l.models = WINDOWED
+        self.assertEqual(self.add()[0], 201)
+        s, j = self.js("GET", "/ui/api/models?track=lemmi")
+        self.assertEqual(s, 200)
+        self.assertEqual(j["context"], {"deepseek-v4.1-flash": 850000})
+        with open(os.path.join(self.dir, "models.json")) as f:
+            saved = json.load(f)
+        self.assertEqual(saved["listed_context"]["lemmi"], {"deepseek-v4.1-flash": 850000})
+
+    def test_model_info_fallback(self):
+        self.l.models = ONE  # ids only
+        self.l.model_info = INFO
+        self.assertEqual(self.add()[0], 201)
+        s, j = self.js("GET", "/ui/api/models?track=lemmi")
+        self.assertEqual((s, j["context"]), (200, {"deepseek-v4.1-flash": 850000}))
+        self.assertTrue(any(x[1].endswith("/model/info") for x in self.l.seen))
+
+    def test_windows_none_listed(self):
+        self.l.models = ONE  # ids only
+        self.l.model_info = 404
+        self.assertEqual(self.add()[0], 201)
+        s, j = self.js("GET", "/ui/api/models?track=lemmi")
+        self.assertEqual((s, j["context"]), (200, {}))
+        self.assertFalse(self.js("GET", "/ui/api/state")[1]["banner"])  # silent: never a banner for this
+
+    def test_empty_payload_keeps_saved_windows(self):
+        self.l.models = WINDOWED
+        self.assertEqual(self.add()[0], 201)
+        self.assertEqual(self.js("GET", "/ui/api/models?track=lemmi")[1]["context"],
+                         {"deepseek-v4.1-flash": 850000})
+        self.l.models = ONE  # now the downstream lists no windows at all
+        self.l.model_info = 404
+        self.assertEqual(self.js("GET", "/ui/api/models?track=lemmi")[1]["context"],
+                         {"deepseek-v4.1-flash": 850000})  # the saved ones stay
+
+    def test_add_downstream_captures_windows(self):
+        self.l.models = WINDOWED
+        self.assertEqual(self.add()[0], 201)
+        self.assertEqual(self.app.listed_context["lemmi"], {"deepseek-v4.1-flash": 850000})
+        self.assertEqual([x[1] for x in self.l.seen], ["/v1/models"])  # the probe's payload, no second models call
+
+    def test_stale_path_serves_saved_context(self):
+        self.l.models = WINDOWED
+        self.assertEqual(self.add()[0], 201)
+        self.assertEqual(self.js("GET", "/ui/api/models?track=lemmi")[1]["context"],
+                         {"deepseek-v4.1-flash": 850000})  # a live fetch first: it saves
+        self.set_lemmi_url("http://127.0.0.1:1")  # unreachable: the stale branch
+        s, j = self.js("GET", "/ui/api/models?track=lemmi")
+        self.assertEqual(j["models"], ["deepseek-v4.1-flash"])
+        self.assertEqual(j["context"], {"deepseek-v4.1-flash": 850000})
+        self.assertTrue(j["stale"])
+
+    def test_refresh_fetches_windows_for_generic_downstream(self):
+        self.l.models = WINDOWED
+        self.assertEqual(self.add()[0], 201)
+        self.app.listed_context = {}  # start from nothing in memory: the refresh must do the fetching
+        self.app.refresh_prices()
+        self.assertEqual(self.app.listed_context["lemmi"], {"deepseek-v4.1-flash": 850000})
+        with open(os.path.join(self.dir, "models.json")) as f:
+            saved = json.load(f)
+        self.assertEqual(saved["listed_context"]["lemmi"], {"deepseek-v4.1-flash": 850000})
 
     def test_probe_detects_valar(self):
         self.l.models = PRICED

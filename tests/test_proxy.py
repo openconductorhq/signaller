@@ -36,6 +36,7 @@ class Fake(ThreadingHTTPServer):
         self.hang = False
         self.no_images = False  # answer a request carrying an image the way a text-only model does
         self.models = b"{}"
+        self.model_info = b"{}"  # the /model/info answer: a body, or an int status with no body
         self.script = None  # [(status, content_type, body[, delay s])], answered in order
         threading.Thread(target=self.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
@@ -61,6 +62,18 @@ class FakeHandler(BaseHTTPRequestHandler):
             self.send_header("content-length", str(len(self.server.models)))
             self.end_headers()
             return self.wfile.write(self.server.models)
+        if self.path.endswith("/model/info"):
+            self.server.seen.append((self.command, self.path, self.headers, b""))
+            info = self.server.model_info
+            if isinstance(info, int):  # just a status, no body
+                self.send_response(info)
+                self.send_header("content-length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("content-length", str(len(info)))
+            self.end_headers()
+            return self.wfile.write(info)
         self.do_POST()
 
     def do_POST(self):
@@ -517,7 +530,7 @@ class ProxyTest(unittest.TestCase):
         self.logged()
         self.app.store.close()
         self.app.refresh_prices()
-        self.assertEqual(self.v.seen[-1][:2], ("GET", "/v1/models"))
+        self.assertEqual(self.v.seen[-2][:2], ("GET", "/v1/models"))  # the last is the /model/info fallback
         self.assertAlmostEqual(self.app.store.departures()[0]["cost"], (10 + 5 * 0.5 + 7 * 2) / 1e6)
         with open(os.path.join(self.dir, "models.json")) as f:
             saved = json.load(f)
