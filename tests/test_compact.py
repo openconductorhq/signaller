@@ -51,6 +51,18 @@ class TestCompact(unittest.TestCase):
         a = Anchors(); a.note("k", 4_000_000, 800_000); a.drop("k")
         self.assertEqual(a.estimate("k", 400_000), 100_000)
 
+    def test_note_reinserts_a_hot_key(self):
+        # subagent churn fills the map past its cap: a key re-noted between the inserts is re-inserted as
+        # newest, so it survives while an old untouched one is evicted first-in-first-out
+        a = Anchors()
+        a.note("old", 4_000_000, 800_000)
+        for n in range(4200):
+            a.note("k%d" % n, 4, 4)
+            if n % 500 == 0:
+                a.note("hot", 4_000_000, 900_000)
+        self.assertEqual(a.estimate("hot", 4_000_000), 900_000)   # survived: its anchor, not bytes/4
+        self.assertEqual(a.estimate("old", 4_000_000), 1_000_000)  # evicted: bytes/4 again
+
     def test_over_and_body(self):
         self.assertEqual((over(764_999, 850_000), over(765_000, 850_000)), (None, 765000))
         self.assertEqual(json.loads(error_body(780000, 765000)), {"type": "error", "error": {"type": "invalid_request_error",

@@ -15,6 +15,7 @@ LIMIT = 0.9
 WINDOW_KEYS = ("context_length", "max_input_tokens", "max_model_len")
 
 FLOOR = 1000  # a window below this is nonsense (a broken list or a hand-edit): treated as not listed
+CEILING = 10_000_000  # and above this: the manual-window range routing validates a config against
 
 
 def _window_int(v) -> bool:
@@ -22,17 +23,21 @@ def _window_int(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and v >= FLOOR
 
 
+def _entries(payload: dict):
+    """A models payload's `data` entries that are dicts: a malformed payload or entry yields nothing."""
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(data, list):
+        for entry in data:
+            if isinstance(entry, dict):
+                yield entry
+
+
 def listed_windows(payload: dict) -> dict:
     """Windows from a downstream's `/v1/models` payload: per model id, the first
     int > 0 of `context_length`, `max_input_tokens`, `max_model_len`. Models with
     none are omitted. Malformed entries are skipped, never raised."""
     out = {}
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        return out
-    for entry in data:
-        if not isinstance(entry, dict):
-            continue
+    for entry in _entries(payload):
         mid = entry.get("id")
         if not isinstance(mid, str):
             continue
@@ -47,12 +52,7 @@ def model_info_windows(payload: dict) -> dict:
     """Windows from LiteLLM's `/model/info`: `data[].model_name` →
     `model_info.max_input_tokens` (int > 0), the smallest when a name repeats."""
     out = {}
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        return out
-    for entry in data:
-        if not isinstance(entry, dict):
-            continue
+    for entry in _entries(payload):
         name = entry.get("model_name")
         info = entry.get("model_info")
         v = info.get("max_input_tokens") if isinstance(info, dict) else None
@@ -87,6 +87,7 @@ class Anchors:
 
     def note(self, key, body_len: int, total: int) -> None:
         with self._lock:
+            self._map.pop(key, None)  # re-insert as newest: a hot key is not evicted by subagent churn
             self._map[key] = (body_len, total)
 
     def drop(self, key) -> None:

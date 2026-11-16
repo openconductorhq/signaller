@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Callable
 
 from autophase import AutoSettings, human_index, human_text, text_hash, turn_text
+from compact import CEILING, FLOOR  # compact imports only autophase: no cycle back to routing
 from rulelang import FIELDS, KEYWORDS, RuleError, evaluate, fields_of, parse
 
 ROUTED_PATHS = ("/v1/messages", "/v1/messages/count_tokens")
@@ -453,13 +454,10 @@ def _downstream(d, taken):
     ctx = d.get("context")
     if ctx is not None:
         msg = f"downstream {i}: context must map a model id to a window of 1000–10000000 tokens"
-        if not isinstance(ctx, dict):
+        if not isinstance(ctx, dict) or any(not isinstance(k, str) or not k
+                                           or type(v) is not int or not FLOOR <= v <= CEILING
+                                           for k, v in ctx.items()):
             raise ValueError(msg)
-        for k, v in ctx.items():
-            if not isinstance(k, str) or not k:
-                raise ValueError(msg)
-            if type(v) is not int or not 1000 <= v <= 10_000_000:
-                raise ValueError(msg)
         ctx = dict(ctx) or None
     return Downstream(i, d["name"], d["url"], d["kind"], {t: m[t] for t in MODEL_TIERS}, d["color"], windows, prices, adv, ctx)
 

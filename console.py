@@ -198,9 +198,7 @@ def add_downstream(app, body):
     except ValueError as e:
         raise Err(409 if str(e).startswith("at most") else 400, str(e))
     if payload is not None:  # the probe's payload, reused: no second models call
-        windows = fetch_windows(url, key, payload)
-        if windows:
-            app.set_listed_context(body["id"], windows)
+        app.set_listed_context(body["id"], fetch_windows(url, key, payload))
     return out
 
 
@@ -325,8 +323,7 @@ def api(h, app, method, path, query, body):
                 lp = (saved.get("listed_prices") or {}).get(t) or (t == "valar" and saved.get("valar_prices"))
                 if ds.kind == "valar" and isinstance(lp, dict):
                     out["windows"] = windows_of(lp)
-                lc = saved.get("listed_context")
-                out["context"] = (lc.get(t) if isinstance(lc, dict) else None) or {}
+                out["context"] = app.listed_context.get(t) or {}
                 return out
             raise
         wins = fetch_windows(url, key, payload)
