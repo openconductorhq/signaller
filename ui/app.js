@@ -660,7 +660,14 @@ function trow(d) {
       el("button", { type: "button", class: "mini del", "data-k": "del:" + t, onclick: () => {
         if (confirm(`Delete ${d.name}? Its key goes too. Its history stays, shown as "${t}, removed".`)) act(() => dsCall("DELETE", "downstreams/" + encodeURIComponent(t), undefined, t));
       } }, "Delete")),
-    re && el("div", { class: "err tacts", role: "alert" }, re.refs ? [`${cur().name} is still in use. Point these elsewhere first:`, el("ul", {}, re.refs.map((x) => el("li", {}, x)))] : re.msg),
+    re && el("div", { class: "err tacts", role: "alert" }, re.refs ? [`${cur().name} is still in use. Point these elsewhere first, or let the router do it:`,
+      el("ul", {}, re.refs.map((x) => el("li", {}, x))),
+      el("button", { type: "button", class: "mini del", "data-k": "delany:" + t, onclick: () => {
+        if (confirm(`Point everything above away from ${d.name} and delete it? Its rule lines, labels, lever and Otherwise go to Anthropic, ` +
+          `a classifier on it switches off, side by side to it turns off, and its settings lines and session levers go. ` +
+          `Its key goes too; its history stays, shown as "${t}, removed".`))
+          act(() => dsCall("DELETE", "downstreams/" + encodeURIComponent(t) + "?repoint=1", undefined, t));
+      } }, "Repoint to Anthropic and delete")] : re.msg),
     el("p", { class: "warn", role: "status", hidden: !WARN[t] }, WARN[t] || ""));
 }
 const WIN = { asap: "Now", priority: "Priority", standard: "Standard" };
@@ -784,7 +791,9 @@ const GO_OFF = /\bgo\s+(?!anthropic\s*$)[\w-]+\s*$/i;
 const risky = (r) => r.kind === "dsl" && lines(r.text).some((l) => GO_OFF.test(l) && !/\btier\b|\bsubagent\b|\bteammate\b/i.test(l.replace(GO_OFF, "")));
 
 function describe(r) {
-  if (r.kind === "classifier") return el("div", { class: "rdesc" }, `A small model on ${NAME(cfg.classifier.upstream)} reads your newest message once per turn and labels it.`);
+  if (r.kind === "classifier") return el("div", { class: "rdesc" }, cfg.classifier.upstream === "none"
+    ? "Off: no downstream runs the classifier. Pick one under Edit to switch it on."
+    : `A small model on ${NAME(cfg.classifier.upstream)} reads your newest message once per turn and labels it.`);
   const d = DEFAULT_TEXT[r.builtin];
   if (d && r.text.trim() === d[0]) return el("div", { class: "rdesc" }, d[1]());
   return el("div", { class: "rdesc" }, lines(r.text).map((l) => {

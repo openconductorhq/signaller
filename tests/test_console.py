@@ -678,6 +678,17 @@ class DownstreamApiTest(Fixture):
         self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": None})
         self.assertEqual(self.js("DELETE", "/ui/api/downstreams/lemmi")[0], 200)
 
+    def test_delete_repoint(self):
+        """?repoint=1 points everything at the downstream to Anthropic (or off), drops its session levers, then deletes."""
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})
+        self.assertEqual(self.js("DELETE", "/ui/api/downstreams/valar")[0], 409)
+        self.assertEqual(self.js("DELETE", "/ui/api/downstreams/valar?repoint=1"), (200, {"ok": True}))
+        st = self.js("GET", "/ui/api/state")[1]
+        self.assertEqual(st["config"]["downstreams"], [])
+        self.assertEqual(st["config"]["classifier"]["upstream"], "none")
+        self.assertNotIn("go valar", " ".join(r["text"] for r in st["config"]["rules"]))
+        self.assertNotIn("s1", self.app.session_levers)
+
     def test_delete_blocked_by_auto_execution(self):
         self.add()
         self.app.routing = replace(self.app.routing, auto=AutoSettings(execution="lemmi"))

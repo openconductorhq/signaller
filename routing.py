@@ -314,6 +314,30 @@ def references(cfg: RoutingConfig, id: str, session_levers: Mapping[str, str]) -
     return out
 
 
+def unwire(j: dict, id: str) -> dict:
+    """A config JSON with everything `references` lists for a track pointed elsewhere (session levers aside):
+    to Anthropic, the classifier upstream to none, side by side off, auto execution unset, its settings lines
+    dropped. Switched-off rules keep naming it, as `references` allows. Returns a new dict."""
+    j = json.loads(json.dumps(j))
+    go = re.compile(r"(\bgo\s+)%s(\s*)$" % re.escape(id), re.IGNORECASE)
+    j["lever"] = "anthropic" if j["lever"] == id else j["lever"]
+    j["otherwise"] = "anthropic" if j["otherwise"] == id else j["otherwise"]
+    for r in j["rules"]:
+        if r["enabled"] and r["kind"] == "dsl":
+            r["text"] = "\n".join(go.sub(r"\1anthropic\2", ln) for ln in r["text"].split("\n"))
+    j["settings"] = [s for s in j["settings"] if s.get("downstream") != id]
+    if j["auto"].get("execution") == id:
+        j["auto"]["execution"] = None
+    c = j["classifier"]
+    for l in c["labels"]:
+        l["track"] = "anthropic" if l["track"] == id else l["track"]
+    c["upstream"] = "none" if c["upstream"] == id else c["upstream"]
+    sh = j["doubling"]["shadow"]
+    for t, o in sh.items():
+        sh[t] = None if o == id else o
+    return j
+
+
 SERVERTOOL_RULE = Rule("Tools only Anthropic can run", "dsl", True, "when servertool go anthropic", "servertool")
 
 DEFAULT_CONFIG = RoutingConfig(

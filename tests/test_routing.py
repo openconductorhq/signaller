@@ -8,7 +8,7 @@ from autophase import AutoSettings
 from signaller import load_config
 from overrides import Setting
 from routing import (DEFAULT_CONFIG, MODEL_TIERS, ClassResult, Downstream, Features, Rule, latest_tool_results, strip_lead_tags, is_routed, session_of, config_from_json,
-                     config_to_json, downstream, exec_track, references, route, tier_of, track_model, track_window, tracks, valid_id)
+                     config_to_json, downstream, exec_track, references, route, tier_of, track_model, track_window, tracks, unwire, valid_id)
 from rulelang import parse_cond
 
 
@@ -573,6 +573,26 @@ class DownstreamTests(unittest.TestCase):
                                                        "classifier label 'chit-chat'"])  # valar → anthropic is its own
         own = replace(cfg, doubling=replace(cfg.doubling, shadow={**cfg.doubling.shadow, "anthropic": None, "lemmi": "anthropic"}))
         self.assertNotIn("side by side: lemmi → anthropic", references(own, "lemmi", {}))  # its own outgoing shadow goes with it
+
+    def test_unwire(self):
+        rule = Rule("Mine", "dsl", True, "when tag is a go anthropic\n\nwhen tag is b   GO lemmi  ")
+        off = Rule("Off", "dsl", False, "when tag is c go lemmi")
+        cs = DEFAULT_CONFIG.classifier
+        cfg = with_lemmi(lever="lemmi", otherwise="lemmi", rules=(off, rule) + DEFAULT_CONFIG.rules,
+                         classifier=replace(cs, upstream="lemmi", labels=(replace(cs.labels[2], track="lemmi"),) + cs.labels[3:]),
+                         auto=AutoSettings(execution="lemmi"),
+                         settings=(Setting("hour < 7", parse_cond("hour < 7"), "lemmi", None, "model", "x"),
+                                   Setting("hour < 7", parse_cond("hour < 7"), "valar", None, "model", "y")))
+        cfg = replace(cfg, doubling=replace(cfg.doubling, shadow={**cfg.doubling.shadow, "anthropic": "lemmi"}))
+        out = config_from_json(unwire(config_to_json(cfg), "lemmi"))
+        self.assertEqual(references(out, "lemmi", {}), [])
+        self.assertEqual((out.lever, out.otherwise, out.auto.execution, out.classifier.upstream), ("anthropic", "anthropic", None, "none"))
+        self.assertEqual(out.rules[1].text, "when tag is a go anthropic\n\nwhen tag is b   GO anthropic  ")
+        self.assertEqual(out.rules[0].text, off.text)  # a switched-off rule may keep naming it
+        self.assertEqual([l.track for l in out.classifier.labels], ["anthropic", "valar"])
+        self.assertEqual([s.downstream for s in out.settings], ["valar"])
+        self.assertEqual(out.doubling.shadow["anthropic"], None)
+        self.assertEqual(references(config_from_json(unwire(config_to_json(DEFAULT_CONFIG), "valar")), "valar", {}), [])
 
     def test_seven_downstreams_rejected(self):
         o = config_to_json(DEFAULT_CONFIG)

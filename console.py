@@ -492,7 +492,7 @@ def api(h, app, method, path, query, body):
         app.keys.set(m[1], ds.url, key.strip())
         return {"key_set": True}
     if m and not m[2] and method == "DELETE":
-        refs = app.delete_downstream(m[1])
+        refs = app.delete_downstream(m[1], repoint=(query.get("repoint") or [""])[0] == "1")  # the console's "Delete anyway"
         if refs:
             raise in_use(m[1], refs)
         forget_models(app, [m[1]])

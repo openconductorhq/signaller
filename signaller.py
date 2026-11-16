@@ -31,7 +31,7 @@ from keys import host_of
 from prices import Prices, parse_valar
 from routing import (DEFAULT_CONFIG, LEVER_MODES, has_images, session_of, strip_lead_tags, text_hash, Decision, Downstream, Features, RoutingConfig,
                      config_from_json, config_to_json, downstream, is_routed, references, route as decide_route,
-                     track_model, track_window, tracks)
+                     track_model, track_window, tracks, unwire)
 import advisor
 from keys import Keys, write_json
 from store import NullStore, Store, load_console_config, save_console_config
@@ -592,14 +592,18 @@ class App:
             self.migrate_keys()  # a key left without a host (an old flat file's) ties to the downstream just added
             return new.downstreams[-1]
 
-    def delete_downstream(self, id: str) -> list[str]:
+    def delete_downstream(self, id: str, repoint: bool = False) -> list[str]:
         """Remove a downstream, its own shadow and its key; if anything still points at it, remove nothing and return those.
+        With `repoint`, those are first pointed elsewhere (`unwire`) and its session levers dropped, in the same write.
         The key survives when an inactive preset still has the same id at the same host."""
         with self._rlock:
             refs = references(self.routing, id, self.session_levers)
-            if refs:
+            if refs and not repoint:
                 return refs
-            j = config_to_json(self.routing)
+            j = unwire(config_to_json(self.routing), id) if refs else config_to_json(self.routing)
+            if any(lv == id for lv in self.session_levers.values()):
+                self.session_levers = {s: lv for s, lv in self.session_levers.items() if lv != id}
+                write_json(self.lever_path, self.session_levers)
             j["downstreams"] = [d for d in j["downstreams"] if d["id"] != id]
             del j["doubling"]["shadow"][id]
             ds = downstream(self.routing, id)  # before _put: the key is tied to the url it was set for
