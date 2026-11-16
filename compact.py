@@ -68,7 +68,9 @@ def window_for(ds, model: str, listed: dict):
         v = context.get(model)
         if _positive_int(v):
             return v
-    return listed.get(ds.id, {}).get(model)
+    # a hand-edited models.json can give a listed value of any kind: only a positive int is a window
+    v = listed.get(ds.id, {}).get(model) if isinstance(listed, dict) else None
+    return v if _positive_int(v) else None
 
 
 class Anchors:

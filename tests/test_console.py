@@ -22,6 +22,7 @@ from routing import MODEL_TIERS
 from tests import test_proxy
 from tests.test_autotrain import write_transcript, user as tu, asst as ta
 from tests.test_proxy import body_for, HDRS, CLASSIFIER_OFF, VALAR
+from compact import error_body
 
 
 
@@ -877,6 +878,113 @@ class DownstreamApiTest(Fixture):
         self.assertEqual(self.js("PUT", "/ui/api/turns/t3/verdict", {"verdict": "lemmi"})[0], 200)
         self.assertEqual(self.js("PUT", "/ui/api/turns/t3/verdict", {"verdict": "local"})[0], 400)
         self.assertEqual(self.js("GET", "/ui/api/state")[1]["stats"]["tally"]["lemmi"], 1)
+
+
+class CompactTest(Fixture):
+    """The check in the request path: a downstream-bound /v1/messages request that would near the served model's
+    context window is answered by signaller with the 400 Claude Code compacts on — before the shadow starts or
+    the downstream is asked."""
+
+    def setUp(self):
+        super().setUp()
+        ds = replace(self.app.routing.downstreams[0], models=dict.fromkeys(MODEL_TIERS, "m"))
+        self.app.routing = replace(self.app.routing, downstreams=(ds,))
+        self.app.listed_context = {ds.id: {"m": 1000}}  # the served model m: 1000 tokens, compacts at 900
+
+    def big(self, n, model="claude-sonnet-5-5"):
+        """A request body of exactly n bytes (json grows one byte per padding x)."""
+        base = body_for(model, {"messages": [{"role": "user", "content": ""}]})
+        body = body_for(model, {"messages": [{"role": "user", "content": "x" * (n - len(base))}]})
+        assert len(body) == n
+        return body
+
+    def req(self, method, path, body=None, origin="own", host=None, hdrs=None):
+        h = dict(hdrs or {})
+        if origin == "own":
+            origin = "http://127.0.0.1:%d" % self.port
+        if origin:
+            h["Origin"] = origin
+        if host:
+            h["Host"] = host
+        c = HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request(method, path, json.dumps(body) if body is not None else None, h)
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r, data
+
+    def js(self, *a, **k):
+        r, d = self.req(*a, **k)
+        return r.status, json.loads(d)
+
+    def test_refuses_near_window(self):
+        s, d = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual((s, d), (400, error_body(1000, 900)))  # 4000 bytes / 4 = 1000 ≥ 900
+        self.assertEqual(self.v.seen, [])  # the downstream was never asked
+        self.logged(1)
+        self.app.store.close()
+        rows = self.app.store.departures()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["status"], rows[0]["reason"][:8], rows[0]["model_out"], rows[0]["in_tok"]),
+                         (400, "compact:", "m", None))
+        notice = self.js("GET", "/ui/api/lever?session=s1")[1]["notice"]
+        self.assertEqual(notice["text"], "Asked Claude Code to compact: about 1K of Valar's 1K window.")
+        self.assertEqual(len(notice["turn"]), 16)
+
+    def test_compaction_request_not_refused(self):
+        s, _ = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1",
+                                          "X-Claude-Code-Request-Class": "compaction"})
+        self.assertEqual((s, len(self.v.seen)), (200, 1))  # the compaction itself runs on the downstream
+
+    def test_no_window_no_check(self):
+        self.app.listed_context = {}  # m without a window: nothing is ever refused
+        s, _ = self.post(self.big(40000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual((s, len(self.v.seen)), (200, 1))
+
+    def test_anthropic_never_checked(self):
+        self.app.routing = replace(self.app.routing, lever="anthropic")
+        s, _ = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual((s, len(self.a.seen)), (200, 1))  # a normal answer, never 400 from signaller
+        self.assertEqual(self.v.seen, [])
+
+    def test_anchor_from_usage(self):
+        self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 100}}).encode()),
+                         (200, "application/json", b"{}")]
+        self.assertEqual(self.post(self.big(3200), {**HDRS, "X-Claude-Code-Session-Id": "s1"})[0], 200)
+        self.logged(1)  # the note happens in the handler's finally, after the client has the response
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 3200), 100)  # anchored, not bytes/4
+        s, _ = self.post(self.big(3600), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual((s, len(self.v.seen)), (200, 2))
+        self.logged(2)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 3600), 200)  # 100 + 400 bytes of growth / 4
+
+    def test_compacted_drops_anchor(self):
+        self.v.script = [(200, "application/json", json.dumps({"usage": {"input_tokens": 950}}).encode()),
+                         (200, "application/json", b"{}")]
+        self.assertEqual(self.post(self.big(3200), {**HDRS, "X-Claude-Code-Session-Id": "s1"})[0], 200)
+        self.logged(1)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 3200), 950)
+        # 950 ≥ 900: this request would be refused were the anchor not dropped first
+        s, _ = self.post(self.big(400), {**HDRS, "X-Claude-Code-Session-Id": "s1",
+                                        "X-Claude-Code-Context-Compacted": "reactive"})
+        self.assertEqual((s, len(self.v.seen)), (200, 2))
+        self.logged(2)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 400), 100)  # the anchor is gone: bytes/4 again
+
+    def test_count_tokens_anchor(self):
+        self.v.script = [(200, "application/json", b'{"input_tokens": 100}'), (200, "application/json", b"{}")]
+        s, _ = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"}, path="/v1/messages/count_tokens")
+        self.assertEqual((s, len(self.v.seen)), (200, 1))
+        self.logged(1)
+        s, _ = self.post(self.big(4400), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual((s, len(self.v.seen)), (200, 2))
+        self.logged(2)
+        self.assertEqual(self.app.anchors.estimate(("s1", "main"), 4400), 200)  # 100 + 400/4
+
+    def test_refused_has_no_shadow(self):
+        self.app.routing = replace(self.app.routing, doubling=replace(self.app.routing.doubling, rate=100))
+        s, _ = self.post(self.big(4000), {**HDRS, "X-Claude-Code-Session-Id": "s1"})
+        self.assertEqual((s, self.v.seen, self.a.seen), (400, [], []))  # no served ask, no shadow to Anthropic
 
 
 class MigrationBannerTest(unittest.TestCase):

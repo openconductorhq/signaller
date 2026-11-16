@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 import autophase
 import autotrain
+import compact
 import console
 import overrides  # after routing: overrides imports routing
 import presets
@@ -163,6 +164,14 @@ def settings_lines(settings, ds: Downstream, model: str, f) -> tuple[dict, str |
         return {}, None
 
 
+def sent_model(settings, ds: Downstream, model: str, f) -> tuple[str, dict, str | None]:
+    """(the model a request goes out as on this downstream, the settings lines applied for it, the override
+    column): the tier mapping, then a settings line that renames it — the same value prepare() puts in
+    Prepared.model, computed here so the compact check can know it before prepare runs."""
+    applied, override = settings_lines(settings, ds, model, f)
+    return applied.get("model", (track_model(model, ds),))[0], applied, override
+
+
 def fit_window(app: "App", ds: Downstream, window, model):
     """A model without the window the router is about to send falls back to Now, the same rule the Tracks row
     applies; a model Valar hasn't priced (no listed windows) goes out as set."""
@@ -206,9 +215,9 @@ def prepare(app: "App", track: str, model: str, req, headers, routing=None, f=No
     changed = isinstance(req, dict) and (hoisted or stripped or out_model != model)
     headers, window = upstream_headers(headers, key), track_window(model, ds)
     settings = (routing or app.routing).settings
-    applied, override = settings_lines(settings, ds, model, f)
+    sent, applied, override = sent_model(settings, ds, model, f)
     if "model" in applied:
-        out_model, changed = applied["model"][0], True
+        out_model, changed = sent, True
     if "window" in applied:
         window = applied["window"][0]
     window = fit_window(app, ds, window, out_model)
@@ -338,6 +347,7 @@ class App:
         self.listed_context = ({k: dict(v) for k, v in saved_lc.items() if isinstance(v, dict)}
                                if isinstance(saved_lc, dict) else {})  # downstream id → {model: listed tokens}
         self.doubler = Doubler(self.store, open_upstream, prices=self.prices)
+        self.anchors = compact.Anchors()  # compact size anchors: in memory only, lost on restart (bytes/4 covers it)
 
     def migrate_keys(self) -> None:
         """Tie the keys still without a host (an old flat file's, or ones a start with an unreadable console.json
@@ -828,13 +838,66 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             route, reason = (d.track, d.reason) if d else ("anthropic", "passthrough")
             shown = model
             rec = f is not None and self.path.split("?", 1)[0] == "/v1/messages"
+            ctok = self.path.split("?", 1)[0] == "/v1/messages/count_tokens"  # its answer anchors the estimate too
             sid = any_sid if rec else None
             rid = app.store.next_id() if rec else None
+            # compact keys a conversation by the session id and the agent (the main thread: "main"); any_sid, not
+            # sid — a count_tokens request has no sid of its own. No session id: no check, no anchor.
+            ckey = (any_sid, self.headers.get("x-claude-code-agent-id") or "main") if any_sid else None
+            # the columns the served row and its advice rows share; not turn_id: an advice row is never doubled
+            context = lambda: {"track": route, "step": f.step, "prompt": f.prompt, "session_id": sid,
+                               "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120]}
             if rec and sid:
                 try:
                     app.sessions.note(sid, t0)
                 except Exception:
                     pass
+            # compact: a downstream-bound /v1/messages request that would near the served model's context window is
+            # answered here, before the shadow starts or the downstream is asked, with the 400 Claude Code compacts
+            # on. The Advisor's leg 2+ requests, opened mid-stream, are not checked (the check ran at the request's
+            # start; the headroom is deemed to cover a leg). Any failure of any part sends the request on untouched.
+            if (rec and ckey and route != "anthropic" and not labelling
+                    and self.headers.get("x-claude-code-request-class") != "compaction"):
+                try:
+                    if self.headers.get("x-claude-code-context-compacted"):
+                        app.anchors.drop(ckey)  # the history shrank: the old anchor overstates it
+                    ds = upstream(app, route, routing)[3]
+                    if ds:
+                        # the model the request would go out as (tier mapping, then a settings line): the window
+                        # is looked up for it, so a rename is checked against the right window
+                        sent = sent_model(routing.settings, ds, model, f)[0]
+                        # ponytail: bytes/4 estimates the growth over the anchor (the whole body with none) —
+                        # generous for base64 images, close enough for text
+                        window = compact.window_for(ds, sent, app.listed_context)
+                        if window:
+                            est = app.anchors.estimate(ckey, len(body))
+                            limit = compact.over(est, window)
+                            if limit:
+                                why = "compact: %dK of %dK on %s" % (est // 1000, window // 1000, ds.name)
+                                out = compact.error_body(est, limit)
+                                self.send_response(400)
+                                self.send_header("content-type", "application/json")
+                                self.send_header("content-length", str(len(out)))
+                                self.end_headers()
+                                self.wfile.write(out)
+                                if sent != model:
+                                    shown = "%s→%s" % (model, sent)
+                                ms = int((time.time() - t0) * 1000)
+                                app.notices[sid] = {"turn": f.turn_key[:16],
+                                                    "text": "Asked Claude Code to compact: about %dK of %s's %dK window."
+                                                            % (est // 1000, ds.name, window // 1000)}
+                                try:  # the row shows the refusal in the console's departures: no tokens, no cost
+                                    app.store.record_request(request_row(
+                                        app, ds, {}, model, sent, None, 400, None, ms, **context(), id=rid, ts=t0,
+                                        reason=why, explanation=json.dumps(d.explanation), stream=int(stream), override=None))
+                                except Exception:
+                                    pass
+                                print("%s route=%s reason=%s model=%s status=400 ms=%d stream=%s shadow=-" % (
+                                    time.strftime("%Y-%m-%d %H:%M:%S"), route, '"%s"' % why, shown, ms, stream),
+                                    file=sys.stderr, flush=True)
+                                return
+                except Exception as e:
+                    print("compact check failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
             pair, cap, shadow, turn_id = None, None, "-", None
             try:  # a doubling fault must never change the served request
                 # a labelling request has no shadow: its text goes to Anthropic and nowhere else
@@ -869,9 +932,7 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
             # stream keeps leg 1's input and cache tokens. One capture per leg, raw bytes
             leg_caps, sp = [], None
             adv_ms = [0]  # time spent in advice calls: their own rows carry it, the served row's ms doesn't
-            # the columns the served row and its advice rows share; not turn_id: an advice row is never doubled
-            context = lambda: {"track": route, "step": f.step, "prompt": f.prompt, "session_id": sid,
-                               "preview": ("↳ " + " · ".join(f.step.split("\n")) if f.step else f.prompt)[:120]}
+            ct = None  # a downstream 200 count_tokens answer: gathered while forwarded, its input_tokens an anchor
 
             def run_advice(body_d):
                 """One advisor call on the downstream, recorded as its own row: (advice text, failed). Never raises."""
@@ -974,6 +1035,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 self.end_headers()
                 if rec:
                     cap = AnswerCapture(resp.getheader("content-type", ""), resp.getheader("content-encoding", ""))
+                if ctok and ckey and route != "anthropic" and status == 200:
+                    ct = []
                 if first is not None:  # a 400 read above that wasn't about images: pass it on as it came
                     self.wfile.write(first)
                     if cap:
@@ -985,6 +1048,8 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                         self.wfile.flush()
                         if cap:  # only after the bytes are out: the capture sees what the client got
                             cap.feed(c)
+                        if ct is not None:
+                            ct.append(c)
 
                 cur, calls, adv_err, nxt = req, 0, "", None
                 if sp:
@@ -1066,6 +1131,24 @@ def make_server(cfg: Config, app: App | None = None) -> http.server.ThreadingHTT
                 usage = res.get("usage") or {}
                 if sp:  # the Splicer may have held leg 1's message_delta back from cap: every leg's tokens, summed
                     usage = sum_usage(leg_caps)
+                # compact anchors, from this answer: the request as Claude Code sent it (orig_body's length — the
+                # same length the check estimates from, whatever prepare did to the sent body) and its input total.
+                # ponytail: leg 1's usage is the anchor (its request is what leg 1 re-sends); legs 2+ are unchecked
+                if rec and ckey and route != "anthropic" and status == 200:
+                    try:
+                        u = (leg_caps[0].result().get("usage") or {}) if sp else usage
+                        got = (u.get("in"), u.get("cache_read"), u.get("cache_write"))
+                        if any(isinstance(x, int) for x in got):  # an answer without counts never wipes an anchor
+                            app.anchors.note(ckey, len(orig_body), sum(x or 0 for x in got))
+                    except Exception:
+                        pass
+                if ct is not None:  # a count_tokens answer: input_tokens is exact for that body (no cache split)
+                    try:
+                        inp = json.loads(b"".join(ct)).get("input_tokens")
+                        if isinstance(inp, int) and not isinstance(inp, bool):
+                            app.anchors.note(ckey, len(orig_body), inp)
+                    except Exception:
+                        pass
                 if pair:
                     res = res or AnswerCapture.EMPTY
                     pair.finish({**res, "status": status, "ttfb_ms": ttfb, "ms": ms,

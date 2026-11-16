@@ -23,6 +23,9 @@ class TestCompact(unittest.TestCase):
         ds = replace(DEFAULT_CONFIG.downstreams[0], context={"m": 500000})
         listed = {"valar": {"m": 850000, "n": 128000}}
         self.assertEqual((window_for(ds, "m", listed), window_for(ds, "n", listed), window_for(ds, "z", listed)), (500000, 128000, None))
+        # a hand-edited models.json can give a listed value that isn't a window
+        self.assertEqual([window_for(replace(ds, context=None), "m", {"valar": {"m": v}}) for v in ("850000", 0, True, None)],
+                         [None, None, None, None])
 
     def test_estimate(self):
         a = Anchors()
