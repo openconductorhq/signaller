@@ -438,16 +438,33 @@ Every other downstream is generic.
 `console.json`, the page, the API or the logs. To replace a key, use the
 downstream's row; leaving the field empty keeps the current key.
 
-**Delete** is refused while anything still uses the downstream. The message
-says which:
+**Model list:** each row's dropdowns hold the models the downstream lists on
+`/v1/models`, fetched with its key when the console loads. **Refresh models**
+on the row asks again and says what changed ("23 models listed, refreshed 11:05
+· 2 new · 1 gone"). A tier still set to a model the downstream no longer lists
+keeps it, marked "(not listed)": pick another, or requests on that tier will
+likely fail. When the downstream can't be reached, the row shows the list saved
+in `models.json`, with a note saying so. A column too narrow for a long model
+id truncates it; hover the dropdown for the full id.
+
+**Delete** is refused while anything still uses the downstream, and the row
+lists what does:
 - the lever, or a session's own lever
-- a rule or "Otherwise"
+- a rule line or "Otherwise"
 - a classifier label or the classifier's upstream
+- a settings line, or auto mode's execution track
 - a doubling direction
 
-Deleting a downstream also removes its key and its saved model list — unless
-another preset still has the same id at the same origin, in which case the key
-stays for it.
+Point those elsewhere yourself, or press **Repoint to Anthropic and delete**
+under the list. In one save it sends the rule lines, labels, lever and
+"Otherwise" that named the downstream to Anthropic, switches off a classifier
+that ran on it, turns off side by side to it, clears auto mode's execution
+choice, drops its settings lines and the session levers set to it, and then
+deletes it. Switched-off rules keep their text.
+
+Deleting a downstream also removes its key, its saved model list and its listed
+context windows — unless another preset still has the same id at the same
+origin, in which case the key stays for it.
 
 **Env seed:** on the first start after the upgrade to downstreams, `VALAR_URL`
 and `VALAR_API_KEY` fill in the Valar downstream. After that the env is ignored,
@@ -525,7 +542,8 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
   small settings box. With one session picked, the lever shows and sets that session's own lever (the same one
   `/signaller` sets, updated live). "back to global" drops it.
 - **Tracks:** one row per downstream. Each row shows whether a key is set, the
-  model map and the prices, with Rename, Replace key and Delete. Each tier's
+  model map and the prices, with Rename, Replace key, Refresh models, the
+  Advisor switch and Delete (see [Downstreams](#downstreams)). Each tier's
   model dropdown has a context-window line (see
   [Compacting for a downstream's window](#compacting-for-a-downstreams-window)):
   the window for that model — manual, or the listed one — and where the router
@@ -700,8 +718,11 @@ the span are remembered in the browser.
   keeps it. A session id unseen for a week is dropped.
 - `downstreams.keys.json`: the downstreams' keys, by id and host — the same id
   at two hosts holds two keys.
-- `models.json`: each downstream's model list. Valar's also carries each model's
-  prices (refreshed at startup and hourly).
+- `models.json`: each downstream's model list, the context windows it lists
+  (`listed_context`) and, for Valar, each model's prices. The list is saved
+  whenever the console loads it or you press Refresh models; the windows and
+  prices are refreshed at startup, hourly and after a preset switch. You can
+  edit it by hand for a downstream that's down.
 - `prices.json`: Anthropic API prices per tier, used for the "at API prices"
   figures. It is written with defaults on first run; edit it if prices change.
   Each tier also has `cache_write_1h`, the rate for 1-hour cache writes (2 times
@@ -746,6 +767,11 @@ Anthropic, which breaks that conversation.
   switch, start a new one.
 - **Doubled copies:** one that Anthropic rejects only shows up as an error on
   its pair.
+
+**Compacting for a downstream's window** depends on undocumented Claude Code
+headers, so a Claude Code update can stop it working; a 60-second breaker keeps
+sessions able to compact if that happens. See
+[its limits](#compacting-for-a-downstreams-window).
 
 **Images on a text-only model:** once the conversation holds a screenshot, a
 downstream model that takes no images refuses it, and each request then goes

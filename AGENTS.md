@@ -98,6 +98,28 @@ breaks.
   (`Downstream.context`, per model id) beats the listed one (`App.listed_context`,
   persisted under `listed_context` in `models.json`). The three headers above
   are undocumented, so a Claude Code update can break the check.
+- **Listed windows** (`App.listed_context`, `{downstream id: {model id:
+  tokens}}`): `console.fetch_windows` reads them from `/v1/models`
+  (`context_length`, `max_input_tokens`, `max_model_len`), else LiteLLM's
+  `/model/info`, through the no-redirect `_fetch_json`, so a key never follows a
+  redirect. They are fetched on the wizard's add (reusing the probe's payload,
+  so the public probe response stays as it was), on `GET /ui/api/models` (page
+  load and Refresh models) and in `refresh_prices` (startup, hourly, after a
+  preset switch, for every keyed downstream; prices stay Valar-only). An empty
+  result never wipes saved windows; a URL change drops them (`_put`), and so
+  does a delete (`forget_models`). Mutations and snapshots happen under
+  `_lc_lock`, inner dicts are replaced and never mutated, and `models.json` is
+  written from a snapshot. `_lc_lock` may be taken while `_rlock` is held, never
+  the reverse.
+- **Deleting a downstream:** `App.delete_downstream` refuses while
+  `routing.references` lists anything (the lever, session levers, enabled rule
+  lines, Otherwise, settings lines, auto execution, classifier labels and
+  upstream, doubling directions). With `repoint=True` (`DELETE
+  /ui/api/downstreams/<id>?repoint=1`, the console's "Repoint to Anthropic and
+  delete") it first runs `routing.unwire` on the config JSON and drops the
+  session levers naming it, in the same `_put` under `_rlock`. Keep
+  `references` and `unwire` in step: anything new that can name a track goes in
+  both, and in the README's Delete list.
 - **One request prep for every track:** `prepare()` in `signaller.py`
   renames the model, applies Valar's tool fix, swaps credentials and sets the
   window, for the served request and its shadow alike. Change it there, once.
@@ -239,6 +261,10 @@ breaks.
   - no external URLs; `tests/test_console.py::test_page_assets_local_only`
     checks this
   - fonts are local in `ui/fonts/`
+  - the Tracks row (`.trow` under `.tracks`) is a grid that steps 4 → 2 → 1
+    model columns by a container query on `.tracks`, not by screen width.
+    The training card's rows share the class name, so their rules are scoped to
+    `#trainCard`; don't style `.trow` unscoped
 - **The console API** is under `/ui/api/`. Every PUT, POST or DELETE needs a
   loopback `Origin` (the CSRF check). `PUT /ui/api/config` also needs the
   body's `rev` to equal `state`'s `config_rev` — a page saving a config that
@@ -258,7 +284,7 @@ breaks.
 ## Tests
 
 ```
-pytest -q tests                        # must stay green; about 270 tests, under 30 s
+pytest -q tests                        # must stay green; about 520 tests, under 30 s
 claude plugin test plugin/signaller # the plugin's gate test
 node --check ui/app.js                 # the console has no unit tests; at least parse it
 ```

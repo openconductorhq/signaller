@@ -317,7 +317,7 @@ class App:
         self.notices = {}  # session id -> {"turn", "text"}: the plugin shows it once (an image fallback)
         self.rev = 0  # config version, bumped by every _put: a stale whole-config PUT is refused with it
         # downstream id → {model: listed tokens}, before seed()/_finish_switch(): a _put may drop stale entries
-        self._lc_lock = threading.Lock()  # listed_context's mutations and snapshots only, never held with _rlock
+        self._lc_lock = threading.Lock()  # listed_context's mutations and snapshots only; may be taken under _rlock, never the reverse
         saved_lc = console.read_models(config_dir).get("listed_context")
         self.listed_context = ({k: dict(v) for k, v in saved_lc.items() if isinstance(v, dict)}
                                if isinstance(saved_lc, dict) else {})
