@@ -22,7 +22,7 @@ cards and on an opened request.
 - **Dependencies:** standard library only; vanilla JS. No inline styles or scripts.
   A tooltip goes in a `title` attribute.
 - **Never fail a request:** a pricing error must not fail one. Keep the existing
-  `try` at `claude_router.py:406`.
+  `try` at `signaller.py:406`.
 - **Old files load:** an old `prices.json` and an old `stats.db` load without
   errors. Nothing is backfilled.
 - **Default 1-hour write prices (USD per 1M):** fable 20.0, opus 8.0, sonnet 4.0,
@@ -58,7 +58,7 @@ cards and on an opened request.
 **Files:**
 - Modify: `doubling.py` (`_usage`, about lines 57–64)
 - Modify: `store.py` (`SCHEMA` line 24, `COLS` line 34, `_migrate` types line 191)
-- Modify: `claude_router.py:420` (row write)
+- Modify: `signaller.py:420` (row write)
 - Modify: `prices.py` (`DEFAULT_ANTHROPIC` lines 9–18, `api_cost` lines 78–82)
 - Test: `tests/test_doubling.py`, `tests/test_prices.py`, `tests/test_store.py`,
   `tests/test_proxy.py`
@@ -129,7 +129,7 @@ Expected: the new assertions FAIL, with a KeyError or a mismatch on
 - **`store.py`:** add `cache_write_1h_tok INTEGER` after `cache_write_tok` in
   `SCHEMA` and in `COLS["requests"]`, and `"cache_write_1h_tok": "INTEGER"` in the
   `_migrate` types map.
-- **`claude_router.py`:** add `"cache_write_1h_tok": usage.get("cache_write_1h")`
+- **`signaller.py`:** add `"cache_write_1h_tok": usage.get("cache_write_1h")`
   to the `record_request` dict.
 - **`prices.py`:**
   - Add `cache_write_1h` to each `DEFAULT_ANTHROPIC` row (the values are in Global
@@ -156,7 +156,7 @@ Expected: all pass (about 233).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add doubling.py store.py claude_router.py prices.py tests/
+git add doubling.py store.py signaller.py prices.py tests/
 git commit -m "feat: record 1-hour cache writes and price them at 2x input on Anthropic"
 ```
 
@@ -262,7 +262,7 @@ Expected: no output from node, and the tests pass. That includes
    - a valar row with cache tokens
    - a valar row with all tokens 0
 2. Start the scratch router:
-   `CLAUDE_ROUTER_CONFIG_DIR=<scratchpad>/r8788 CLAUDE_ROUTER_LISTEN=127.0.0.1:8788 python3 claude_router.py`
+   `SIGNALLER_CONFIG_DIR=<scratchpad>/r8788 SIGNALLER_LISTEN=127.0.0.1:8788 python3 signaller.py`
 3. Open `http://127.0.0.1:8788/ui`.
 4. Check:
    - the Anthropic card says `… · 97% cached` and its tooltip shows the split

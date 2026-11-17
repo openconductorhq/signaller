@@ -33,7 +33,7 @@
 - **Adding a DB column:** add it to `SCHEMA`, `COLS` and the `_migrate` types map. No backfill.
 - **Config changes:** v4 needs a migration in `routing.config_from_json` and a v3 fixture under `tests/fixtures/`.
 - **Plugin:**
-  - bump `plugin/router-lever/.claude-plugin/plugin.json` version (0.5.2 → 0.6.0);
+  - bump `plugin/signaller/.claude-plugin/plugin.json` version (0.5.2 → 0.6.0);
   - keep the typed-command gate: one typed `/router …` grants exactly one write of exactly that command.
 - **Never log** prompts, bodies, headers or keys.
 - **Reuse helpers:**
@@ -43,8 +43,8 @@
 - **Test commands:**
   - `/opt/homebrew/bin/pytest -q tests` (green);
   - `node --check ui/app.js`;
-  - `claude plugin test plugin/router-lever`.
-- **Live router:** never touch the one on 8787. UI checks use a scratch router: `CLAUDE_ROUTER_CONFIG_DIR=<scratch> CLAUDE_ROUTER_LISTEN=127.0.0.1:8788`.
+  - `claude plugin test plugin/signaller`.
+- **Live router:** never touch the one on 8787. UI checks use a scratch router: `SIGNALLER_CONFIG_DIR=<scratch> SIGNALLER_LISTEN=127.0.0.1:8788`.
 
 ## Shared decisions (all tasks)
 
@@ -77,7 +77,7 @@
 **Files:**
 - Modify: `rulelang.py` (FIELDS; new `parse_cond`)
 - Modify: `routing.py` (`Features.__init__`: `session=None, hour=None`; `RESERVED_IDS` picks the fields up via `FIELDS` already)
-- Modify: `claude_router.py` (`handle_any`, after `Features.from_body`: set `f.session = any_sid`, `f.hour = time.localtime(t0).tm_hour`)
+- Modify: `signaller.py` (`handle_any`, after `Features.from_body`: set `f.session = any_sid`, `f.hour = time.localtime(t0).tm_hour`)
 - Modify: `ui/index.html` (rule reference lists `session` and `hour`)
 - Test: `tests/test_rulelang.py`, `tests/test_routing.py`
 
@@ -209,13 +209,13 @@ def test_parse_cond_blank_and_error():
 ### Task 3: apply settings in `prepare()`, record them on the row
 
 **Files:**
-- Modify: `claude_router.py`:
+- Modify: `signaller.py`:
   - `prepare(app, track, model, req, headers, routing=None, f=None)` returns a 9-tuple: the existing 8 plus `override: str | None`;
   - after `track_model`/`track_window`, when `f` is set and `ds` is a downstream, apply `resolve(routing.settings, ds.id, model, lambda n: f.get(n, lambda: "none"))`;
   - wrap the resolve in `try/except Exception`: on failure, no override, and log `settings failed: <Type>` only.
 - Modify: `doubling.py` `_run`: pass its `f` to `prepare`, unpack 9 values.
 - Modify: `store.py`: `requests.override TEXT` in `SCHEMA`, `COLS`, `_migrate`.
-- Modify: `claude_router.py` `record_request`: `"override": override`.
+- Modify: `signaller.py` `record_request`: `"override": override`.
 - Test: `tests/test_proxy.py`, `tests/test_doubling.py`, `tests/test_store.py`
 
 **Interfaces:**
@@ -254,7 +254,7 @@ def test_parse_cond_blank_and_error():
     - checks `_sid_ok`;
     - validates through `settings_from_json`, so errors come back as 400 with the message.
     - It returns `{"lines": [<json of lines whose session set contains sid>], "collisions": […]}`.
-- Modify: `claude_router.py`:
+- Modify: `signaller.py`:
   - `App.set_settings_for_session(...)` runs under `_rlock` and writes through `_put`;
   - `App.prune_settings()` is called once at startup and in the hourly `start_price_refresh` loop;
   - pruning saves only when the list changed, and is skipped when the store is `NullStore`;
@@ -287,9 +287,9 @@ def test_parse_cond_blank_and_error():
 ### Task 5: plugin `/router` settings form
 
 **Files:**
-- Modify: `plugin/router-lever/hooks/register.ts`
-- Modify: `plugin/router-lever/.claude-plugin/plugin.json` (version `0.6.0`)
-- Test: `plugin/router-lever/tests/gate.test.ts`
+- Modify: `plugin/signaller/hooks/register.ts`
+- Modify: `plugin/signaller/.claude-plugin/plugin.json` (version `0.6.0`)
+- Test: `plugin/signaller/tests/gate.test.ts`
 
 **Interfaces:**
 - Consumes: `PUT /ui/api/settings` (Task 4).
@@ -301,16 +301,16 @@ def test_parse_cond_blank_and_error():
   - It is stored as a canonical string `"<ds> <tier|*> <key> <value>"` or `"<ds> reset"`.
   - Each typed command grants one use.
 - **The tool:** `router_lever` gains an optional `settings: string` input in the same command form. It is canonicalised the same way and must match an unused grant, or it's denied with the same wording style as levers. Update the tool description.
-- **The reply:** the command answers with the resulting lines for this session, e.g. `claude-router: valar window priority for this session (line 1)`, and with any collision text.
+- **The reply:** the command answers with the resulting lines for this session, e.g. `signaller: valar window priority for this session (line 1)`, and with any collision text.
 
 - [ ] **Step 1: Write failing gate tests:**
   - a tool call with `settings: "valar window priority"` is denied without a typed grant;
   - after the prompt `do /router valar window priority` it is allowed once, then denied again;
   - `/router valar window standard` typed does not grant `priority`;
   - a model value's case is preserved.
-- [ ] **Step 2:** Run `claude plugin test plugin/router-lever` and expect FAIL.
+- [ ] **Step 2:** Run `claude plugin test plugin/signaller` and expect FAIL.
 - [ ] **Step 3:** Implement and bump the version.
-- [ ] **Step 4:** Run `claude plugin test plugin/router-lever` and expect PASS.
+- [ ] **Step 4:** Run `claude plugin test plugin/signaller` and expect PASS.
 - [ ] **Step 5: Commit:** `feat(plugin): /router <downstream> [tier] window|model <value>, gated`
 
 ### Task 6: console panel, row display, docs

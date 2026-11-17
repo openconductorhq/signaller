@@ -73,7 +73,7 @@
 
 <div class="sb">
   <div class="top">
-    <h1>claude-router</h1>
+    <h1>signaller</h1>
     <span class="who">127.0.0.1:8787 · up 3h 12m</span>
     <div class="frame" role="radiogroup" aria-label="Override">
       <button class="lever a"><b>Anthropic</b><small>everything, ignore rules</small></button>
@@ -136,7 +136,7 @@
     </div>
     <div class="twin">
       <div class="ans l"><div class="meta"><b style="color:var(--loc)">Local</b><span>38 s</span><span>388 tokens</span><span class="served">sent to Claude Code</span></div>
-        <p>Added <code>load_config(env)</code> that parses <code>CLAUDE_ROUTER_LISTEN</code> with <code>ipaddress</code> and raises on non-loopback. Tests cover 0.0.0.0 and a LAN IP…</p></div>
+        <p>Added <code>load_config(env)</code> that parses <code>SIGNALLER_LISTEN</code> with <code>ipaddress</code> and raises on non-loopback. Tests cover 0.0.0.0 and a LAN IP…</p></div>
       <div class="ans a"><div class="meta"><b style="color:var(--anth)">Anthropic</b><span>2.9 s</span><span>412 tokens</span></div>
         <p>Added <code>load_config(env)</code>; treats <code>localhost</code> as loopback and also validates the port range, so <code>:99999</code> fails with a clear message instead of a traceback…</p></div>
     </div>

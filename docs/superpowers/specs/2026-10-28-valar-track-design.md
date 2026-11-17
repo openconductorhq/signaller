@@ -1,9 +1,9 @@
-# claude-router: Valar as a third track — design
+# signaller: Valar as a third track — design
 
 Date: 2026-10-28
 Status: draft, awaiting approval
 Builds on: `2026-10-17-console-design.md` (branch `feat/console`, PR #2) and
-`2026-10-16-claude-router-design.md`. Everything there holds unless this
+`2026-10-16-signaller-design.md`. Everything there holds unless this
 document changes it.
 
 Mockup: `2026-10-28-valar-track/cockpit-valar.html` (only the parts that
@@ -91,7 +91,7 @@ On the valar/local track, a `claude-*` model with `haiku` in it becomes that
 track's `haiku` model; any other `claude-*` model (sonnet, or opus/fable
 forced there by a tag or the lever) becomes its `sonnet` model. Non-Claude
 ids pass through unchanged, so `/model zai-org/GLM-5.3` picks a Valar model
-directly. Both strings must be non-empty. The `CLAUDE_ROUTER_LOCAL_SONNET` /
+directly. Both strings must be non-empty. The `SIGNALLER_LOCAL_SONNET` /
 `_HAIKU` env vars are retired (README says so); their defaults move here.
 
 ### Doubling
@@ -142,7 +142,7 @@ the router starts on defaults with a banner.
 | `LITELLM_API_KEY` | **now optional** (was required) |
 
 A track whose key is unset answers `502` with
-`claude-router: Valar not configured (VALAR_API_KEY unset)` (or LiteLLM). It
+`signaller: Valar not configured (VALAR_API_KEY unset)` (or LiteLLM). It
 never falls back to another track. Valar and LiteLLM share one code path:
 strip client `Authorization`/`x-api-key`, drop the `oauth-2025-04-20` beta,
 inject `Authorization: Bearer <track key>`, rewrite the model, stream back.

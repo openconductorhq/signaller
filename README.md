@@ -103,25 +103,6 @@ The unit runs Python with `-E -s`, which ignores `PYTHON*` env vars and the user
 site directory, so only the standard library is ever loaded. Logs:
 `journalctl --user -u signaller -f`.
 
-### Moving from claude-router
-
-Signaller was called claude-router. Its folder, variables and volume were
-renamed, so an existing install moves over once. Run this from the new
-checkout; it stops the router for a moment and keeps your stats:
-
-```
-docker compose -p claude-router down                       # stop the old project
-mv ~/.config/claude-router ~/.config/signaller
-sed -i '' 's/^CLAUDE_ROUTER_/SIGNALLER_/' ~/.config/signaller/env   # GNU sed: -i without ''
-docker compose build && docker compose create              # creates signaller_stats, doesn't start
-docker run --rm --user 0 -v claude-router_stats:/from -v signaller_stats:/to signaller sh -c 'cp -a /from/. /to/'
-docker compose start
-```
-
-In Claude Code, swap the plugin: `/plugin uninstall router-lever`,
-`/plugin marketplace remove claude-router`, then install as below. Once the
-console shows your history, `docker volume rm claude-router_stats`.
-
 ### Turn it on in Claude Code
 
 Add this to `~/.claude/settings.json`:

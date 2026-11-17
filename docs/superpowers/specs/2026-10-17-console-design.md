@@ -1,8 +1,8 @@
-# claude-router console — design
+# signaller console — design
 
 Date: 2026-10-17
 Status: draft, awaiting approval (builder check done)
-Builds on: `2026-10-16-claude-router-design.md` (the router, PR #1, branch
+Builds on: `2026-10-16-signaller-design.md` (the router, PR #1, branch
 `feat/router`). Everything there still holds unless this document changes it.
 This document replaces that spec's "no dashboards / UI" non-goal and its
 "no config file" rule.
@@ -362,7 +362,7 @@ lands on the pair as an error, nothing more.
 
 ## Stats and storage
 
-Two files under `~/.config/claude-router/` (mode 0600, created on first
+Two files under `~/.config/signaller/` (mode 0600, created on first
 run):
 
 - `console.json`: the routing config (lever, rules, classifier, doubling,

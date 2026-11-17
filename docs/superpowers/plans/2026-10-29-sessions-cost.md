@@ -4,7 +4,7 @@
 
 **Goal:** Tag every request with its Claude Code session, record tokens and cost per request, and let the console filter everything by session(s) and time span, with per-downstream cost and Anthropic-savings cards. Valar requests carry a per-slot completion window.
 
-**Architecture:** Recording grows in the proxy (`claude_router.py`): session id from the request, usage from the response via the existing `AnswerCapture`, cost from a new `prices.py`. A new `sessions.py` resolves session labels off the request thread. `store.py` gains columns, a `sessions` table and filtered read queries; `console.py` passes `sessions`/`from`/`to` through; the page adds chips, a time control and cost cards in the existing theme.
+**Architecture:** Recording grows in the proxy (`signaller.py`): session id from the request, usage from the response via the existing `AnswerCapture`, cost from a new `prices.py`. A new `sessions.py` resolves session labels off the request thread. `store.py` gains columns, a `sessions` table and filtered read queries; `console.py` passes `sessions`/`from`/`to` through; the page adds chips, a time control and cost cards in the existing theme.
 
 **Tech Stack:** Python 3 standard library only, `unittest`; vanilla JS/CSS in `ui/`.
 
@@ -40,7 +40,7 @@
 ### Task 1: Session id and usage on every recorded request
 
 **Files:**
-- Modify: `store.py` (schema + migration), `doubling.py` (`AnswerCapture`), `routing.py` (`session_of`), `claude_router.py` (handler)
+- Modify: `store.py` (schema + migration), `doubling.py` (`AnswerCapture`), `routing.py` (`session_of`), `signaller.py` (handler)
 - Test: `tests/test_store.py`, `tests/test_doubling.py`, `tests/test_proxy.py`, `tests/test_routing.py`
 
 **Interfaces:**
@@ -65,7 +65,7 @@
 
 **Files:**
 - Create: `sessions.py`
-- Modify: `store.py` (sessions table + `touch_session`), `claude_router.py` (`App` wiring)
+- Modify: `store.py` (sessions table + `touch_session`), `signaller.py` (`App` wiring)
 - Test: `tests/test_sessions.py`
 
 **Interfaces:**
@@ -86,7 +86,7 @@
 ### Task 3: Valar completion window per model slot
 
 **Files:**
-- Modify: `routing.py` (config `windows`, `track_window`), `claude_router.py` (header on served Valar requests), `doubling.py` (header on shadow Valar requests), `ui/index.html`, `ui/app.js`, `ui/app.css`
+- Modify: `routing.py` (config `windows`, `track_window`), `signaller.py` (header on served Valar requests), `doubling.py` (header on shadow Valar requests), `ui/index.html`, `ui/app.js`, `ui/app.css`
 - Test: `tests/test_routing.py`, `tests/test_proxy.py`, `tests/test_doubling.py`
 
 **Interfaces:**
@@ -105,7 +105,7 @@
 
 **Files:**
 - Create: `prices.py`
-- Modify: `console.py` (`list_models` keeps pricing; `/ui/api/models` returns per-model windows), `claude_router.py` (App: price refresh thread; cost on record), `doubling.py` (shadow usage + cost on pair), `store.py` (`reprice`)
+- Modify: `console.py` (`list_models` keeps pricing; `/ui/api/models` returns per-model windows), `signaller.py` (App: price refresh thread; cost on record), `doubling.py` (shadow usage + cost on pair), `store.py` (`reprice`)
 - Test: `tests/test_prices.py`, `tests/test_proxy.py`, `tests/test_console.py`
 
 **Interfaces:**
@@ -164,7 +164,7 @@
 - [ ] **Step 3: Cost cards** under the yard (mockup v3): Anthropic `$0` + `$X at API prices · in / out`; Valar cost + tokens, `partly unpriced` when `unpriced > 0`, `incl. $Y comparisons` when `comparisons > 0`; Local `$0`; dark savings card `≈ $S` + `Valar + local would have cost $T`. Card label gets `· last hour` etc. unless span is Whole session.
 - [ ] **Step 4: Rulebook:** grey `Rules for all sessions` line (no link); each rule and Otherwise shows `decided N of M` from `summary.rules`.
 - [ ] **Step 5: Departures and side by side:** pass `sessions` to their endpoints; each departure row gets a `.stag` with the session's short label; an opened departure adds `session · model · in / out · $cost (would be $api_cost on Anthropic)`; side-by-side cards show each side's cost; tally counts follow the filter.
-- [ ] **Step 6: Check in a browser:** run a throwaway router (`CLAUDE_ROUTER_CONFIG_DIR=<tmp> CLAUDE_ROUTER_LISTEN=127.0.0.1:8799`) seeded with a copy of `stats.db` and `console.json`, open `/ui/`, compare against both mockups at desktop width and at 390 px; pick 1 and 2 sessions and each span; confirm no console errors.
+- [ ] **Step 6: Check in a browser:** run a throwaway router (`SIGNALLER_CONFIG_DIR=<tmp> SIGNALLER_LISTEN=127.0.0.1:8799`) seeded with a copy of `stats.db` and `console.json`, open `/ui/`, compare against both mockups at desktop width and at 390 px; pick 1 and 2 sessions and each span; confirm no console errors.
 - [ ] **Step 7: Commit** `feat: session chips, time span and cost cards in the console`.
 
 ### Task 7: Docs and live acceptance

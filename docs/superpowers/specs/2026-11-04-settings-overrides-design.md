@@ -83,7 +83,7 @@ do it from the console and from inside a Claude Code session. Example: everythin
 
 - **Lever independence.** Settings lines apply whatever the lever says, global or per session. Only the track choice
   skips rules. This is why they are a separate list, not routing rules.
-- **The single prep step.** Apply overrides in `prepare()` in `claude_router.py`, which today calls `track_model` and
+- **The single prep step.** Apply overrides in `prepare()` in `signaller.py`, which today calls `track_model` and
   `track_window`. This is the one place that renames models and sets windows, for served and shadow requests alike.
   - The shadow follows the lines for its own track, with the same session and hour.
   - `prepare()` needs the session id and the time. Pass them in; don't re-derive them.
@@ -113,7 +113,7 @@ do it from the console and from inside a Claude Code session. Example: everythin
 - **Plugin.**
   - The command sets the line through a new console API endpoint, with the same loopback Origin check as other
     writes.
-  - Bump the version in `plugin/router-lever/.claude-plugin/plugin.json`.
+  - Bump the version in `plugin/signaller/.claude-plugin/plugin.json`.
   - The `router_lever` tool, if it gains the settings form, keeps the typed-command gate.
 
 ## Tests

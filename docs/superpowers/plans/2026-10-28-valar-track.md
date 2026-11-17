@@ -4,7 +4,7 @@
 
 **Goal:** Add Valar as a third track (anthropic / valar / local) to the console router. Make each track's models editable on the page, the classifier's upstream selectable, and doubling choose a shadow track per served track.
 
-**Architecture:** The track list grows from 2 to 3 in `routing.py`/`rulelang.py`; the config file goes to version 2 (v1 migrates on load). `claude_router.py` gets one helper that maps a track to (name, url, key), shared by the proxy, doubling and the console. Valar and LiteLLM go through the same code path (key swap + `track_model` rewrite). The page grows a Tracks panel and three-way controls.
+**Architecture:** The track list grows from 2 to 3 in `routing.py`/`rulelang.py`; the config file goes to version 2 (v1 migrates on load). `signaller.py` gets one helper that maps a track to (name, url, key), shared by the proxy, doubling and the console. Valar and LiteLLM go through the same code path (key swap + `track_model` rewrite). The page grows a Tracks panel and three-way controls.
 
 **Tech Stack:** Python 3 standard library only, `unittest`; vanilla JS/CSS in `ui/` (no CDN).
 
@@ -25,8 +25,8 @@
 - Env:
   - `VALAR_URL` defaults to `https://api.valarhq.ai`; strip a trailing `/`, then a trailing `/v1`.
   - `VALAR_API_KEY` and `LITELLM_API_KEY` are both optional.
-  - `CLAUDE_ROUTER_LOCAL_SONNET`/`_HAIKU` are retired.
-- A track whose key is empty answers 502 `claude-router: Valar not configured (VALAR_API_KEY unset)` (LiteLLM: `LITELLM_API_KEY unset`). Never fall back to another track.
+  - `SIGNALLER_LOCAL_SONNET`/`_HAIKU` are retired.
+- A track whose key is empty answers 502 `signaller: Valar not configured (VALAR_API_KEY unset)` (LiteLLM: `LITELLM_API_KEY unset`). Never fall back to another track.
 - Valar colour `#2F6DB5`.
 - Tests: `python3 -m unittest` from repo root. The whole suite stays green after every task, including `test_speed`.
 
@@ -44,7 +44,7 @@
 
 - `routing.py`: tracks, tier, config v2 + migration, `track_model`. Task 1.
 - `rulelang.py`: `go valar`. Task 1.
-- `claude_router.py`: `Config`, `load_config`, `upstream`, `upstream_headers`, proxy path. Task 2.
+- `signaller.py`: `Config`, `load_config`, `upstream`, `upstream_headers`, proxy path. Task 2.
 - `doubling.py`: shadow per served track, caps, model/key per track. Task 2.
 - `classifier.py`: upstream selection. Task 3.
 - `store.py`, `console.py`: stats, verdicts, state, models endpoint. Task 4.
@@ -123,7 +123,7 @@
 ### Task 2: Valar upstream in the proxy and doubling
 
 **Files:**
-- Modify: `claude_router.py`, `doubling.py`
+- Modify: `signaller.py`, `doubling.py`
 - Test: `tests/test_proxy.py`, `tests/test_doubling.py`, `tests/test_routing.py` (config tests)
 
 **Interfaces:**
@@ -145,7 +145,7 @@
   - `test_valar_swaps_credentials_and_model`: a sonnet request reaches V with `Authorization: Bearer VK`, no `x-api-key`, `anthropic-beta == "claude-code-20250219"`, body `model == "VS"`; A and L receive nothing. A haiku request → `"VH"`.
   - `test_valar_streams`: the first SSE event through the Valar track arrives in under 0.25 s (same shape as the existing streaming test).
   - `test_non_claude_model_untouched`: model `zai-org/GLM-5.3` → V receives `zai-org/GLM-5.3`.
-  - `test_valar_not_configured_502`: router with `valar_key=""` → sonnet request → 502, message `claude-router: Valar not configured (VALAR_API_KEY unset)`; V, A and L receive nothing.
+  - `test_valar_not_configured_502`: router with `valar_key=""` → sonnet request → 502, message `signaller: Valar not configured (VALAR_API_KEY unset)`; V, A and L receive nothing.
   - `test_valar_down_502`: V on a closed port → 502 with `Valar unreachable`; A receives nothing.
   - `test_local_still_works`: `#local` request → L with `Bearer LK`, model `"S"`.
   - Doubling (`test_doubling.py`):
@@ -181,7 +181,7 @@
 ### Task 3: Classifier upstream
 
 **Files:**
-- Modify: `classifier.py`, `claude_router.py` (`App`)
+- Modify: `classifier.py`, `signaller.py` (`App`)
 - Test: `tests/test_classifier.py`, `tests/test_proxy.py` (classifier wiring)
 
 **Interfaces:**
@@ -237,7 +237,7 @@
 
 - [ ] **Step 2: Run, expect failure.** `python3 -m unittest tests.test_store tests.test_console`
 
-- [ ] **Step 3: Implement.** The models endpoint goes in `api()`. It uses `upstream(app.cfg, track)`, imported late inside the function because `claude_router` imports `console`. Errors use `Err(status, msg)`.
+- [ ] **Step 3: Implement.** The models endpoint goes in `api()`. It uses `upstream(app.cfg, track)`, imported late inside the function because `signaller` imports `console`. Errors use `Err(status, msg)`.
 
 - [ ] **Step 4: Run all tests, expect pass.** `python3 -m unittest`
 
@@ -275,7 +275,7 @@
 
 - [ ] **Step 4: Verify.**
   - Run `python3 -m unittest` → OK.
-  - Start the router with `CLAUDE_ROUTER_CONFIG_DIR` set to a scratch dir and the repo `.env` loaded.
+  - Start the router with `SIGNALLER_CONFIG_DIR` set to a scratch dir and the repo `.env` loaded.
   - Open `http://127.0.0.1:8787/ui` in the browser (Playwright) and check:
     - no console errors;
     - 4 lever positions;

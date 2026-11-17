@@ -1,4 +1,4 @@
-# claude-router — design
+# signaller — design
 
 Date: 2026-10-16
 Status: draft, awaiting approval
@@ -18,7 +18,7 @@ rejected as sloppy. The chosen shape is a single Claude Code session pointed
 at a local router that decides, per request, where the request goes:
 
 ```
-claude ──ANTHROPIC_BASE_URL──▶ claude-router (127.0.0.1) ──┬─▶ https://api.anthropic.com   (user's auth, untouched)
+claude ──ANTHROPIC_BASE_URL──▶ signaller (127.0.0.1) ──┬─▶ https://api.anthropic.com   (user's auth, untouched)
                                                            └─▶ LiteLLM (:4000) → vLLM      (LiteLLM key, model renamed)
 ```
 
@@ -144,7 +144,7 @@ keep the main session on opus.
   the router — unless that's impossible; then the router may delete the
   specific offending field on the local route only, documented in code.
 - LiteLLM unreachable → respond `502` with an Anthropic-shaped error body
-  (`{"type":"error","error":{"type":"api_error","message":"claude-router: LiteLLM unreachable at …"}}`).
+  (`{"type":"error","error":{"type":"api_error","message":"signaller: LiteLLM unreachable at …"}}`).
 
 ## Anthropic route behaviour
 
@@ -169,20 +169,20 @@ Environment variables (flags optional, builder's choice):
 
 | Var | Default |
 |-----|---------|
-| `CLAUDE_ROUTER_LISTEN` | `127.0.0.1:8787` — must resolve to loopback; refuse to start otherwise |
-| `CLAUDE_ROUTER_ANTHROPIC_URL` | `https://api.anthropic.com` |
+| `SIGNALLER_LISTEN` | `127.0.0.1:8787` — must resolve to loopback; refuse to start otherwise |
+| `SIGNALLER_ANTHROPIC_URL` | `https://api.anthropic.com` |
 | `LITELLM_URL` | `http://127.0.0.1:4000` |
 | `LITELLM_API_KEY` | required; refuse to start if unset |
-| `CLAUDE_ROUTER_LOCAL_SONNET` | `claude-sonnet-4-6` |
-| `CLAUDE_ROUTER_LOCAL_HAIKU` | `claude-haiku-4-5-20251001` |
+| `SIGNALLER_LOCAL_SONNET` | `claude-sonnet-4-6` |
+| `SIGNALLER_LOCAL_HAIKU` | `claude-haiku-4-5-20251001` |
 
 No config file.
 
 ## Install / run
 
-- Run in place from the repo: `python3 -I /path/to/claude_router.py`.
-- systemd **user** unit `claude-router.service`, `Restart=on-failure`,
-  key loaded from an `EnvironmentFile` (`~/.config/claude-router/env`,
+- Run in place from the repo: `python3 -I /path/to/signaller.py`.
+- systemd **user** unit `signaller.service`, `Restart=on-failure`,
+  key loaded from an `EnvironmentFile` (`~/.config/signaller/env`,
   mode 0600). Unit file lives in the repo.
 - Claude Code: add to `~/.claude/settings.json`
   `"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"}`.
@@ -197,7 +197,7 @@ No config file.
   `http.client`), single module. Changed from Go at planning time: Go is not
   installed on the host and Python is; the spike already proved the approach
   in Python.
-- New repo `~/Development/claude-router`.
+- New repo `~/Development/signaller`.
 - Model tier as the default signal (opus → Anthropic, sonnet/haiku → local);
   local rewrite haiku→haiku, else→sonnet.
 - Both-tags → Anthropic.

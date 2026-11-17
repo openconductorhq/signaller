@@ -54,7 +54,7 @@ Fable 5.1 a read is 0.025× input ($0.25 against $10) and on Opus 5.5 it is 0.05
 ## Anti-goals
 
 - **A pricing error must never fail a request.** This keeps the existing `try`
-  around the cost calculation in `claude_router.py`.
+  around the cost calculation in `signaller.py`.
 - **Old `prices.json` files must load as before.** A file without the new key
   gets the default for it.
 - The cost cards get one short addition, not a new panel.
@@ -72,7 +72,7 @@ Fable 5.1 a read is 0.025× input ($0.25 against $10) and on Opus 5.5 it is 0.05
   types map. `cache_write_tok` stays
   the total of all writes. `cache_write_1h_tok` is the 1-hour part of it: None
   means unknown, which is treated as 0.
-- **Writing the row.** `claude_router.py` writes `cache_write_1h_tok` from
+- **Writing the row.** `signaller.py` writes `cache_write_1h_tok` from
   `usage.get("cache_write_1h")`.
 
 ### Pricing (`prices.py`)

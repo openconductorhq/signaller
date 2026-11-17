@@ -1,21 +1,21 @@
-# claude-router Implementation Plan
+# signaller Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A loopback HTTP router that sits at `ANTHROPIC_BASE_URL` and sends each Claude Code request either to Anthropic (untouched) or to local LiteLLM (credentials swapped, model renamed), by prompt tag then model tier.
 
-**Architecture:** One module `claude_router.py`: pure routing functions at the top, a `ThreadingHTTPServer` handler that reads the body, calls `decide()`, and streams the upstream response back chunk by chunk via `http.client`. Config from env vars only. Runs as a systemd user service.
+**Architecture:** One module `signaller.py`: pure routing functions at the top, a `ThreadingHTTPServer` handler that reads the body, calls `decide()`, and streams the upstream response back chunk by chunk via `http.client`. Config from env vars only. Runs as a systemd user service.
 
 **Tech Stack:** Python 3.12, standard library only (`http.server`, `http.client`, `json`, `re`, `unittest`). No third-party packages.
 
-**Spec:** `docs/superpowers/specs/2026-10-16-claude-router-design.md`
+**Spec:** `docs/superpowers/specs/2026-10-16-signaller-design.md`
 
 ## Global Constraints
 
 - Standard library only; no `pip install`.
 - Listen address must be loopback; default `127.0.0.1:8787`; refuse to start otherwise.
 - `LITELLM_API_KEY` required; refuse to start if unset.
-- Env vars and defaults: `CLAUDE_ROUTER_LISTEN=127.0.0.1:8787`, `CLAUDE_ROUTER_ANTHROPIC_URL=https://api.anthropic.com`, `LITELLM_URL=http://127.0.0.1:4000`, `CLAUDE_ROUTER_LOCAL_SONNET=claude-sonnet-4-6`, `CLAUDE_ROUTER_LOCAL_HAIKU=claude-haiku-4-5-20251001`.
+- Env vars and defaults: `SIGNALLER_LISTEN=127.0.0.1:8787`, `SIGNALLER_ANTHROPIC_URL=https://api.anthropic.com`, `LITELLM_URL=http://127.0.0.1:4000`, `SIGNALLER_LOCAL_SONNET=claude-sonnet-4-6`, `SIGNALLER_LOCAL_HAIKU=claude-haiku-4-5-20251001`.
 - Anthropic route: no body rewriting; path, query, headers unchanged except hop-by-hop.
 - Local route: never forward client `Authorization` / `x-api-key`; drop the `oauth-2025-04-20` beta.
 - No fallback between routes in either direction.
@@ -34,12 +34,12 @@
 
 ## File Structure
 
-- `claude_router.py`: everything (routing functions, handler, config, `main()`).
+- `signaller.py`: everything (routing functions, handler, config, `main()`).
 - `tests/test_route.py`: unit tests for the pure routing functions.
 - `tests/test_proxy.py`: integration tests with fake upstream servers on loopback.
 - `tests/__init__.py`: empty.
-- `claude-router.service`: systemd user unit.
-- `env.example`: template for `~/.config/claude-router/env`.
+- `signaller.service`: systemd user unit.
+- `env.example`: template for `~/.config/signaller/env`.
 - `README.md`: install, enable, bypass, limitations, manual acceptance.
 
 ---
@@ -47,7 +47,7 @@
 ### Task 1: Routing decision
 
 **Files:**
-- Create: `claude_router.py`, `tests/__init__.py`, `tests/test_route.py`
+- Create: `signaller.py`, `tests/__init__.py`, `tests/test_route.py`
 
 **Interfaces:**
 - Produces:
@@ -75,21 +75,21 @@
   Run: `python3 -m unittest tests.test_route -v`
   Expected: ImportError / failures.
 
-- [ ] **Step 3: Implement** the three functions plus `ROUTED_PATHS` in `claude_router.py`. Tag regex: `(?<!\w)#(plan|local)(?!\w)` with `re.I`. A user message counts as "human" if it has at least one text block whose stripped text does not start with `<system-reminder>`; the human text is the join of those blocks. Tier: `"haiku" in model or "sonnet" in model` → local. Wrap JSON parsing so any parse or shape error gives `("anthropic","passthrough")`.
+- [ ] **Step 3: Implement** the three functions plus `ROUTED_PATHS` in `signaller.py`. Tag regex: `(?<!\w)#(plan|local)(?!\w)` with `re.I`. A user message counts as "human" if it has at least one text block whose stripped text does not start with `<system-reminder>`; the human text is the join of those blocks. Tier: `"haiku" in model or "sonnet" in model` → local. Wrap JSON parsing so any parse or shape error gives `("anthropic","passthrough")`.
 
 - [ ] **Step 4: Run, expect pass**
   Run: `python3 -m unittest tests.test_route -v`
   Expected: all OK.
 
 - [ ] **Step 5: Commit**
-  `git add claude_router.py tests/ && git commit -m "feat: routing decision (tag, then model tier)"`
+  `git add signaller.py tests/ && git commit -m "feat: routing decision (tag, then model tier)"`
 
 ---
 
 ### Task 2: Streaming proxy handler
 
 **Files:**
-- Modify: `claude_router.py`
+- Modify: `signaller.py`
 - Create: `tests/test_proxy.py`
 
 **Interfaces:**
@@ -113,7 +113,7 @@
 - [ ] **Step 2: Run, expect failure**
   Run: `python3 -m unittest tests.test_proxy -v`
 
-- [ ] **Step 3: Implement** `Config`, `local_headers`, `make_server` and the handler in `claude_router.py`:
+- [ ] **Step 3: Implement** `Config`, `local_headers`, `make_server` and the handler in `signaller.py`:
   - Handle all methods (`do_GET`/`do_POST`/`do_HEAD`/etc. share one method).
   - Read the full body via `content-length`.
   - Call `decide(...)`. For local routes, rewrite the JSON `model` with `local_model` and re-serialize.
@@ -121,7 +121,7 @@
   - Write status and headers (minus hop-by-hop and `content-length` when streaming), then loop `resp.read1(65536)` → `wfile.write` + `flush`.
   - Keep `protocol_version = "HTTP/1.0"`, so closing the connection marks the end of the response. Add the comment `# ponytail: HTTP/1.0 close-delimited responses, no keep-alive; switch to chunked if connection churn ever matters`.
   - Catch `BrokenPipeError`/`ConnectionResetError` while writing: close the upstream and return.
-  - On connection errors to LiteLLM, send the 502 JSON from the spec. On connection errors to Anthropic, send the same shape with the message `"claude-router: Anthropic unreachable at <url>"`.
+  - On connection errors to LiteLLM, send the 502 JSON from the spec. On connection errors to Anthropic, send the same shape with the message `"signaller: Anthropic unreachable at <url>"`.
   - Log one line to stderr per request, formatted `"%(asctime)s route=%s reason=%s model=%s[→%s] status=%d ms=%d stream=%s"`. Silence `log_message`.
 
 - [ ] **Step 4: Run all tests, expect pass**
@@ -135,9 +135,9 @@
 ### Task 3: Startup, service, docs, live acceptance
 
 **Files:**
-- Modify: `claude_router.py` (add `load_config`, `main`)
+- Modify: `signaller.py` (add `load_config`, `main`)
 - Modify: `tests/test_route.py` (config tests)
-- Create: `claude-router.service`, `env.example`, `README.md`
+- Create: `signaller.service`, `env.example`, `README.md`
 
 **Interfaces:**
 - Consumes: `Config`, `make_server` from Task 2.
@@ -146,13 +146,13 @@
 - [ ] **Step 1: Write the failing tests** in `tests/test_route.py`:
   - `test_config_defaults` → `load_config({"LITELLM_API_KEY":"k"})` gives host `127.0.0.1`, port `8787`, and the defaults from Global Constraints.
   - `test_config_requires_key` → `load_config({})` raises `ValueError`.
-  - `test_config_rejects_non_loopback` → `CLAUDE_ROUTER_LISTEN=0.0.0.0:8787` and `=192.168.1.5:8787` raise `ValueError`; `localhost:9000` and `[::1]:9000` are accepted. Use `ipaddress.ip_address(...).is_loopback`, treating `localhost` as loopback.
+  - `test_config_rejects_non_loopback` → `SIGNALLER_LISTEN=0.0.0.0:8787` and `=192.168.1.5:8787` raise `ValueError`; `localhost:9000` and `[::1]:9000` are accepted. Use `ipaddress.ip_address(...).is_loopback`, treating `localhost` as loopback.
 
 - [ ] **Step 2: Run, expect failure**, then **implement** `load_config` and `main`. `main` logs `listening on <host:port>; anthropic=<url> litellm=<url>` and calls `serve_forever()`. **Run, expect pass**: `python3 -m unittest -v`.
 
-- [ ] **Step 3: Write `claude-router.service`**
-  - `[Service] ExecStart=/usr/bin/python3 -I %h/Development/claude-router/claude_router.py`
-  - `EnvironmentFile=%h/.config/claude-router/env`
+- [ ] **Step 3: Write `signaller.service`**
+  - `[Service] ExecStart=/usr/bin/python3 -I %h/Development/signaller/signaller.py`
+  - `EnvironmentFile=%h/.config/signaller/env`
   - `Restart=on-failure`
   - `[Install] WantedBy=default.target`
 
@@ -162,17 +162,17 @@
   - What it does (the routing table from the spec).
   - Install:
     ```
-    mkdir -p ~/.config/claude-router
-    cp env.example ~/.config/claude-router/env
-    chmod 600 ~/.config/claude-router/env
-    ln -s $PWD/claude-router.service ~/.config/systemd/user/
-    systemctl --user enable --now claude-router
+    mkdir -p ~/.config/signaller
+    cp env.example ~/.config/signaller/env
+    chmod 600 ~/.config/signaller/env
+    ln -s $PWD/signaller.service ~/.config/systemd/user/
+    systemctl --user enable --now signaller
     ```
   - Enable in Claude Code: `"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"}` in `~/.claude/settings.json`.
   - Bypass: `ANTHROPIC_BASE_URL= claude`.
   - Router down: every session fails to connect; bypass as above.
   - The main-session limitation from the spec ("keep the main session on opus; `#local` in main only for throwaway conversations").
-  - Logs: `journalctl --user -u claude-router -f`.
+  - Logs: `journalctl --user -u signaller -f`.
   - Manual acceptance steps 1–4 from the spec.
 
 - [ ] **Step 5: Live acceptance against real LiteLLM.**

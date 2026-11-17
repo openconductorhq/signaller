@@ -1,9 +1,9 @@
-# claude-router: per-session view and cost — design
+# signaller: per-session view and cost — design
 
 Date: 2026-10-29
 Status: draft, awaiting approval (builder check done)
 Builds on: `2026-10-28-valar-track-design.md`, `2026-10-17-console-design.md`,
-`2026-10-16-claude-router-design.md`. Everything there holds unless this
+`2026-10-16-signaller-design.md`. Everything there holds unless this
 document changes it.
 
 Mockups (approved; open in a browser from this folder, they use `ui/app.css`):

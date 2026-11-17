@@ -6,7 +6,7 @@
 
 **Architecture:** `RoutingConfig` gains `downstreams: tuple[Downstream, ...]` (console.json v3) and every place that names `valar`/`local` reads that list instead; Valar's extras key off `Downstream.kind == "valar"`. Keys live in a separate 0600 file the browser never sees. The console UI generates the lever, yard, cost cards, Tracks rows and selects from the list.
 
-**Tech Stack:** Python 3 stdlib (http.server, sqlite3, unittest/pytest), vanilla JS/CSS/SVG in `ui/`, TypeScript Claude Code plugin in `plugin/router-lever/`.
+**Tech Stack:** Python 3 stdlib (http.server, sqlite3, unittest/pytest), vanilla JS/CSS/SVG in `ui/`, TypeScript Claude Code plugin in `plugin/signaller/`.
 
 **Spec:** `docs/superpowers/specs/2026-11-02-downstreams-design.md`
 
@@ -22,7 +22,7 @@
 - Manual prices: USD per 1M tokens, keys `in`, `out`, `cache_read`, `cache_write`; all-blank = unpriced.
 - Valar keeps colour `#2F6DB5`; palette for new downstreams (in order, skipping used): `#1F8A5B #6B5BD6 #C8412F #8A6D1F #1F7A8A #A0418A`.
 - No new dependencies.
-- Run everything with `pytest -q tests` (unittest-style and pytest-style tests both live there) and `claude plugin test plugin/router-lever`.
+- Run everything with `pytest -q tests` (unittest-style and pytest-style tests both live there) and `claude plugin test plugin/signaller`.
 
 ## Review Focus
 
@@ -55,7 +55,7 @@
 - Validation: enabled DSL rules' `go` targets, otherwise, labels, shadows, lever must be in `tracks(cfg)`; classifier upstream in downstream ids or `"none"`; ≤ 6 downstreams; unique ids via `valid_id`; `kind valar` requires `windows` for every tier; generic `prices` either None or four non-negative numbers.
 - `DEFAULT_CONFIG`: one Valar downstream (today's models, all windows `asap`), tier rule and labels as today, shadow `{"anthropic": "valar", "valar": "anthropic"}`, Tags text without the local line, `seeded: False`.
 
-- [ ] **Step 0: Fixture:** `mkdir -p tests/fixtures && cp ~/.config/claude-router/console.json tests/fixtures/console_v2.json` (the person's real v2 config; it holds no keys). Main-thread requests only in the routing assertions below (its tier rule also has `subagent` lines).
+- [ ] **Step 0: Fixture:** `mkdir -p tests/fixtures && cp ~/.config/signaller/console.json tests/fixtures/console_v2.json` (the person's real v2 config; it holds no keys). Main-thread requests only in the routing assertions below (its tier rule also has `subagent` lines).
 - [ ] **Step 1: Write failing tests** in `tests/test_routing.py`:
   - `test_v2_real_config_migrates_without_routing_change`: load `tests/fixtures/console_v2.json` (Step 0); assert `[d.id for d in cfg.downstreams] == ["valar"]`, `cfg.downstreams[0].models["opus"] == "zai-org/GLM-5.3"`, Tags text `== "when tag is planning go anthropic\nwhen tag is execution go valar"`, `cfg.migrated_off == ()`, and `route()` of an opus/sonnet/haiku/`#planning` request gives the same track as before (`anthropic`, `valar`, `valar`, `anthropic`).
   - `test_v2_local_references_repointed`: v2 with lever `local`, otherwise `local`, label track `local`, upstream `local`, shadow `anthropic: local`, a custom rule `when tag is x go local` → lever `rules`, otherwise `anthropic`, label `anthropic`, upstream `valar`, shadow `anthropic: None`, custom rule `enabled is False`, `migrated_off == ("<that rule's name>",)`.
@@ -76,7 +76,7 @@
 
 **Files:**
 - Create: `keys.py`
-- Modify: `claude_router.py` (Config, `load_config`, App init), `env.example`, `compose.yaml`
+- Modify: `signaller.py` (Config, `load_config`, App init), `env.example`, `compose.yaml`
 - Test: `tests/test_keys.py`, `tests/test_proxy.py`
 
 **Interfaces:**
@@ -94,14 +94,14 @@
 ### Task 3: Proxy, doubling and classifier on downstreams
 
 **Files:**
-- Modify: `claude_router.py` (`upstream`, `KEY_VAR`, request path at ~269-310, startup line), `doubling.py:125-216`, `classifier.py`
+- Modify: `signaller.py` (`upstream`, `KEY_VAR`, request path at ~269-310, startup line), `doubling.py:125-216`, `classifier.py`
 - Test: `tests/test_proxy.py`, `tests/test_doubling.py`, `tests/test_classifier.py`
 
 **Interfaces:**
 - Consumes: Task 1 `downstream()`, `track_model`, `track_window`; Task 2 `App.keys`.
 - Produces `upstream(app, track: str) -> tuple[str, str, str, Downstream | None]` (display name, base url, key, downstream); anthropic returns `("Anthropic", cfg.anthropic_url, "", None)`.
 - Valar extras (window header, `hoist_inline_tools`, classifier `reasoning_effort: "none"`) when `ds.kind == "valar"`, never `track == "valar"`.
-- A route to a downstream with no key → 502 `claude-router: <name> has no key; set it in the console`.
+- A route to a downstream with no key → 502 `signaller: <name> has no key; set it in the console`.
 - `Doubler(store, open_upstream, ...)`: caps created lazily per track, 2 each.
 - `Classifier(resolve: Callable[[str], tuple[str, str, str] | None])` — upstream id → (url, key, kind); `upstream == "none"` → no result (rule decides nothing).
 
@@ -114,7 +114,7 @@
 ### Task 4: Prices and the store per downstream
 
 **Files:**
-- Modify: `prices.py`, `store.py` (summary ~342-380, stats ~484, reprice ~436, NullStore), `claude_router.py` (`refresh_valar_prices` → `refresh_prices`)
+- Modify: `prices.py`, `store.py` (summary ~342-380, stats ~484, reprice ~436, NullStore), `signaller.py` (`refresh_valar_prices` → `refresh_prices`)
 - Test: `tests/test_prices.py`, `tests/test_store.py`
 
 **Interfaces:**
@@ -133,7 +133,7 @@
 ### Task 5: Console API for downstreams
 
 **Files:**
-- Modify: `console.py` (`state`, `/ui/api/models`, `/ui/api/lever`, new routes), `claude_router.py` (App: `add_downstream`, `delete_downstream`)
+- Modify: `console.py` (`state`, `/ui/api/models`, `/ui/api/lever`, new routes), `signaller.py` (App: `add_downstream`, `delete_downstream`)
 - Test: `tests/test_console.py`
 
 **Interfaces:**
@@ -157,16 +157,16 @@
 ### Task 6: Plugin modes from the router
 
 **Files:**
-- Modify: `plugin/router-lever/hooks/register.ts`, `plugin/router-lever/.claude-plugin/plugin.json` (0.5.0), `plugin/router-lever/tests/gate.test.ts`
+- Modify: `plugin/signaller/hooks/register.ts`, `plugin/signaller/.claude-plugin/plugin.json` (0.5.0), `plugin/signaller/tests/gate.test.ts`
 
 **Interfaces:**
 - Consumes: Task 5 `modes` in lever responses.
 - `MODES` becomes the last `modes` the router returned (seeded `['rules','anthropic']` until the first answer); used by `/router`, the `router_lever` tool's validation, and the `/router <mode>` grant. The tool's `inputSchema` drops the `enum` (modes change at runtime); its description lists "rules, anthropic, or a downstream's id".
 
 - [ ] **Step 1: Failing test** in `gate.test.ts`: fake lever response with `modes: ['rules','anthropic','lemmi']`; after a prompt `do /router lemmi`, the tool call `lever: 'lemmi'` succeeds; `lever: 'local'` → deny `Unknown lever`.
-- [ ] **Step 2: Run** `claude plugin test plugin/router-lever` — FAIL.
+- [ ] **Step 2: Run** `claude plugin test plugin/signaller` — FAIL.
 - [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** plugin test and `claude plugin validate plugin/router-lever` — PASS.
+- [ ] **Step 4: Run** plugin test and `claude plugin validate plugin/signaller` — PASS.
 - [ ] **Step 5: Commit** `feat(plugin): /router modes come from the router's downstreams`
 
 ### Task 7: Console UI generated from downstreams
@@ -197,8 +197,8 @@
 - Tracks row: edit name/models/windows/prices via config PUT; "Replace key" field (empty keeps); "Delete" with a confirm; a 409 shows its `references` as a list.
 
 - [ ] **Step 1:** Build the wizard and row actions.
-- [ ] **Step 2: Verify end to end in the browser against the real lemmi** (URL `https://lemmi.wilfoaware.com`, key from `.env.lemmi`'s `env.ANTHROPIC_AUTH_TOKEN`; paste it into the wizard via Playwright, never echo it): probe lists `deepseek-v4.1-flash` (kind generic); one-model shortcut fills all tiers; save; lever button "lemmi" appears; `ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude -p "do /router lemmi, then say pong"` with `--plugin-dir plugin/router-lever` routes to lemmi (departure shows lemmi, status 200); delete while the session lever points at lemmi → refused naming it; `/router reset`; delete → gone from lever, yard, Tracks, keys file.
-- [ ] **Step 3:** `pytest -q tests` and `claude plugin test plugin/router-lever` — PASS.
+- [ ] **Step 2: Verify end to end in the browser against the real lemmi** (URL `https://lemmi.wilfoaware.com`, key from `.env.lemmi`'s `env.ANTHROPIC_AUTH_TOKEN`; paste it into the wizard via Playwright, never echo it): probe lists `deepseek-v4.1-flash` (kind generic); one-model shortcut fills all tiers; save; lever button "lemmi" appears; `ANTHROPIC_BASE_URL=http://127.0.0.1:8787 claude -p "do /router lemmi, then say pong"` with `--plugin-dir plugin/signaller` routes to lemmi (departure shows lemmi, status 200); delete while the session lever points at lemmi → refused naming it; `/router reset`; delete → gone from lever, yard, Tracks, keys file.
+- [ ] **Step 3:** `pytest -q tests` and `claude plugin test plugin/signaller` — PASS.
 - [ ] **Step 4: Commit** `feat(ui): wizard to add a downstream; delete from the Tracks row`
 
 ### Task 9: Docs and deploy
@@ -207,6 +207,6 @@
 - Modify: `README.md` (overview diagram, defaults table, env vars, `/router` modes, console sections, cost, manual test steps that use local), `docs/superpowers/specs/2026-11-02-downstreams-design.md` (status line)
 
 - [ ] **Step 1:** Update the README: downstreams section (wizard, delete rules, keys file, Valar extras by kind), remove LiteLLM/Local, `/router <downstream id>`.
-- [ ] **Step 2:** Back up `~/.config/claude-router/console.json` to the scratchpad, `docker compose up -d --build`, check `/ui/api/state` loads (no banner other than any migrated-off rules), Valar row and yard look as before, and the router log has no errors (inspect `stats.db` only via the API or `docker exec`, never host `sqlite3`).
+- [ ] **Step 2:** Back up `~/.config/signaller/console.json` to the scratchpad, `docker compose up -d --build`, check `/ui/api/state` loads (no banner other than any migrated-off rules), Valar row and yard look as before, and the router log has no errors (inspect `stats.db` only via the API or `docker exec`, never host `sqlite3`).
 - [ ] **Step 3:** `pytest -q tests` — PASS.
 - [ ] **Step 4: Commit** `docs: downstreams`
