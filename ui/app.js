@@ -683,8 +683,9 @@ function trow(d) {
 function ctxLine(t, d, m, errNode) {
   const model = d.models[m], manual = d.context && d.context[model], listed = CTX[t] && CTX[t][model];
   const win = manual != null ? manual : listed != null ? listed : null;
-  const suffix = win == null ? "" : `${win === manual ? "set here" : "listed"} · compacts at ${Math.floor(win * 0.9 / 1000)}K`;
-  return el("span", { class: "tctx" }, "context ",
+  // ≤: 90% is the ceiling (compact.LIMIT); the router compacts sooner when a request asks for a large max_tokens
+  const suffix = win == null ? "" : `${win === manual ? "set here" : "listed"} · compacts at ≤${Math.floor(win * 0.9 / 1000)}K`;
+  return el("span", { class: "tctx", title: "The router compacts at 90% of the window, or sooner when a request asks for a large max_tokens (the window minus max_tokens, never below half the window)." }, "context ",
     el("input", { type: "text", inputmode: "numeric", spellcheck: "false", autocomplete: "off", value: win == null ? "" : win,
       placeholder: "unknown — no check", "data-k": `ctx:${t}:${m}`, "aria-label": `${d.name} context window for ${model}`,
       onchange: (e) => {
@@ -710,7 +711,7 @@ const MODELS = {}, CTX = {}, WARN = {}, ASKED = new Set();  // track → model i
 function modelPick(t, value, attrs, onPick) {
   const ids = MODELS[t];
   if (!ids) return el("input", { ...attrs, value, spellcheck: "false", autocomplete: "off", onchange: (e) => onPick(e.target.value.trim()) });
-  return el("select", { ...attrs, onchange: (e) => onPick(e.target.value) },
+  return el("select", { ...attrs, title: value, onchange: (e) => onPick(e.target.value) },  // title: the full id when a narrow column truncates it
     (ids.includes(value) ? ids : [value, ...ids]).map((m) => el("option", { value: m, selected: m === value }, ids.includes(m) ? m : m + " (not listed)")));
 }
 // GET /ui/api/models?track=…: the router asks the downstream with its key; the key never reaches the page

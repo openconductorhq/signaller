@@ -124,13 +124,23 @@ h3{font-size:20px;margin:0 0 10px;font-weight:600;letter-spacing:.3px}
 
 /* tracks */
 #tracks{margin-top:22px}
-.tracks{display:grid;gap:10px}
+.tracks{display:grid;gap:10px;container-type:inline-size}
 .trow{background:#fff;border-radius:10px;padding:12px 14px;border-left:5px solid var(--c);display:grid;grid-template-columns:150px repeat(4,minmax(0,1fr));gap:12px;align-items:end}
-.tracks .trow{flex-wrap:wrap}  /* the train card's .trow rule makes this row flex too: wrap rather than overflow */
+/* a row adapts to its own width, not the screen's: four model columns while each keeps about 190px, then two, then one
+   (never three and an orphan). The rows under it (prices, actions, notes) always span the model columns. */
+@container (max-width:960px){
+  .tracks .trow{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .tracks .trow>:first-child{grid-column:1/-1}
+  .tracks .tprices,.tracks .tacts,.tracks .trow .warn,.tracks .trow .tnote{grid-column:1/-1}
+}
+@container (max-width:420px){
+  .tracks .trow{grid-template-columns:minmax(0,1fr)}
+}
 .tname{font-family:var(--cond);font-size:22px;font-weight:600;line-height:1}
-.tmeta{font-size:11.5px;color:var(--muted);margin-top:4px;font-family:var(--mono)}
+.tmeta{font-size:11.5px;color:var(--muted);margin-top:4px;font-family:var(--mono);overflow-wrap:anywhere}
 .tmeta .ok{color:var(--ok)}.tmeta .no{color:var(--stop)}.tkey{white-space:nowrap}
-label.f{font-size:11.5px;color:var(--muted);display:grid;gap:3px}
+label.f{font-size:11.5px;color:var(--muted);display:grid;gap:3px;min-width:0}
+.f select{min-width:0;text-overflow:ellipsis}
 .f input,.f select{font:13px var(--mono);color:var(--ink);background:var(--paper);border:1px solid var(--off);border-radius:6px;padding:6px 8px;width:100%}
 .tprices{grid-column:2/-1;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:11.5px;color:var(--muted)}
 .tprices input{width:80px;font:12px var(--mono);color:var(--ink);background:var(--paper);border:1px solid var(--off);border-radius:6px;padding:4px 6px}
@@ -149,7 +159,7 @@ input.tname:hover,input.tname:focus{border-color:var(--off);background:var(--pap
 .wtest{font-size:12.5px;margin-left:8px}.wtest.ok{color:var(--ok)}.wtest.no{color:var(--stop)}
 .trow .warn{grid-column:2/-1;font-size:12px;color:#7a4b00;background:#FBEFD9;border-radius:6px;padding:5px 8px;margin:0}
 .trow .tnote{grid-column:2/-1;font-size:12px;color:var(--muted);margin:0}
-.tctx{display:flex;flex-wrap:wrap;gap:2px 6px;align-items:center;font-size:11px}
+.tctx{display:flex;flex-wrap:wrap;gap:2px 6px;align-items:center;font-size:11px;color:var(--muted)}
 .tctx input{width:88px;font:12px var(--mono);color:var(--ink);background:var(--paper);border:1px solid var(--off);border-radius:6px;padding:2px 6px}
 .tctx .err{flex-basis:100%;margin:0}
 
@@ -339,10 +349,10 @@ ol.prlist>li{padding:10px 4px;border-top:1px solid var(--line)}
 /* train card */
 #trainCard{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
 #trainCard h3{font-size:17px;margin:0 0 4px}
-.trow{display:flex;gap:8px;align-items:baseline;padding:3px 0;font-size:13px;cursor:pointer}
-.trow input{margin:0}
-.trow b{min-width:110px}
-.trow span{color:var(--muted)}
+#trainCard .trow{display:flex;gap:8px;align-items:baseline;padding:3px 0;font-size:13px;cursor:pointer}
+#trainCard .trow input{margin:0}
+#trainCard .trow b{min-width:110px}
+#trainCard .trow span{color:var(--muted)}
 .ttotals{font-size:13px;font-weight:600;margin:8px 0 0}
 .tcut{font-size:12.5px;color:var(--muted);margin:4px 0 0}
 .tcap{display:flex;gap:6px;align-items:center;font-size:12.5px;color:var(--muted);margin-top:8px}

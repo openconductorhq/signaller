@@ -529,7 +529,8 @@ Open `http://127.0.0.1:8787/ui` (loopback only).
   model dropdown has a context-window line (see
   [Compacting for a downstream's window](#compacting-for-a-downstreams-window)):
   the window for that model — manual, or the listed one — and where the router
-  would compact ("compacts at 765K"). The classifier's
+  would compact at most ("compacts at ≤765K"; sooner when a request asks for
+  a large `max_tokens`). The classifier's
   upstream and model are set here too. When a schedule line is in force for
   every session (a blank or hour-only condition), the window it sets is
   outlined on the row with "Priority now · line N"; the filled pill stays the
