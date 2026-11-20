@@ -19,7 +19,7 @@ import autotrain
 import console
 import overrides
 from signaller import App, Config, make_server
-from routing import MODEL_TIERS
+from routing import MODEL_TIERS, references
 from tests import test_proxy
 from tests.test_autotrain import write_transcript, user as tu, asst as ta
 from tests.test_proxy import body_for, HDRS, CLASSIFIER_OFF, VALAR
@@ -327,6 +327,18 @@ class ConsoleTest(Fixture):
         self.assertEqual(self.js("DELETE", "/ui/api/sessions/unknown")[0], 200)
         self.assertEqual(self.req("DELETE", "/ui/api/sessions/a.b")[0].status, 400)
         self.assertEqual(self.req("DELETE", "/ui/api/sessions/s1", origin=None)[0].status, 403)
+
+    def test_forget_session_drops_its_lever_and_settings(self):
+        # a forgotten session can't be seen in the console, so nothing of it may block deleting a downstream
+        self.js("PUT", "/ui/api/name", {"session": "s1", "name": "doomed"})
+        self.js("PUT", "/ui/api/lever", {"session": "s1", "lever": "valar"})
+        self.app.routing = replace(self.app.routing, settings=overrides.settings_from_json(
+            [{"when": "session is s1", "downstream": "valar", "tier": None, "set": "window", "value": "priority"}],
+            self.app.routing.downstreams))
+        self.assertEqual(self.js("DELETE", "/ui/api/sessions/s1"), (200, {"ok": True}))
+        self.assertNotIn("s1", self.app.session_levers)
+        self.assertEqual(self.app.routing.settings, ())
+        self.assertNotIn("session", " ".join(references(self.app.routing, "valar", self.app.session_levers)))
 
     def test_preview_ignores_lever(self):
         self.post(body_for("claude-sonnet-5-5", {"messages": [{"role": "user", "content": "add schema migration"}]}))

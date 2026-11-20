@@ -393,6 +393,9 @@ def api(h, app, method, path, query, body):
         if not st.forget_session(sid):
             raise Err(503, "the stats database is busy; try again")
         app.sessions.forget(sid)
+        # its lever and settings lines go now, not at the hourly prune: hidden from the console, they'd still block deleting a downstream
+        app.set_session_lever(sid, None)
+        app.prune_settings()  # its sessions row is gone, so the prune rule drops it
         return {"ok": True}
     if path == "/ui/api/name" and method == "PUT":  # /signaller name: what the console calls this session
         body = body if isinstance(body, dict) else {}
